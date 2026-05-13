@@ -201,10 +201,9 @@ kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mon
 
 ```bash
 ./scripts/test.sh              # Run all tests (common + mariadb + mongodb)
-bash tests/common/test.sh      # Common infrastructure tests only
-bash tests/mariadb/test.sh     # MariaDB task tests only
-bash tests/mongodb/test.sh     # MongoDB task tests only
 ```
+
+> **Note:** `tests/common/test.sh`, `tests/mariadb/test.sh`, and `tests/mongodb/test.sh` are not standalone scripts — they are sourced by `scripts/test.sh` and depend on env vars and helper functions (`pass()`, `fail()`, `run_cmd()`) provided by the parent script. Always use `./scripts/test.sh` to run tests.
 
 Tests 1, 2a–2b cover infrastructure and unauthenticated checks. Tests 3–5b cover `common/hello` (both aqsh instances) + log streaming. Test 6 covers in-pod requests to both NodePorts. Tests 7–9 cover `restart` via aqsh-mariadb. Tests 10–12 cover `sanity-check` and `restart` via aqsh-mongodb.
 

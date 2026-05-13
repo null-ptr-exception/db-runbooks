@@ -206,7 +206,7 @@ mongo_check() {
   local out
   if ! out=$(_mongosh_eval "admin" "db.adminCommand({ping:1})" 2>&1); then
     log_error "$op" "Cannot connect to MongoDB: $out"
-    response_err "$op" "Cannot connect to MongoDB" "{\"connection\":\"$conn_label\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Cannot connect to MongoDB" "{\"connection\":\"$conn_label\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -226,7 +226,7 @@ mongo_list_databases() {
   local out
   if ! out=$(_mongosh_eval "admin" "JSON.stringify(db.adminCommand({listDatabases:1}))" 2>&1); then
     log_error "$op" "Failed to list databases: $out"
-    response_err "$op" "Failed to list databases" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list databases" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -247,7 +247,7 @@ mongo_list_collections() {
   local out
   if ! out=$(_mongosh_eval "$database" "JSON.stringify(db.getCollectionNames())" 2>&1); then
     log_error "$op" "Failed to list collections in '$database': $out"
-    response_err "$op" "Failed to list collections" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list collections" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -271,7 +271,7 @@ mongo_create_collection() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to create collection '$collection': $out"
-    response_err "$op" "Failed to create collection" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to create collection" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -295,7 +295,7 @@ mongo_drop_collection() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to drop collection '$collection': $out"
-    response_err "$op" "Failed to drop collection" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to drop collection" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -317,7 +317,7 @@ mongo_drop_database() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to drop database '$database': $out"
-    response_err "$op" "Failed to drop database" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to drop database" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -344,7 +344,7 @@ mongo_insert_one() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to insert document into '$database.$collection': $out"
-    response_err "$op" "Insert failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Insert failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -370,7 +370,7 @@ mongo_insert_many() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to insert documents into '$database.$collection': $out"
-    response_err "$op" "InsertMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "InsertMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -400,7 +400,7 @@ mongo_find() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Find failed in '$database.$collection': $out"
-    response_err "$op" "Find failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Find failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -425,7 +425,7 @@ mongo_find_one() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "FindOne failed in '$database.$collection': $out"
-    response_err "$op" "FindOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "FindOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -450,7 +450,7 @@ mongo_count() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Count failed in '$database.$collection': $out"
-    response_err "$op" "Count failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Count failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -478,7 +478,7 @@ mongo_update_one() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "UpdateOne failed in '$database.$collection': $out"
-    response_err "$op" "UpdateOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "UpdateOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -505,7 +505,7 @@ mongo_update_many() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "UpdateMany failed in '$database.$collection': $out"
-    response_err "$op" "UpdateMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "UpdateMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -531,7 +531,7 @@ mongo_upsert_one() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Upsert failed in '$database.$collection': $out"
-    response_err "$op" "Upsert failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Upsert failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -556,7 +556,7 @@ mongo_delete_one() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "DeleteOne failed in '$database.$collection': $out"
-    response_err "$op" "DeleteOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "DeleteOne failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -581,7 +581,7 @@ mongo_delete_many() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "DeleteMany failed in '$database.$collection': $out"
-    response_err "$op" "DeleteMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "DeleteMany failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -608,7 +608,7 @@ mongo_aggregate() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Aggregation failed on '$database.$collection': $out"
-    response_err "$op" "Aggregation failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Aggregation failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -636,7 +636,7 @@ mongo_create_index() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to create index on '$database.$collection': $out"
-    response_err "$op" "Index creation failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Index creation failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -660,7 +660,7 @@ mongo_list_indexes() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to list indexes on '$database.$collection': $out"
-    response_err "$op" "List indexes failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "List indexes failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -687,7 +687,7 @@ mongo_drop_index() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to drop index '$index_name' on '$database.$collection': $out"
-    response_err "$op" "Drop index failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"index\":\"$index_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Drop index failed" "{\"database\":\"$database\",\"collection\":\"$collection\",\"index\":\"$index_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -708,7 +708,7 @@ mongo_server_status() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "Failed to retrieve server status: $out"
-    response_err "$op" "Failed to retrieve server status" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to retrieve server status" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -729,7 +729,7 @@ mongo_rs_status() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "Failed to retrieve replica set status: $out"
-    response_err "$op" "Failed to retrieve replica set status" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to retrieve replica set status" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -750,7 +750,7 @@ mongo_rs_config() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "Failed to retrieve replica set config: $out"
-    response_err "$op" "Failed to retrieve replica set config" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to retrieve replica set config" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -771,7 +771,7 @@ mongo_rs_is_primary() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "hello check failed: $out"
-    response_err "$op" "hello check failed" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "hello check failed" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -801,7 +801,7 @@ mongo_current_op() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "currentOp failed: $out"
-    response_err "$op" "currentOp failed" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "currentOp failed" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -823,7 +823,7 @@ mongo_kill_op() {
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "killOp failed for opId=$op_id: $out"
-    response_err "$op" "killOp failed" "{\"opId\":$op_id,\"detail\":\"$out\"}" 1
+    response_err "$op" "killOp failed" "{\"opId\":$op_id,\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -854,7 +854,7 @@ mongo_create_user() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to create user '$username': $out"
-    response_err "$op" "Failed to create user" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to create user" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -878,7 +878,7 @@ mongo_drop_user() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to drop user '$username': $out"
-    response_err "$op" "Failed to drop user" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to drop user" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -900,7 +900,7 @@ mongo_list_users() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to list users in '$database': $out"
-    response_err "$op" "Failed to list users" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list users" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -928,7 +928,7 @@ mongo_update_user_password() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to update password for '$username': $out"
-    response_err "$op" "Failed to update user password" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to update user password" "{\"database\":\"$database\",\"username\":\"$username\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -952,7 +952,7 @@ mongo_collection_stats() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to get stats for '$database.$collection': $out"
-    response_err "$op" "Failed to get collection stats" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get collection stats" "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -977,7 +977,7 @@ mongo_eval_js() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "JS eval failed in '$database': $out"
-    response_err "$op" "JS evaluation failed" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "JS evaluation failed" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -999,7 +999,7 @@ mongo_db_stats() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to get stats for '$database': $out"
-    response_err "$op" "Failed to get database stats" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get database stats" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1029,7 +1029,7 @@ mongo_rename_collection() {
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "Failed to rename '$from_col' → '$to_col' in '$database': $out"
     response_err "$op" "Rename collection failed" \
-      "{\"database\":\"$database\",\"from\":\"$from_col\",\"to\":\"$to_col\",\"detail\":\"$out\"}" 1
+      "{\"database\":\"$database\",\"from\":\"$from_col\",\"to\":\"$to_col\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1055,7 +1055,7 @@ mongo_validate_collection() {
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Validation failed for '$database.$collection': $out"
     response_err "$op" "Validation failed" \
-      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1104,7 +1104,7 @@ JSEOF
   local out
   if ! out=$(_mongosh_eval "local" "$js" 2>&1); then
     log_error "$op" "Failed to retrieve oplog status: $out"
-    response_err "$op" "Failed to retrieve oplog status" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to retrieve oplog status" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1141,7 +1141,7 @@ JSEOF
   local out
   if ! out=$(_mongosh_eval "admin" "$js" 2>&1); then
     log_error "$op" "Failed to retrieve replication lag: $out"
-    response_err "$op" "Failed to retrieve replication lag" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to retrieve replication lag" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1163,7 +1163,7 @@ mongo_get_profiling() {
   local out
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to get profiling status for '$database': $out"
-    response_err "$op" "Failed to get profiling status" "{\"database\":\"$database\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get profiling status" "{\"database\":\"$database\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1190,7 +1190,7 @@ mongo_set_profiling() {
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Failed to set profiling in '$database': $out"
     response_err "$op" "Failed to set profiling" \
-      "{\"database\":\"$database\",\"level\":$level,\"slowms\":$slowms,\"detail\":\"$out\"}" 1
+      "{\"database\":\"$database\",\"level\":$level,\"slowms\":$slowms,\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1221,7 +1221,7 @@ mongo_explain() {
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Explain failed on '$database.$collection': $out"
     response_err "$op" "Explain failed" \
-      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -1250,7 +1250,7 @@ mongo_bulk_write() {
   if ! out=$(_mongosh_eval "$database" "$js" 2>&1); then
     log_error "$op" "Bulk write failed on '$database.$collection': $out"
     response_err "$op" "Bulk write failed" \
-      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$out\"}" 1
+      "{\"database\":\"$database\",\"collection\":\"$collection\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 

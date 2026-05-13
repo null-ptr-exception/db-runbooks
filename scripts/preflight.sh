@@ -22,8 +22,14 @@ _arch() {
   esac
 }
 
+_APT_UPDATED=0
 _install_apt() {
   local pkgs=("$@")
+  if [[ "$_APT_UPDATED" -eq 0 ]]; then
+    _fix "Updating apt package index"
+    DEBIAN_FRONTEND=noninteractive sudo apt-get update -qq >/dev/null 2>&1
+    _APT_UPDATED=1
+  fi
   _fix "Installing via apt-get: ${pkgs[*]}"
   DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends "${pkgs[@]}" >/dev/null 2>&1
 }
@@ -116,7 +122,6 @@ check_apt_tools() {
   command -v envsubst &>/dev/null || missing+=(gettext-base)
 
   if [ ${#missing[@]} -gt 0 ]; then
-    sudo apt-get update -qq >/dev/null 2>&1
     _install_apt "${missing[@]}"
   fi
 

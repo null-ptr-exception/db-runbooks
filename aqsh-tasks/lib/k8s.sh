@@ -95,11 +95,11 @@ k8s_check() {
         --max-time 5 \
         "https://${api_host}:${api_port}/healthz" 2>&1); then
       log_error "$op" "Cannot reach cluster API: $out"
-      response_err "$op" "Cannot reach cluster" "{\"detail\":\"$(echo "$out" | head -1)\"}" 1
+      response_err "$op" "Cannot reach cluster" "{\"detail\":\"$(_escape_json_string "$(echo "$out" | head -1)")\"}" 1
       return 1
     fi
     log_info "$op" "Cluster is reachable (in-cluster curl)"
-    response_ok "$op" "Cluster is reachable" "{\"healthz\":\"$out\"}"
+    response_ok "$op" "Cluster is reachable" "{\"healthz\":\"$(_escape_json_string "$out")\"}"
     return 0
   fi
 
@@ -113,12 +113,12 @@ k8s_check() {
   local out
   if ! out=$(_kubectl_global cluster-info --request-timeout=5s 2>&1); then
     log_error "$op" "Cannot reach cluster: $out"
-    response_err "$op" "Cannot reach cluster" "{\"detail\":\"$(echo "$out" | head -1)\"}" 1
+    response_err "$op" "Cannot reach cluster" "{\"detail\":\"$(_escape_json_string "$(echo "$out" | head -1)")\"}" 1
     return 1
   fi
 
   log_info "$op" "Cluster is reachable (kubectl)"
-  response_ok "$op" "Cluster is reachable" "{\"info\":\"$(echo "$out" | head -1)\"}"
+  response_ok "$op" "Cluster is reachable" "{\"info\":\"$(_escape_json_string "$(echo "$out" | head -1)")\"}"
 }
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ k8s_get_namespaces() {
   local out
   if ! out=$(_kubectl_global get namespaces -o json 2>&1); then
     log_error "$op" "Failed to list namespaces: $out"
-    response_err "$op" "Failed to list namespaces" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list namespaces" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -181,7 +181,7 @@ k8s_create_namespace() {
 
   if ! out=$(_kubectl_global create namespace "$namespace" 2>&1); then
     log_error "$op" "Failed to create namespace '$namespace': $out"
-    response_err "$op" "Failed to create namespace" "{\"namespace\":\"$namespace\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to create namespace" "{\"namespace\":\"$namespace\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -206,7 +206,7 @@ k8s_get_pods() {
   local out
   if ! out=$(_kubectl get pods "${args[@]}" 2>&1); then
     log_error "$op" "Failed to list pods: $out"
-    response_err "$op" "Failed to list pods" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list pods" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -227,7 +227,7 @@ k8s_get_pod_status() {
   local out
   if ! out=$(_kubectl get pod "$pod_name" -o json 2>&1); then
     log_error "$op" "Pod '$pod_name' not found or error: $out"
-    response_err "$op" "Pod not found" "{\"pod\":\"$pod_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Pod not found" "{\"pod\":\"$pod_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -250,7 +250,7 @@ k8s_get_sts() {
   local out
   if ! out=$(_kubectl get statefulset "${args[@]}" 2>&1); then
     log_error "$op" "Failed to list StatefulSets: $out"
-    response_err "$op" "Failed to list StatefulSets" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list StatefulSets" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -270,7 +270,7 @@ k8s_filter_sts_by_name() {
   local out
   if ! out=$(_kubectl get statefulset -o json 2>&1); then
     log_error "$op" "Failed to list StatefulSets: $out"
-    response_err "$op" "Failed to list StatefulSets" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list StatefulSets" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -303,7 +303,7 @@ k8s_get_sts_detail() {
   local out
   if ! out=$(_kubectl get statefulset "$sts_name" -o json 2>&1); then
     log_error "$op" "StatefulSet '$sts_name' not found: $out"
-    response_err "$op" "StatefulSet not found" "{\"sts\":\"$sts_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "StatefulSet not found" "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -324,7 +324,7 @@ k8s_scale_sts() {
   local out
   if ! out=$(_kubectl scale statefulset "$sts_name" --replicas="$replicas" 2>&1); then
     log_error "$op" "Failed to scale StatefulSet '$sts_name': $out"
-    response_err "$op" "Failed to scale StatefulSet" "{\"sts\":\"$sts_name\",\"replicas\":$replicas,\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to scale StatefulSet" "{\"sts\":\"$sts_name\",\"replicas\":$replicas,\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -348,7 +348,7 @@ k8s_get_deployments() {
   local out
   if ! out=$(_kubectl get deployment "${args[@]}" 2>&1); then
     log_error "$op" "Failed to list Deployments: $out"
-    response_err "$op" "Failed to list Deployments" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list Deployments" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -369,7 +369,7 @@ k8s_scale_deployment() {
   local out
   if ! out=$(_kubectl scale deployment "$deploy_name" --replicas="$replicas" 2>&1); then
     log_error "$op" "Failed to scale Deployment '$deploy_name': $out"
-    response_err "$op" "Failed to scale Deployment" "{\"deployment\":\"$deploy_name\",\"replicas\":$replicas,\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to scale Deployment" "{\"deployment\":\"$deploy_name\",\"replicas\":$replicas,\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -393,7 +393,7 @@ k8s_get_services() {
   local out
   if ! out=$(_kubectl get service "${args[@]}" 2>&1); then
     log_error "$op" "Failed to list Services: $out"
-    response_err "$op" "Failed to list Services" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list Services" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -412,7 +412,7 @@ k8s_get_nodes() {
   local out
   if ! out=$(_kubectl_global get nodes -o json 2>&1); then
     log_error "$op" "Failed to list nodes: $out"
-    response_err "$op" "Failed to list nodes" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list nodes" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -462,7 +462,7 @@ k8s_get_pod_logs() {
   local out
   if ! out=$(_kubectl logs "${args[@]}" 2>&1); then
     log_error "$op" "Failed to get logs from pod '$pod_name': $out"
-    response_err "$op" "Failed to get pod logs" "{\"pod\":\"$pod_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get pod logs" "{\"pod\":\"$pod_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -486,13 +486,13 @@ k8s_exec() {
   local out
   if ! out=$(_kubectl exec "$pod_name" -- "${cmd[@]}" 2>&1); then
     log_error "$op" "Command failed in pod '$pod_name': $out"
-    response_err "$op" "Command execution failed" "{\"pod\":\"$pod_name\",\"command\":\"${cmd[*]}\",\"output\":\"$out\"}" 1
+    response_err "$op" "Command execution failed" "{\"pod\":\"$pod_name\",\"command\":\"$(_escape_json_string "${cmd[*]}")\",\"output\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
   local escaped_out
   escaped_out=$(echo "$out" | sed ':a;N;$!ba;s/\n/\\n/g' | sed 's/"/\\"/g')
-  response_ok "$op" "Command executed" "{\"pod\":\"$pod_name\",\"command\":\"${cmd[*]}\",\"output\":\"${escaped_out}\"}"
+  response_ok "$op" "Command executed" "{\"pod\":\"$pod_name\",\"command\":\"$(_escape_json_string "${cmd[*]}")\",\"output\":\"${escaped_out}\"}"
 }
 
 # ---------------------------------------------------------------------------
@@ -514,7 +514,7 @@ k8s_apply() {
   local out
   if ! out=$(_kubectl apply -f "$manifest" 2>&1); then
     log_error "$op" "Failed to apply manifest '$manifest': $out"
-    response_err "$op" "Failed to apply manifest" "{\"file\":\"$manifest\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to apply manifest" "{\"file\":\"$manifest\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -537,7 +537,7 @@ k8s_delete_resource() {
   local out
   if ! out=$(_kubectl delete "$resource_type" "$resource_name" 2>&1); then
     log_error "$op" "Failed to delete $resource_type '$resource_name': $out"
-    response_err "$op" "Failed to delete resource" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to delete resource" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -560,7 +560,7 @@ k8s_get_events() {
   local out
   if ! out=$(_kubectl "${args[@]}" 2>&1); then
     log_error "$op" "Failed to get events: $out"
-    response_err "$op" "Failed to get events" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get events" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -582,7 +582,7 @@ k8s_rollout_status() {
   local out
   if ! out=$(_kubectl rollout status "$resource_type/$resource_name" --timeout=120s 2>&1); then
     log_error "$op" "Rollout not complete for $resource_type '$resource_name': $out"
-    response_err "$op" "Rollout not complete" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Rollout not complete" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -603,7 +603,7 @@ k8s_rollout_restart() {
   local out
   if ! out=$(_kubectl rollout restart "$resource_type/$resource_name" 2>&1); then
     log_error "$op" "Failed to restart $resource_type '$resource_name': $out"
-    response_err "$op" "Failed to restart rollout" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to restart rollout" "{\"resource_type\":\"$resource_type\",\"resource_name\":\"$resource_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -623,7 +623,7 @@ k8s_get_configmap() {
   local out
   if ! out=$(_kubectl get configmap "$cm_name" -o json 2>&1); then
     log_error "$op" "ConfigMap '$cm_name' not found: $out"
-    response_err "$op" "ConfigMap not found" "{\"configmap\":\"$cm_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "ConfigMap not found" "{\"configmap\":\"$cm_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -643,7 +643,7 @@ k8s_get_secret() {
   local out
   if ! out=$(_kubectl get secret "$secret_name" -o json 2>&1); then
     log_error "$op" "Secret '$secret_name' not found: $out"
-    response_err "$op" "Secret not found" "{\"secret\":\"$secret_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "Secret not found" "{\"secret\":\"$secret_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -662,7 +662,7 @@ k8s_top_pods() {
   local out
   if ! out=$(_kubectl top pods 2>&1); then
     log_error "$op" "Failed to get pod resource usage: $out"
-    response_err "$op" "Failed to get pod resource usage" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to get pod resource usage" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -695,7 +695,7 @@ k8s_port_forward() {
     local out
     if ! out=$(_kubectl port-forward "$resource" "${local_port}:${remote_port}" 2>&1); then
       log_error "$op" "Port-forward failed: $out"
-      response_err "$op" "Port-forward failed" "{\"resource\":\"$resource\",\"detail\":\"$out\"}" 1
+      response_err "$op" "Port-forward failed" "{\"resource\":\"$resource\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
       return 1
     fi
     response_ok "$op" "Port-forward completed" "{\"resource\":\"$resource\",\"local_port\":$local_port,\"remote_port\":$remote_port}"
@@ -761,7 +761,7 @@ k8s_sts_all_pods_ready() {
   local out
   if ! out=$(_kubectl get statefulset "$sts_name" -o json 2>&1); then
     log_error "$op" "StatefulSet '$sts_name' not found: $out"
-    response_err "$op" "StatefulSet not found" "{\"sts\":\"$sts_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "StatefulSet not found" "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -838,7 +838,7 @@ k8s_get_pvc() {
   local out
   if ! out=$(_kubectl get pvc "${args[@]}" 2>&1); then
     log_error "$op" "Failed to list PVCs: $out"
-    response_err "$op" "Failed to list PVCs" "{\"detail\":\"$out\"}" 1
+    response_err "$op" "Failed to list PVCs" "{\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 
@@ -859,7 +859,7 @@ k8s_get_pvc_detail() {
   local out
   if ! out=$(_kubectl get pvc "$pvc_name" -o json 2>&1); then
     log_error "$op" "PVC '$pvc_name' not found: $out"
-    response_err "$op" "PVC not found" "{\"pvc\":\"$pvc_name\",\"detail\":\"$out\"}" 1
+    response_err "$op" "PVC not found" "{\"pvc\":\"$pvc_name\",\"detail\":\"$(_escape_json_string "$out")\"}" 1
     return 1
   fi
 

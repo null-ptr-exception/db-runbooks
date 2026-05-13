@@ -29,6 +29,6 @@ log_info "mongo-restart" "Done: ${ready:-0}/${replicas:-0} ready"
 jq -n \
   --arg  namespace   "$DB_NAMESPACE" \
   --arg  statefulset "$STS_NAME" \
-  --argjson replicas "${ready:-0}" \
+  --argjson replicas "${replicas:-0}" \
   '{namespace: $namespace, statefulset: $statefulset, replicas: $replicas}' \
   > "$AQSH_RESULT_FILE"

@@ -1,22 +1,35 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: aqsh-db-manager
+  name: aqsh-mongo-manager
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
-    resourceNames: ["mariadb"]
+    resourceNames: ["mongodb"]
     verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["mongodb-credentials"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: aqsh-db-manager
-  namespace: db-1
+  name: aqsh-mongo-manager
+  namespace: mongo-1
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: aqsh-db-manager
+  name: aqsh-mongo-manager
 subjects:
   - kind: ServiceAccount
     name: kube-auth-proxy
@@ -25,12 +38,12 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: aqsh-db-manager
-  namespace: db-2
+  name: aqsh-mongo-manager
+  namespace: mongo-2
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: aqsh-db-manager
+  name: aqsh-mongo-manager
 subjects:
   - kind: ServiceAccount
     name: kube-auth-proxy
@@ -39,12 +52,12 @@ subjects:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: aqsh-db-manager
-  namespace: db-3
+  name: aqsh-mongo-manager
+  namespace: mongo-3
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: aqsh-db-manager
+  name: aqsh-mongo-manager
 subjects:
   - kind: ServiceAccount
     name: kube-auth-proxy

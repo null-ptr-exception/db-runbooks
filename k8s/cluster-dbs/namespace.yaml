@@ -6,14 +6,29 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: db-1
+  name: mariadb-1
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: db-2
+  name: mariadb-2
 ---
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: db-3
+  name: mariadb-3
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongo-1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongo-2
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mongo-3

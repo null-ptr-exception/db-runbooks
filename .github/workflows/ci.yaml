@@ -1,0 +1,162 @@
+name: CI
+
+'on':
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install lint tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck python3-pip
+          python3 -m pip install yamllint
+
+      - name: Run ShellCheck
+        run: |
+          find . -type f -name '*.sh' -print0 \
+            | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: aqsh-tasks/Dockerfile
+          ignore: DL3008,DL4006
+
+      - name: Run yamllint
+        run: |
+          find k8s -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.yaml.tpl' -o -name '*.yml.tpl' \) -print0 \
+            | xargs -0 --no-run-if-empty yamllint -c .yamllint.yaml
+
+  build-image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build aqsh-tasks image
+        run: docker build -t aqsh-tasks:ci ./aqsh-tasks
+
+  integration:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install integration dependencies
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y gettext-base jq
+
+          ARCH="$(dpkg --print-architecture)"
+          KUBECTL_VERSION="v1.30.0"
+          case "$ARCH" in
+            amd64|arm64) ;;
+            *)
+              echo "Unsupported architecture: $ARCH" >&2
+              exit 1
+              ;;
+          esac
+
+          curl -fsSLo kind "https://kind.sigs.k8s.io/dl/latest/kind-linux-${ARCH}"
+          chmod +x kind
+          sudo mv kind /usr/local/bin/kind
+
+          curl -fsSLo kubectl "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl"
+          curl -fsSLo kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl.sha256"
+          echo "$(cat kubectl.sha256)  kubectl" | sha256sum -c -
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          rm -f kubectl.sha256
+
+          curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+          curl -fsSLo skaffold "https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-${ARCH}"
+          chmod +x skaffold
+          sudo mv skaffold /usr/local/bin/skaffold
+
+      - name: Create Kind clusters
+        run: ./scripts/setup-clusters.sh
+
+      - name: Deploy sandbox
+        run: ./scripts/deploy.sh
+
+      - name: Run integration tests
+        id: integration_tests
+        shell: bash
+        run: |
+          set +e
+          LOG_FILE="${RUNNER_TEMP}/integration-test.log"
+
+          ./scripts/test.sh | tee "${LOG_FILE}"
+          TEST_EXIT=${PIPESTATUS[0]}
+
+          SUMMARY_LINE="$(grep -E '=== Results: [0-9]+ passed, [0-9]+ failed ===' "${LOG_FILE}" | tail -n 1 || true)"
+          if [ -n "${SUMMARY_LINE}" ]; then
+            FAILED_COUNT="$(echo "${SUMMARY_LINE}" | sed -E 's/=== Results: [0-9]+ passed, ([0-9]+) failed ===/\1/')"
+            SUMMARY_FOUND=true
+          else
+            FAILED_COUNT=""
+            SUMMARY_FOUND=false
+          fi
+
+          {
+            echo "test_exit=${TEST_EXIT}"
+            echo "summary_found=${SUMMARY_FOUND}"
+            echo "failed_count=${FAILED_COUNT}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Tear down clusters
+        if: always()
+        run: ./scripts/teardown.sh
+
+      - name: Verify integration result
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TEST_EXIT="${{ steps.integration_tests.outputs.test_exit }}"
+          SUMMARY_FOUND="${{ steps.integration_tests.outputs.summary_found }}"
+          FAILED_COUNT="${{ steps.integration_tests.outputs.failed_count }}"
+
+          if [ -z "${TEST_EXIT}" ]; then
+            echo "Integration test step did not produce an exit code." >&2
+            exit 1
+          fi
+
+          if [ "${TEST_EXIT}" -ne 0 ]; then
+            echo "scripts/test.sh exited with ${TEST_EXIT}." >&2
+            exit "${TEST_EXIT}"
+          fi
+
+          if [ "${SUMMARY_FOUND}" != "true" ]; then
+            echo "Did not find the expected test summary line in scripts/test.sh output." >&2
+            exit 1
+          fi
+
+          case "${FAILED_COUNT}" in
+            ''|*[!0-9]*)
+              echo "Failed-count output was missing or non-numeric: '${FAILED_COUNT}'." >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "${FAILED_COUNT}" -gt 0 ]; then
+            echo "scripts/test.sh reported ${FAILED_COUNT} failed tests." >&2
+            exit 1
+          fi

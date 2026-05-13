@@ -8,6 +8,10 @@ echo " db-runbooks: Multi-Cluster Sandbox Setup"
 echo "========================================="
 
 echo ""
+echo "--- Phase 0: Preflight checks ---"
+"${SCRIPT_DIR}/preflight.sh"
+
+echo ""
 echo "--- Phase 1: Create Kind clusters ---"
 "${SCRIPT_DIR}/setup-clusters.sh"
 

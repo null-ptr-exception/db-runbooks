@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: aqsh
+  name: aqsh-mariadb
   namespace: db-ops
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: aqsh
+      app: aqsh-mariadb
   template:
     metadata:
       labels:
-        app: aqsh
+        app: aqsh-mariadb
     spec:
       serviceAccountName: kube-auth-proxy
       containers:
         - name: aqsh
-          image: aqsh-tasks
+          image: aqsh-mariadb
           imagePullPolicy: Never
           env:
             - name: AQSH_MODE
@@ -31,6 +31,8 @@ spec:
               value: /tasks
             - name: AQSH_REQUIRE_IDENTITY
               value: "true"
+            - name: AQSH_WORKER_QUEUES
+              value: "mariadb"
           ports:
             - containerPort: 8080
           livenessProbe:

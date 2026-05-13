@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 export CLUSTER_AUTH_IP CLUSTER_DBS_IP CLUSTER_APPS_IP
 
@@ -15,7 +16,8 @@ kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/names
 kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/namespace.yaml"
 kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/federated-auth-rbac.yaml"
 kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-rbac.yaml"
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-db-rbac.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/rbac.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/rbac.yaml"
 
 kubectl --context kind-cluster-apps apply -f "${ROOT_DIR}/k8s/cluster-apps/namespace.yaml"
 kubectl --context kind-cluster-apps apply -f "${ROOT_DIR}/k8s/cluster-apps/federated-auth-rbac.yaml"
@@ -25,6 +27,7 @@ echo "=== Step 2: Bootstrap credentials ==="
 "${SCRIPT_DIR}/setup-credentials.sh"
 
 # Re-source to pick up ISSUER_DBS and ISSUER_APPS added by setup-credentials.sh
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 export ISSUER_DBS ISSUER_APPS
 
@@ -56,33 +59,54 @@ helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
 
 echo "=== Step 5: Deploy MariaDB instances ==="
 
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb-db-1.yaml"
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb-db-2.yaml"
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb-db-3.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/mariadb-1.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/mariadb-2.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/mariadb-3.yaml"
 
 echo "Waiting for MariaDB instances to be ready..."
-kubectl --context kind-cluster-dbs -n db-1 wait --for=condition=Ready mariadb/mariadb --timeout=180s
-kubectl --context kind-cluster-dbs -n db-2 wait --for=condition=Ready mariadb/mariadb --timeout=180s
-kubectl --context kind-cluster-dbs -n db-3 wait --for=condition=Ready mariadb/mariadb --timeout=180s
+kubectl --context kind-cluster-dbs -n mariadb-1 wait --for=condition=Ready mariadb/mariadb --timeout=180s
+kubectl --context kind-cluster-dbs -n mariadb-2 wait --for=condition=Ready mariadb/mariadb --timeout=180s
+kubectl --context kind-cluster-dbs -n mariadb-3 wait --for=condition=Ready mariadb/mariadb --timeout=180s
 
-echo "=== Step 6: Build and load aqsh-tasks image ==="
+echo "=== Step 5b: Deploy MongoDB instances ==="
+
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/mongo-1.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/mongo-2.yaml"
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/mongo-3.yaml"
+
+echo "Waiting for MongoDB instances to be ready..."
+kubectl --context kind-cluster-dbs -n mongo-1 wait --for=condition=Ready pod -l app=mongodb --timeout=180s
+kubectl --context kind-cluster-dbs -n mongo-2 wait --for=condition=Ready pod -l app=mongodb --timeout=180s
+kubectl --context kind-cluster-dbs -n mongo-3 wait --for=condition=Ready pod -l app=mongodb --timeout=180s
+
+echo "=== Step 6: Build and load aqsh images ==="
 
 skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest --quiet
-kind load docker-image aqsh-tasks:latest --name cluster-dbs
+kind load docker-image aqsh-mariadb:latest --name cluster-dbs
+kind load docker-image aqsh-mongodb:latest --name cluster-dbs
 
 echo "=== Step 7: Deploy cluster-dbs (aqsh + kube-auth-proxy + Redis) ==="
 
 kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml"
 
-envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-deployment.yaml.tpl" | kubectl --context kind-cluster-dbs apply -f -
+envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" | kubectl --context kind-cluster-dbs apply -f -
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml"
 
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-service.yaml"
+envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" | kubectl --context kind-cluster-dbs apply -f -
+kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml"
+
+# Force pods to pick up newly loaded images (imagePullPolicy: Never)
+kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mariadb
+kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mongodb
 
 echo "Waiting for Redis to be ready..."
 kubectl --context kind-cluster-dbs -n db-ops rollout status deployment/redis --timeout=60s
 
-echo "Waiting for aqsh to be ready..."
-kubectl --context kind-cluster-dbs -n db-ops rollout status deployment/aqsh --timeout=120s
+echo "Waiting for aqsh-mariadb to be ready..."
+kubectl --context kind-cluster-dbs -n db-ops rollout status deployment/aqsh-mariadb --timeout=120s
+
+echo "Waiting for aqsh-mongodb to be ready..."
+kubectl --context kind-cluster-dbs -n db-ops rollout status deployment/aqsh-mongodb --timeout=120s
 
 echo "=== Step 8: Deploy cluster-apps (test-client) ==="
 

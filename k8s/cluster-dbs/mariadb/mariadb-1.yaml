@@ -2,15 +2,15 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: mariadb
-  namespace: db-1
+  namespace: mariadb-1
 stringData:
-  password: db1-root-pass
+  password: mariadb1-root-pass
 ---
 apiVersion: k8s.mariadb.com/v1alpha1
 kind: MariaDB
 metadata:
   name: mariadb
-  namespace: db-1
+  namespace: mariadb-1
 spec:
   rootPasswordSecretKeyRef:
     name: mariadb

@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 
 echo "=== Extracting OIDC issuers ==="

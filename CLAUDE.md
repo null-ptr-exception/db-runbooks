@@ -7,7 +7,7 @@ Multi-cluster sandbox for database operations automation with aqsh, kube-auth-pr
 | Context | Cluster | Purpose |
 |---------|---------|---------|
 | kind-cluster-auth | cluster-auth | kube-federated-auth server |
-| kind-cluster-dbs | cluster-dbs | mariadb-operator + aqsh + kube-auth-proxy + Redis |
+| kind-cluster-dbs | cluster-dbs | mariadb-operator + aqsh-mariadb + aqsh-mongodb + kube-auth-proxy + Redis |
 | kind-cluster-apps | cluster-apps | test-client workloads |
 
 ## Namespaces

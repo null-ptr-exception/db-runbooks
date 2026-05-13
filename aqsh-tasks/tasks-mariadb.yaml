@@ -1,10 +1,10 @@
 defaults:
   timeout: 5m
   max_retry: 0
-  queue: default
+  queue: mariadb
 tasks:
-  hello:
-    script: hello.sh
+  common/hello:
+    script: common/hello.sh
     allowed_groups: ["system:serviceaccounts"]
     input:
       - name: name
@@ -12,7 +12,7 @@ tasks:
         required: true
         type: string
   restart:
-    script: restart.sh
+    script: mariadb/restart.sh
     description: "Rolling restart of a MariaDB StatefulSet"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
@@ -21,4 +21,14 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^db-[0-9]+$'
+        pattern: '^mariadb-[0-9]+$'
+      - name: sts_name
+        env: MARIADB_STS_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: pod_selector
+        env: MARIADB_POD_SELECTOR
+        required: false
+        type: string
+        default: app.kubernetes.io/name=mariadb

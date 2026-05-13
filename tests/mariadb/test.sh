@@ -70,8 +70,10 @@ fi
 echo ""
 echo "=== Test 9: Verify MariaDB StatefulSet restarted ==="
 
-kubectl --context kind-cluster-dbs -n mariadb-1 wait pod -l app.kubernetes.io/name=mariadb \
-  --for=condition=Ready --timeout=120s >/dev/null
+if ! kubectl --context kind-cluster-dbs -n mariadb-1 wait pod -l app.kubernetes.io/name=mariadb \
+  --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+  fail "MariaDB pods not ready within 120s"
+fi
 
 AFTER_GENERATION=$(kubectl --context kind-cluster-dbs -n mariadb-1 get statefulset mariadb -o jsonpath='{.status.observedGeneration}')
 READY=$(kubectl --context kind-cluster-dbs -n mariadb-1 get statefulset mariadb -o jsonpath='{.status.readyReplicas}')

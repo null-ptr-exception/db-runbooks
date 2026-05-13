@@ -147,8 +147,15 @@ fi
 echo ""
 echo "=== Test 6: In-pod test from cluster-apps (app-a) ==="
 
-kubectl --context kind-cluster-apps -n app-a wait --for=condition=Ready pod -l app=test-client --timeout=120s >/dev/null
-TEST_POD=$(kubectl --context kind-cluster-apps -n app-a get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+if ! kubectl --context kind-cluster-apps -n app-a wait --for=condition=Ready pod -l app=test-client --timeout=120s >/dev/null 2>&1; then
+  fail "test-client pod not ready within 120s; skipping in-pod tests"
+  return
+fi
+TEST_POD=$(kubectl --context kind-cluster-apps -n app-a get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+if [ -z "$TEST_POD" ]; then
+  fail "could not find test-client pod; skipping in-pod tests"
+  return
+fi
 
 IN_POD_RESPONSE=$(kubectl --context kind-cluster-apps -n app-a exec "$TEST_POD" -- \
   sh -c 'curl -s -w "\n%{http_code}" \

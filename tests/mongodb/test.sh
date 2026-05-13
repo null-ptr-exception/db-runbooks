@@ -124,8 +124,10 @@ fi
 echo ""
 echo "=== Test 12: Verify MongoDB StatefulSet restarted ==="
 
-kubectl --context kind-cluster-dbs -n mongo-1 wait pod -l app=mongodb \
-  --for=condition=Ready --timeout=120s >/dev/null
+if ! kubectl --context kind-cluster-dbs -n mongo-1 wait pod -l app=mongodb \
+  --for=condition=Ready --timeout=120s >/dev/null 2>&1; then
+  fail "MongoDB pods not ready within 120s"
+fi
 
 AFTER_GENERATION=$(kubectl --context kind-cluster-dbs -n mongo-1 get statefulset mongodb -o jsonpath='{.status.observedGeneration}')
 READY=$(kubectl --context kind-cluster-dbs -n mongo-1 get statefulset mongodb -o jsonpath='{.status.readyReplicas}')

@@ -49,7 +49,15 @@ spec:
             readOnlyRootFilesystem: false
           readinessProbe:
             exec:
-              command: ["mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  exec mongosh --quiet --norc \
+                    --username "$MONGO_INITDB_ROOT_USERNAME" \
+                    --password "$MONGO_INITDB_ROOT_PASSWORD" \
+                    --authenticationDatabase admin \
+                    --eval "db.adminCommand({ ping: 1 }).ok"
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5

@@ -114,10 +114,11 @@ check_skaffold() {
 }
 
 check_apt_tools() {
-  echo "=== apt tools (jq, curl, python3, envsubst) ==="
+  echo "=== apt tools (jq, curl, openssl, python3, envsubst) ==="
   local missing=()
   command -v jq       &>/dev/null || missing+=(jq)
   command -v curl     &>/dev/null || missing+=(curl)
+  command -v openssl  &>/dev/null || missing+=(openssl)
   command -v python3  &>/dev/null || missing+=(python3)
   command -v envsubst &>/dev/null || missing+=(gettext-base)
 
@@ -127,6 +128,7 @@ check_apt_tools() {
 
   _ok "jq      $(jq --version)"
   _ok "curl    $(curl --version | head -1)"
+  _ok "openssl $(openssl version)"
   _ok "python3 $(python3 --version)"
   _ok "envsubst $(envsubst --version 2>&1 | head -1)"
 }

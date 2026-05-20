@@ -63,6 +63,11 @@ deploy_region() {
   kubectl --context "$context" -n mongo-2 wait --for=condition=Ready pod -l app=mongodb --timeout=180s
   kubectl --context "$context" -n mongo-3 wait --for=condition=Ready pod -l app=mongodb --timeout=180s
 
+  echo "--- Deploy nginx (needed for MongoDB RS NodePort addresses) ---"
+  kubectl --context "$context" apply -f "${dir}/nginx/configmap.yaml.tpl"
+  kubectl --context "$context" apply -f "${dir}/nginx/deployment.yaml"
+  kubectl --context "$context" apply -f "${dir}/nginx/service.yaml"
+
   echo "--- Initialise MongoDB replica sets ---"
   local CLUSTER_IP
   [[ "$cluster" == "cluster-region-a" ]] && CLUSTER_IP="$REGION_A_IP"
@@ -72,8 +77,14 @@ deploy_region() {
   for ns in mongo-1 mongo-2 mongo-3; do
     RS_NAME="rs-${ns}"
     local STREAM_PORT="${MONGO_PORTS[$ns_idx]}"
+    local ROOT_USER ROOT_PASS
+    ROOT_USER=$(kubectl --context "$context" -n "$ns" \
+      get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
+    ROOT_PASS=$(kubectl --context "$context" -n "$ns" \
+      get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
     kubectl --context "$context" -n "$ns" exec mongodb-0 -- \
-      mongosh --quiet --norc --eval \
+      mongosh --quiet --norc -u "$ROOT_USER" -p "$ROOT_PASS" --authenticationDatabase admin \
+      --eval \
       "try { rs.initiate({_id:'${RS_NAME}',members:[{_id:0,host:'${CLUSTER_IP}:${STREAM_PORT}'}]}) } catch(e) { if(e.codeName!='AlreadyInitialized') throw e }" \
       2>/dev/null || true
     ns_idx=$((ns_idx + 1))
@@ -101,11 +112,6 @@ deploy_region() {
   kubectl --context "$context" apply -f "${dir}/dbs/aqsh-mongodb-service.yaml"
   kubectl --context "$context" -n db-ops rollout restart deployment/aqsh-mariadb
   kubectl --context "$context" -n db-ops rollout restart deployment/aqsh-mongodb
-
-  echo "--- Deploy nginx ---"
-  kubectl --context "$context" apply -f "${dir}/nginx/configmap.yaml.tpl"
-  kubectl --context "$context" apply -f "${dir}/nginx/deployment.yaml"
-  kubectl --context "$context" apply -f "${dir}/nginx/service.yaml"
 
   echo "--- Wait for aqsh & nginx ---"
   kubectl --context "$context" -n db-ops rollout status deployment/redis --timeout=60s

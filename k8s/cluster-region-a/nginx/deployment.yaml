@@ -21,15 +21,15 @@ spec:
               containerPort: 80
             - name: stream-mongo-1
               containerPort: 30092
-            - name: stream-mariadb-1
+            - name: strm-mariadb-1
               containerPort: 30093
             - name: stream-mongo-2
               containerPort: 30094
-            - name: stream-mariadb-2
+            - name: strm-mariadb-2
               containerPort: 30095
             - name: stream-mongo-3
               containerPort: 30096
-            - name: stream-mariadb-3
+            - name: strm-mariadb-3
               containerPort: 30097
           volumeMounts:
             - name: nginx-config

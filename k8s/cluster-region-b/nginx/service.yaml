@@ -17,7 +17,7 @@ spec:
       targetPort: 30092
       nodePort: 30092
       protocol: TCP
-    - name: stream-mariadb-1
+    - name: strm-mariadb-1
       port: 30093
       targetPort: 30093
       nodePort: 30093
@@ -27,7 +27,7 @@ spec:
       targetPort: 30094
       nodePort: 30094
       protocol: TCP
-    - name: stream-mariadb-2
+    - name: strm-mariadb-2
       port: 30095
       targetPort: 30095
       nodePort: 30095
@@ -37,7 +37,7 @@ spec:
       targetPort: 30096
       nodePort: 30096
       protocol: TCP
-    - name: stream-mariadb-3
+    - name: strm-mariadb-3
       port: 30097
       targetPort: 30097
       nodePort: 30097

@@ -87,14 +87,8 @@ deploy_region() {
   kubectl --context "$context" apply -f "${dir}/nginx/service.yaml"
 
   echo "--- Initialise MongoDB replica sets (internal DNS; valid RS member address for mongod self-check) ---"
-  local CLUSTER_IP
-  [[ "$cluster" == "cluster-region-a" ]] && CLUSTER_IP="$REGION_A_IP"
-  [[ "$cluster" == "cluster-region-b" ]] && CLUSTER_IP="$REGION_B_IP"
-  local -a MONGO_PORTS=(30092 30094 30096)
-  local ns_idx=0
   for ns in mongo-1 mongo-2 mongo-3; do
     RS_NAME="rs-${ns}"
-    local STREAM_PORT="${MONGO_PORTS[$ns_idx]}"
     local ROOT_USER ROOT_PASS
     ROOT_USER=$(kubectl --context "$context" -n "$ns" \
       get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
@@ -109,7 +103,6 @@ deploy_region() {
       --eval \
       "try { rs.initiate({_id:'${RS_NAME}',members:[{_id:0,host:'mongodb-0.mongodb.${ns}.svc.cluster.local:27017'}]}) } catch(e) { if(e.codeName!='AlreadyInitialized') throw e }" \
       2>/dev/null || true
-    ns_idx=$((ns_idx + 1))
   done
 
   echo "--- Build & load aqsh images ---"
@@ -161,6 +154,7 @@ kubectl --context kind-cluster-apps-minio -n db-ops wait --for=jsonpath='{.metad
 
 echo "=== Step 2: Bootstrap cross-cluster credentials ==="
 "${SCRIPT_DIR}/setup-credentials.sh"
+# shellcheck source=/dev/null
 source "$ENV_FILE"
 export ISSUER_REGION_A ISSUER_APPS_MINIO
 ISSUER_REGION_B="${ISSUER_REGION_B:-}"

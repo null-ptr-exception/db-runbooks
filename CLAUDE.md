@@ -63,6 +63,7 @@ make single
 
 # Multi region (region-a + region-b + apps-minio, with cross-region replication)
 make multi
+# make multi MONGO_REPLICATION_MODE=3+1
 
 # Tear everything down
 make down
@@ -86,6 +87,7 @@ make test-quick-mariadb # assumes cluster is running
 | `ISSUER_REGION_B` | OIDC issuer URL of cluster-region-b (multi only) |
 | `ISSUER_APPS_MINIO` | OIDC issuer URL of cluster-apps-minio |
 | `MONGO_FLAVOR` | `official` (mongo:7) or `percona` (PSMDB + PBM) |
+| `MONGO_REPLICATION_MODE` | Mongo RS expansion mode in multi: `3+3` (default) or `3+1` |
 
 ## MongoDB Replica Sets
 
@@ -95,13 +97,14 @@ Each namespace (mongo-1/2/3) forms its own RS:
 - `rs-mongo-3` in mongo-3 namespace
 
 In single mode: 1-member RS per namespace (region-a only).
-In multi mode: region-b member added via `scripts/setup-replication.sh`.
+In multi mode:
+- `MONGO_REPLICATION_MODE=3+3` (default): region-b secondary is added to mongo-1/2/3
+- `MONGO_REPLICATION_MODE=3+1`: only mongo-1 adds region-b secondary; mongo-2/3 stay single-member in region-a
 
 Cross-cluster RS connectivity: region-a's RS members reach region-b members via region-b's nginx TCP proxy (NodePorts 30092/30094/30096).
 
 ## MariaDB Replication
 
-Region-a is primary; region-b is async replica. Replication is external to mariadb-operator — configured by `scripts/setup-replication.sh` using `CHANGE MASTER TO` pointing to region-a's nginx NodePort (30093/30095/30097).
+Region-a is primary; region-b is async replica. Replication is managed by mariadb-operator (`spec.replication`) with region-b `externalPrimary` pointing to region-a nginx NodePort (30093/30095/30097). If operator version lacks `externalPrimary`, setup falls back to script `CHANGE MASTER TO` with operator-managed replication prerequisites enabled by CR patch.
 
 Failover: `scripts/mariadb-failover.sh` promotes region-b to writable primary.
-

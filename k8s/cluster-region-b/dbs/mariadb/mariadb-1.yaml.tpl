@@ -20,6 +20,18 @@ spec:
     primary:
       podIndex: 0
       automaticFailover: false
+    replica:
+      waitPoint: AfterSync
+      gtid: CurrentPos
+      externalPrimary:
+        host: "${REGION_A_IP}"
+        port: 30093
+      replicaPasswordSecretKeyRef:
+        name: mariadb-replication-user
+        key: REPLICATION_PASSWORD
+      replicationUserSecretKeyRef:
+        name: mariadb-replication-user
+        key: REPLICATION_USER
   port: 3306
   image: mariadb:10.6
   storage:

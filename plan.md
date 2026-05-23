@@ -41,30 +41,36 @@
 
 ### P0 — 修正 `make single` 偶發 timing 失敗
 
-- [ ] 在 `scripts/setup.sh` Phase 3 前加入 `sleep 5`（或對 nginx health 做 retry 等待）
-- [ ] 驗證 `make single` 能端到端完成（deployment + test 全部 PASS）無需手動介入
+- [x] `scripts/setup.sh` 在 Phase 3 前改為 `http://${REGION_A_IP}:30080/healthz` retry loop（30 次、每次 2 秒）
+- [x] 移除固定 sleep 依賴，改為 readiness-driven 進入 test phase
 
-### P1 — `make multi` 驗證
+### P1 — `make multi` 複寫架構補完
 
-- [ ] 執行 `make multi`
-- [ ] 確認 `cluster-region-b` 部署正常（MariaDB × 3、MongoDB × 3、aqsh、nginx）
-- [ ] 確認跨叢集 kube-federated-auth token 驗證正常
-- [ ] **跨 region MongoDB RS replication**（已知技術問題）：
-  - RS init 使用 internal DNS（僅 cluster-region-a 內可解析）
-  - 跨 region secondary 需用 NodePort 位址加入 RS
-  - 計畫：init 後用 `rs.reconfig({force:true})` 修改 primary 位址為 NodePort，再 `rs.add` cross-region secondary
-- [ ] 執行 `scripts/test.sh` 確認 multi mode 19/19 PASS
+- [x] MariaDB 改為 operator 管理 replication：
+  - region-a `mariadb-{1,2,3}.yaml` 啟用 `spec.replication.primary`
+  - region-b `mariadb-{1,2,3}.yaml.tpl` 啟用 `spec.replication.replica.externalPrimary`
+  - `scripts/setup-replication.sh` 移除手動建立 replication user / binlog position 查詢
+  - 若 operator 不支援 `externalPrimary`，自動 fallback：`kubectl patch` 啟用 operator replication 管理，再以 script 僅做 `CHANGE MASTER TO`
+- [x] MongoDB 跨 region RS 修正：
+  - `rs.reconfig({force:true})` 將 primary member host 改為 region-a NodePort
+  - 再 `rs.add` region-b secondary
+- [x] 新增 `MONGO_REPLICATION_MODE`（預設 `3+3`）：
+  - `3+3`：mongo-1/2/3 全部加入 region-b secondary
+  - `3+1`：只有 mongo-1 加入 region-b secondary
 
-### P2 — MinIO 連線驗證
+### P2 — 跨 region 驗證測試補完
 
-- [ ] 確認 aqsh 任務可寫入 MinIO（mariadb-backups / mongodb-backups bucket）
-- [ ] 驗證 MinIO Console 可存取（http://\<APPS_MINIO_IP\>:30091）
+- [x] 新增 `tests/integration/replication/` BATS 測試：
+  - `01-mariadb-replication.bats`
+  - `02-mongodb-replication.bats`
+  - `03-cross-region-auth.bats`
+  - `helpers.bash`
+- [x] `make test-multi` 對應執行 replication 測試路徑
 
-### P3 — MongoDB sanity-check 狀態改善
+### P3 — 文件同步
 
-- [ ] Test 10 目前回傳 `status=unknown pass=0 warn=0 fail=0`
-- [ ] 調查 sanity-check script 是否需要 RS 為 PRIMARY 才能回傳有效結果
-- [ ] 完整 RS 後重新驗證
+- [x] `CLAUDE.md` Quick Start / Environment Variables 新增 `MONGO_REPLICATION_MODE`
+- [x] 補充 MariaDB operator-native replication 與 MongoDB `3+3` / `3+1` 行為說明
 
 ---
 

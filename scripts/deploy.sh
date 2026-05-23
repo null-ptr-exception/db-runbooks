@@ -13,6 +13,17 @@ export REGION_B_IP
 MODE="${MODE:-single}"
 MONGO_FLAVOR="${MONGO_FLAVOR:-official}"
 
+apply_manifest() {
+  local context="$1"
+  local manifest="$2"
+  [[ -f "$manifest" ]] || return 0
+  if [[ "$manifest" == *.tpl ]]; then
+    envsubst < "$manifest" | kubectl --context "$context" apply -f -
+  else
+    kubectl --context "$context" apply -f "$manifest"
+  fi
+}
+
 deploy_region() {
   local cluster="$1"           # e.g. cluster-region-a
   local context="kind-${cluster}"
@@ -48,9 +59,12 @@ deploy_region() {
     --kube-context "$context" --namespace db-ops --wait
 
   echo "--- MariaDB instances ---"
-  kubectl --context "$context" apply -f "${dir}/dbs/mariadb/mariadb-1.yaml"
-  kubectl --context "$context" apply -f "${dir}/dbs/mariadb/mariadb-2.yaml"
-  kubectl --context "$context" apply -f "${dir}/dbs/mariadb/mariadb-3.yaml"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-1.yaml"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-1.yaml.tpl"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-2.yaml"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-2.yaml.tpl"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-3.yaml"
+  apply_manifest "$context" "${dir}/dbs/mariadb/mariadb-3.yaml.tpl"
   kubectl --context "$context" -n mariadb-1 wait --for=condition=Ready mariadb/mariadb --timeout=180s
   kubectl --context "$context" -n mariadb-2 wait --for=condition=Ready mariadb/mariadb --timeout=180s
   kubectl --context "$context" -n mariadb-3 wait --for=condition=Ready mariadb/mariadb --timeout=180s

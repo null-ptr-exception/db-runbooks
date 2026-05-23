@@ -6,6 +6,8 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
 MODE="${MODE:-single}"
+MONGO_REPLICATION_MODE="${MONGO_REPLICATION_MODE:-3+3}"
+export MONGO_REPLICATION_MODE
 
 echo "=== Creating Kind clusters (MODE=${MODE}) ==="
 
@@ -35,6 +37,7 @@ echo "cluster-apps-minio: $APPS_MINIO_IP"
 
 cat > "$ENV_FILE" <<EOF
 MODE=${MODE}
+MONGO_REPLICATION_MODE=${MONGO_REPLICATION_MODE}
 REGION_A_IP=${REGION_A_IP}
 APPS_MINIO_IP=${APPS_MINIO_IP}
 EOF

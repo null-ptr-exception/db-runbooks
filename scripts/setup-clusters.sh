@@ -5,18 +5,25 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
-CLUSTERS=(cluster-auth cluster-dbs cluster-apps)
-
 echo "=== Creating Kind clusters ==="
 
-for cluster in "${CLUSTERS[@]}"; do
-  if kind get clusters 2>/dev/null | grep -qx "$cluster"; then
-    echo "Cluster $cluster already exists, skipping"
+create_cluster() {
+  local name="$1" config="${2:-}"
+  if kind get clusters 2>/dev/null | grep -qx "$name"; then
+    echo "Cluster $name already exists, skipping"
   else
-    echo "Creating $cluster..."
-    kind create cluster --name "$cluster" --wait 60s
+    echo "Creating $name..."
+    if [[ -n "$config" ]]; then
+      kind create cluster --name "$name" --config "$config" --wait 60s
+    else
+      kind create cluster --name "$name" --wait 60s
+    fi
   fi
-done
+}
+
+create_cluster cluster-auth "${ROOT_DIR}/k8s/kind/cluster-auth.yaml"
+create_cluster cluster-dbs  "${ROOT_DIR}/k8s/kind/cluster-dbs.yaml"
+create_cluster cluster-apps
 
 echo "=== Extracting Docker IPs ==="
 

@@ -20,9 +20,9 @@ common_setup() {
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/.env"
 
-  export MARIADB_AQSH_URL="http://${CLUSTER_DBS_IP}:30081"
-  export MONGODB_AQSH_URL="http://${CLUSTER_DBS_IP}:30082"
-  export FEDAUTH_URL="http://${CLUSTER_AUTH_IP}:30080"
+  export MARIADB_AQSH_URL="http://127.0.0.1:30081"
+  export MONGODB_AQSH_URL="http://127.0.0.1:30082"
+  export FEDAUTH_URL="http://127.0.0.1:30080"
   export CLUSTER_DBS_IP
 
   if [[ "${1:-}" == "--create-token" ]]; then

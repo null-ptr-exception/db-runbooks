@@ -20,6 +20,7 @@ common_setup() {
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/.env"
 
+  export CLUSTER_DBS_IP
   export MARIADB_AQSH_URL="http://${CLUSTER_DBS_IP}:30081"
   export MONGODB_AQSH_URL="http://${CLUSTER_DBS_IP}:30082"
   export FEDAUTH_URL="http://${CLUSTER_AUTH_IP}:30080"

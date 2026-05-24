@@ -25,7 +25,9 @@ common_setup() {
   export MONGODB_AQSH_URL="http://${CLUSTER_DBS_IP}:30082"
   export FEDAUTH_URL="http://${CLUSTER_AUTH_IP}:30080"
 
-  # Resolve the test-client pod for kubectl exec
+  # Wait for test-client pod to be ready, then resolve its name
+  kubectl --context kind-cluster-apps -n app-a wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
   TEST_POD=$(kubectl --context kind-cluster-apps -n app-a \
     get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
   export TEST_POD
@@ -54,7 +56,7 @@ kexec() {
 http_post() {
   local url="$1" body="$2"
   local response
-  response=$(kexec "curl -s -w '\\n%{http_code}' \
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
     -X POST '${url}' \
     -H 'Authorization: Bearer ${TOKEN}' \
     -H 'Content-Type: application/json' \
@@ -77,7 +79,7 @@ wait_for_task() {
   local elapsed=0 status
 
   while (( elapsed < max_wait )); do
-    TASK_RESPONSE=$(kexec "curl -s \
+    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
       -H 'Authorization: Bearer ${TOKEN}' \
       '${base_url}/tasks/${task_id}'")
     export TASK_RESPONSE

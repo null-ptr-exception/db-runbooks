@@ -18,10 +18,10 @@ setup() {
 
   # Verify logs contain expected output
   local logs
-  logs=$(curl -s -m 5 \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Accept: text/event-stream" \
-    "${MARIADB_AQSH_URL}/tasks/${task_id}/logs?follow=false" 2>/dev/null || true)
+  logs=$(kexec "curl -s -m 5 \
+    -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Accept: text/event-stream' \
+    '${MARIADB_AQSH_URL}/tasks/${task_id}/logs?follow=false'" 2>/dev/null || true)
 
   echo "$logs"  # visible on failure
   [[ "$logs" == *"Hello, World!"* ]]

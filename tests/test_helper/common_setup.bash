@@ -8,7 +8,7 @@ load "${HELPER_DIR}/bats-assert/load.bash"
 # ---------------------------------------------------------------------------
 # common_setup — call from setup_file in each .bats file
 #
-# Sources .env, sets URL variables, optionally creates a TOKEN.
+# Sources .env, resolves test-client pod, sets URL variables.
 # Usage:
 #   setup_file() { common_setup; }                   # no token
 #   setup_file() { common_setup --create-token; }    # with token
@@ -20,10 +20,14 @@ common_setup() {
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/.env"
 
-  export MARIADB_AQSH_URL="http://127.0.0.1:30081"
-  export MONGODB_AQSH_URL="http://127.0.0.1:30082"
-  export FEDAUTH_URL="http://127.0.0.1:30080"
-  export CLUSTER_DBS_IP
+  export MARIADB_AQSH_URL="http://${CLUSTER_DBS_IP}:30081"
+  export MONGODB_AQSH_URL="http://${CLUSTER_DBS_IP}:30082"
+  export FEDAUTH_URL="http://${CLUSTER_AUTH_IP}:30080"
+
+  # Resolve the test-client pod for kubectl exec
+  TEST_POD=$(kubectl --context kind-cluster-apps -n app-a \
+    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  export TEST_POD
 
   if [[ "${1:-}" == "--create-token" ]]; then
     export TOKEN
@@ -32,18 +36,28 @@ common_setup() {
 }
 
 # ---------------------------------------------------------------------------
+# kexec <cmd>
+#
+# Runs a command inside the test-client pod via kubectl exec.
+# ---------------------------------------------------------------------------
+kexec() {
+  kubectl --context kind-cluster-apps -n app-a exec "$TEST_POD" -- sh -c "$1"
+}
+
+# ---------------------------------------------------------------------------
 # http_post <url> <json_body>
 #
+# Runs curl inside the test-client pod.
 # Sets HTTP_CODE and HTTP_BODY (exported so @test blocks can read them).
 # ---------------------------------------------------------------------------
 http_post() {
   local url="$1" body="$2"
   local response
-  response=$(curl -s -w '\n%{http_code}' \
-    -X POST "$url" \
-    -H "Authorization: Bearer ${TOKEN}" \
-    -H "Content-Type: application/json" \
-    -d "$body")
+  response=$(kexec "curl -s -w '\\n%{http_code}' \
+    -X POST '${url}' \
+    -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Content-Type: application/json' \
+    -d '${body}'")
 
   HTTP_CODE=$(echo "$response" | tail -1)
   HTTP_BODY=$(echo "$response" | sed '$d')
@@ -62,9 +76,9 @@ wait_for_task() {
   local elapsed=0 status
 
   while (( elapsed < max_wait )); do
-    TASK_RESPONSE=$(curl -s \
-      -H "Authorization: Bearer ${TOKEN}" \
-      "${base_url}/tasks/${task_id}")
+    TASK_RESPONSE=$(kexec "curl -s \
+      -H 'Authorization: Bearer ${TOKEN}' \
+      '${base_url}/tasks/${task_id}'")
     export TASK_RESPONSE
 
     status=$(echo "$TASK_RESPONSE" | jq -r '.status' 2>/dev/null || true)

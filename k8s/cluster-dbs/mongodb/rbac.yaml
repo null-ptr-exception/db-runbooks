@@ -1,4 +1,3 @@
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -25,8 +24,6 @@ rules:
     resources: ["events"]
     verbs: ["get", "list"]
 ---
-# Separate ClusterRole for node read — nodes are cluster-scoped and require
-# a ClusterRoleBinding (namespace-scoped RoleBindings cannot grant node access).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -44,48 +41,6 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: aqsh-mongo-node-reader
-subjects:
-  - kind: ServiceAccount
-    name: kube-auth-proxy
-    namespace: db-ops
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: aqsh-mongo-manager
-  namespace: mongo-1
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aqsh-mongo-manager
-subjects:
-  - kind: ServiceAccount
-    name: kube-auth-proxy
-    namespace: db-ops
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: aqsh-mongo-manager
-  namespace: mongo-2
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aqsh-mongo-manager
-subjects:
-  - kind: ServiceAccount
-    name: kube-auth-proxy
-    namespace: db-ops
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: aqsh-mongo-manager
-  namespace: mongo-3
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: aqsh-mongo-manager
 subjects:
   - kind: ServiceAccount
     name: kube-auth-proxy

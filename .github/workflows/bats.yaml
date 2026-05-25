@@ -1,0 +1,25 @@
+name: BATS Integration Tests
+
+'on':
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: [self-hosted, kata-rophy]
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run BATS tests
+        run: ./scripts/test.sh
+
+      - name: Tear down clusters
+        if: always()
+        run: ./scripts/teardown.sh

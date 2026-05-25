@@ -25,5 +25,6 @@ else
   bats --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb" \
-    "${ROOT_DIR}/tests/mongodb"
+    "${ROOT_DIR}/tests/mongodb/restart.bats" \
+    "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
 fi

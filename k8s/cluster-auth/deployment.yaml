@@ -26,17 +26,26 @@ spec:
               value: kube-federated-auth
           ports:
             - containerPort: 8080
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
           livenessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
+            timeoutSeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
+            timeoutSeconds: 5
             periodSeconds: 10
           volumeMounts:
             - name: config

@@ -113,7 +113,7 @@ echo "=== Step 4: Deploy kube-federated-auth ==="
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/rbac.yaml"
 
 if [[ "$DB_MODE" == "dual" ]]; then
-  export ISSUER_DBS_A ISSUER_DBS_B CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP
+  export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP
   envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual.yaml.tpl" \
     | kubectl --context kind-cluster-auth apply -f -
 else
@@ -126,7 +126,7 @@ kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deplo
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
 
 echo "Waiting for kube-federated-auth to be ready..."
-kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=120s
+kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=240s
 
 echo "=== Step 5: Build aqsh images ==="
 

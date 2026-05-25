@@ -9,7 +9,7 @@ setup() {
 }
 
 teardown_file() {
-  kubectl --context kind-cluster-dbs delete ns mongo-1 --ignore-not-found
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
 }
 
 @test "sanity-check completes without critical issues" {

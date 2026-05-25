@@ -5,9 +5,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
-CLUSTERS=(cluster-auth cluster-dbs cluster-apps)
+DB_MODE="${DB_MODE:-single}"
 
-echo "=== Creating Kind clusters ==="
+if [[ "$DB_MODE" == "dual" ]]; then
+  CLUSTERS=(cluster-auth cluster-dbs-a cluster-dbs-b cluster-apps)
+else
+  CLUSTERS=(cluster-auth cluster-dbs cluster-apps)
+fi
+
+echo "=== Creating Kind clusters (DB_MODE=${DB_MODE}) ==="
 
 for cluster in "${CLUSTERS[@]}"; do
   if kind get clusters 2>/dev/null | grep -qx "$cluster"; then
@@ -25,17 +31,37 @@ get_node_ip() {
 }
 
 CLUSTER_AUTH_IP=$(get_node_ip cluster-auth)
-CLUSTER_DBS_IP=$(get_node_ip cluster-dbs)
 CLUSTER_APPS_IP=$(get_node_ip cluster-apps)
 
 echo "cluster-auth: $CLUSTER_AUTH_IP"
-echo "cluster-dbs:  $CLUSTER_DBS_IP"
 echo "cluster-apps: $CLUSTER_APPS_IP"
 
-cat > "$ENV_FILE" <<EOF
+if [[ "$DB_MODE" == "dual" ]]; then
+  CLUSTER_DBS_A_IP=$(get_node_ip cluster-dbs-a)
+  CLUSTER_DBS_B_IP=$(get_node_ip cluster-dbs-b)
+  echo "cluster-dbs-a: $CLUSTER_DBS_A_IP"
+  echo "cluster-dbs-b: $CLUSTER_DBS_B_IP"
+
+  cat > "$ENV_FILE" <<EOF
+DB_MODE=${DB_MODE}
 CLUSTER_AUTH_IP=${CLUSTER_AUTH_IP}
-CLUSTER_DBS_IP=${CLUSTER_DBS_IP}
+CLUSTER_DBS_A_IP=${CLUSTER_DBS_A_IP}
+CLUSTER_DBS_B_IP=${CLUSTER_DBS_B_IP}
+CLUSTER_DBS_IP=${CLUSTER_DBS_A_IP}
+CLUSTER_DBS_CONTEXT=kind-cluster-dbs-a
 CLUSTER_APPS_IP=${CLUSTER_APPS_IP}
 EOF
+else
+  CLUSTER_DBS_IP=$(get_node_ip cluster-dbs)
+  echo "cluster-dbs:  $CLUSTER_DBS_IP"
+
+  cat > "$ENV_FILE" <<EOF
+DB_MODE=${DB_MODE}
+CLUSTER_AUTH_IP=${CLUSTER_AUTH_IP}
+CLUSTER_DBS_IP=${CLUSTER_DBS_IP}
+CLUSTER_DBS_CONTEXT=kind-cluster-dbs
+CLUSTER_APPS_IP=${CLUSTER_APPS_IP}
+EOF
+fi
 
 echo "=== Wrote $ENV_FILE ==="

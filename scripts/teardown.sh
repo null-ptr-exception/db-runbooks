@@ -5,9 +5,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 ENV_FILE="${ROOT_DIR}/.env"
 
-echo "=== Deleting Kind clusters ==="
+# Determine DB_MODE: env var takes precedence, then .env file, then default single
+if [[ -z "${DB_MODE:-}" ]] && [[ -f "$ENV_FILE" ]]; then
+  DB_MODE=$(grep '^DB_MODE=' "$ENV_FILE" | cut -d= -f2 || true)
+fi
+DB_MODE="${DB_MODE:-single}"
 
-for cluster in cluster-auth cluster-dbs cluster-apps; do
+echo "=== Deleting Kind clusters (DB_MODE=${DB_MODE}) ==="
+
+if [[ "$DB_MODE" == "dual" ]]; then
+  DB_CLUSTERS=(cluster-dbs-a cluster-dbs-b)
+else
+  DB_CLUSTERS=(cluster-dbs)
+fi
+
+for cluster in cluster-auth "${DB_CLUSTERS[@]}" cluster-apps; do
   if kind get clusters 2>/dev/null | grep -qx "$cluster"; then
     echo "Deleting $cluster..."
     kind delete cluster --name "$cluster"

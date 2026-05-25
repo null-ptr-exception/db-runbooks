@@ -10,6 +10,7 @@
 #
 #   # Optional – set a default namespace and/or kubeconfig
 #   K8S_NAMESPACE="default"
+#   K8S_CONTEXT=""      # empty → current context / in-cluster config
 #   K8S_KUBECONFIG=""   # empty → use ~/.kube/config / KUBECONFIG env
 #
 # Every public function returns a JSON string (via response_ok / response_err).
@@ -21,6 +22,7 @@ _K8S_LIB_LOADED=1
 
 # Defaults (callers may override before sourcing or afterwards)
 K8S_NAMESPACE="${K8S_NAMESPACE:-default}"
+K8S_CONTEXT="${K8S_CONTEXT:-}"
 K8S_KUBECONFIG="${K8S_KUBECONFIG:-}"
 
 
@@ -53,6 +55,9 @@ _kubectl() {
   if [[ -n "$K8S_KUBECONFIG" ]]; then
     args+=(--kubeconfig "$K8S_KUBECONFIG")
   fi
+  if [[ -n "$K8S_CONTEXT" ]]; then
+    args+=(--context "$K8S_CONTEXT")
+  fi
   if [[ -n "$K8S_NAMESPACE" ]]; then
     args+=(--namespace "$K8S_NAMESPACE")
   fi
@@ -67,6 +72,9 @@ _kubectl_global() {
   local args=()
   if [[ -n "$K8S_KUBECONFIG" ]]; then
     args+=(--kubeconfig "$K8S_KUBECONFIG")
+  fi
+  if [[ -n "$K8S_CONTEXT" ]]; then
+    args+=(--context "$K8S_CONTEXT")
   fi
   kubectl "${args[@]}" "$@"
 }

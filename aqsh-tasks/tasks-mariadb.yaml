@@ -33,6 +33,88 @@ tasks:
         required: false
         type: string
         default: app.kubernetes.io/name=mariadb
+  sanity-check: &mariadb_sanity_check_task
+    script: mariadb/sanity-check.sh
+    description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: lag_threshold
+        env: LAG_THRESHOLD
+        required: false
+        type: string
+        default: "1"
+      - name: conn_warn_pct
+        env: CONN_WARN_PCT
+        required: false
+        type: string
+        default: "80"
+      - name: long_tx_threshold
+        env: LONG_TX_THRESHOLD
+        required: false
+        type: string
+        default: "10"
+      - name: expected_version
+        env: EXPECTED_VERSION
+        required: false
+        type: string
+        default: ""
+      - name: check_operator
+        env: CHECK_OPERATOR
+        required: false
+        type: string
+        default: "true"
+      - name: check_pods
+        env: CHECK_PODS
+        required: false
+        type: string
+        default: "true"
+      - name: check_service
+        env: CHECK_SERVICE
+        required: false
+        type: string
+        default: "true"
+      - name: check_sql
+        env: CHECK_SQL
+        required: false
+        type: string
+        default: "true"
+      - name: check_replication
+        env: CHECK_REPLICATION
+        required: false
+        type: string
+        default: "true"
+      - name: check_semi_sync
+        env: CHECK_SEMI_SYNC
+        required: false
+        type: string
+        default: "true"
+  mariadb_sanity_check: *mariadb_sanity_check_task
   backup:
     script: backup/backup-mariadb.sh
     description: "Backup MariaDB database to MinIO"

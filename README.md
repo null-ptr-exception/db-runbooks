@@ -169,6 +169,7 @@ Submit tasks via `POST /tasks/<name>` with Bearer token + JSON body.
 |------|----------|-------------|-------|------|
 | `common/hello` | `:30081` or `:30082` | Smoke test (greeting) | `name` (string) | — |
 | `restart` | `:30081` (MariaDB) | Rolling restart StatefulSet | `namespace` (e.g., `mariadb-1`) | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
+| `sanity-check` | `:30081` (MariaDB) | Read-only health check (operator + service + SQL + replication) | `namespace`, optional `context`, `resource`, `mdb`, thresholds | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
 | `restart` | `:30082` (MongoDB) | Rolling restart StatefulSet | `namespace` (e.g., `mongo-1`) | [docs/mongodb/restart.md](docs/mongodb/restart.md) |
 | `sanity-check` | `:30082` (MongoDB) | 3-layer health check | `namespace` | [docs/mongodb/sanity-check.md](docs/mongodb/sanity-check.md) |
 | `backup`* | `:30081` or `:30082` | Backup to MinIO | `namespace`, `bucket` (optional) | — |
@@ -220,19 +221,23 @@ open "http://${CLUSTER_MINIO_IP}:30093"  # Web UI
 ```
 aqsh-tasks/
 ├── Dockerfile              # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
-├── tasks-mariadb.yaml      # Task definitions: restart, common/hello, backup*
+├── tasks-mariadb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── tasks-mongodb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries
 │   ├── logging.sh          # log_info / log_error / log_debug
 │   ├── response.sh         # response_ok / response_err (JSON helpers)
 │   ├── k8s.sh              # kubectl wrappers with retry/wait
+│   ├── mariadb.sh          # MariaDB SQL / replication helper functions
 │   ├── mongodb.sh          # mongosh wrappers, RS status helpers
 │   ├── mongodb_constant.sh # Sanity-check scoring constants
 │   ├── minio-client.sh*    # MinIO client setup (when ENABLE_MINIO=true)
 │   └── custom.sh           # Extensible custom check hooks
 └── scripts/
     ├── common/hello.sh
-    ├── mariadb/restart.sh
+    ├── mariadb/
+    │   ├── restart.sh
+    │   ├── sanity-check.sh
+    │   └── operator-sanity-check.sh
     ├── mongodb/
     │   ├── restart.sh
     │   └── sanity-check.sh
@@ -266,7 +271,38 @@ tests/
 
 ### Iterating on Task Scripts
 
-After editing `aqsh-tasks/scripts/` or `tasks-*.yaml`:
+Scripts source libraries from `/tasks/lib/`:
+
+```bash
+source /tasks/lib/logging.sh   # log_info / log_error / log_debug
+source /tasks/lib/response.sh  # response_ok / response_err (JSON)
+source /tasks/lib/k8s.sh       # k8s_get_pods / k8s_rollout_restart / ...
+source /tasks/lib/mariadb.sh   # MariaDB operator SQL / replication helpers
+source /tasks/lib/mongodb.sh   # mongo_check / mongo_rs_status / ...
+```
+
+See [docs/lib/](docs/lib/) for full API reference.
+
+### Writing a New Task Script
+
+Every task script receives inputs as environment variables (declared in `tasks-mariadb.yaml` / `tasks-mongodb.yaml`) and must write its JSON result to `$AQSH_RESULT_FILE`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Inputs injected by aqsh (declared in tasks-mariadb.yaml / tasks-mongodb.yaml)
+echo "Running against namespace: $DB_NAMESPACE"
+
+# ... do work ...
+
+jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
+  > "$AQSH_RESULT_FILE"
+```
+
+### Iterating on Tasks
+
+After editing scripts or `tasks-mariadb.yaml` / `tasks-mongodb.yaml`:
 
 ```bash
 # Rebuild images

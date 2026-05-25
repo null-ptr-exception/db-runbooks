@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Install lint tools
         run: |
@@ -28,7 +28,7 @@ jobs:
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
 
       - name: Run Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
           dockerfile: aqsh-tasks/Dockerfile
           ignore: DL3008,DL4006
@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Build aqsh-mariadb image
         run: docker build --build-arg TASKS_YAML=tasks-mariadb.yaml -t aqsh-mariadb:ci ./aqsh-tasks

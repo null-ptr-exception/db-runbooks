@@ -60,6 +60,12 @@ for i in $(seq 1 "$POLL_MAX"); do
   sleep "$POLL_INTERVAL"
 done
 
+if [[ "${STATUS:-}" != "completed" && "${STATUS:-}" != "failed" ]]; then
+  echo "ERROR: task ${TASK_ID} did not finish after $((POLL_MAX * POLL_INTERVAL))s (last status=${STATUS:-unknown})" >&2
+  echo "$RESULT" | jq . >&2
+  exit 1
+fi
+
 echo ""
 echo ">>> Task result:"
 echo "$RESULT" | jq .

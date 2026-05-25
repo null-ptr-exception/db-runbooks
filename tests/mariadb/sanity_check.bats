@@ -18,12 +18,16 @@ teardown_file() {
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  if [[ -z "$task_id" ]]; then
+    echo "expected task id in response: $HTTP_BODY" >&2
+    return 1
+  fi
   wait_for_task "$MARIADB_AQSH_URL" "$task_id"
 
   local result_status reason_code
-  result_status=$(echo "$TASK_RESPONSE" | jq -r '(.result.data | try fromjson catch .result).status // "unknown"')
-  reason_code=$(echo "$TASK_RESPONSE" | jq -r '(.result.data | try fromjson catch .result).reason_code // "unknown"')
+  result_status=$(echo "$TASK_RESPONSE" | jq -r '((.result.data as $data | (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))) | .status // "unknown")')
+  reason_code=$(echo "$TASK_RESPONSE" | jq -r '((.result.data as $data | (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))) | .reason_code // "unknown")')
 
   echo "sanity result: status=${result_status} reason=${reason_code}"
   case "$result_status" in

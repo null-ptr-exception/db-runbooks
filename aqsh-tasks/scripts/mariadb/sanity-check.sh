@@ -307,11 +307,22 @@ if bool_enabled "$CHECK_SERVICE"; then
   [[ "$JSON_ONLY" -ne 1 ]] && echo
 fi
 
+ROOT_PASSWORD=""
+ROOT_PASSWORD_CHECKED=0
+if bool_enabled "$CHECK_SQL" || bool_enabled "$CHECK_REPLICATION" || bool_enabled "$CHECK_SEMI_SYNC"; then
+  if [[ -n "$CURRENT_PRIMARY" ]]; then
+    ROOT_PASSWORD_CHECKED=1
+    if ! ROOT_PASSWORD=$(mariadb_read_root_password "$CURRENT_PRIMARY" "${PODS[@]}"); then
+      emit_check root_password BLOCK ROOT_PASSWORD_UNAVAILABLE "cannot read MARIADB_ROOT_PASSWORD from ready MariaDB pods"
+    fi
+  fi
+fi
+
 if bool_enabled "$CHECK_SQL"; then
   [[ "$JSON_ONLY" -ne 1 ]] && echo "=== Primary SQL ==="
   if [[ -z "$CURRENT_PRIMARY" ]]; then
     emit_check primary_sql BLOCK CURRENT_PRIMARY_EMPTY "cannot run SQL because currentPrimary is empty"
-  elif ROOT_PASSWORD=$(mariadb_read_root_password "$CURRENT_PRIMARY" "${PODS[@]}"); then
+  elif [[ -n "$ROOT_PASSWORD" ]]; then
     if mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" 'SELECT 1' >/dev/null; then
       emit_check primary_sql PASS PRIMARY_SQL_READY "SELECT 1 succeeded on current primary" "$CURRENT_PRIMARY"
     else
@@ -348,14 +359,17 @@ if bool_enabled "$CHECK_SQL"; then
       emit_check connection_headroom WARN CONN_HEADROOM_UNKNOWN "could not read Threads_connected/max_connections" "$CURRENT_PRIMARY"
     fi
 
-    long_tx_count=$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "
+    if long_tx_count=$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "
       SELECT COUNT(*)
       FROM information_schema.innodb_trx
-      WHERE TIME_TO_SEC(TIMEDIFF(NOW(), trx_started)) > ${LONG_TX_THRESHOLD}" || true)
-    if [[ "${long_tx_count:-0}" -eq 0 ]] 2>/dev/null; then
-      emit_check long_transactions PASS NO_LONG_TRX "no transaction older than ${LONG_TX_THRESHOLD}s" "$CURRENT_PRIMARY"
+      WHERE TIME_TO_SEC(TIMEDIFF(NOW(), trx_started)) > ${LONG_TX_THRESHOLD}"); then
+      if [[ "${long_tx_count:-0}" -eq 0 ]] 2>/dev/null; then
+        emit_check long_transactions PASS NO_LONG_TRX "no transaction older than ${LONG_TX_THRESHOLD}s" "$CURRENT_PRIMARY"
+      else
+        emit_check long_transactions WARN LONG_TRX_PRESENT "${long_tx_count} transaction(s) older than ${LONG_TX_THRESHOLD}s" "$CURRENT_PRIMARY"
+      fi
     else
-      emit_check long_transactions WARN LONG_TRX_PRESENT "${long_tx_count} transaction(s) older than ${LONG_TX_THRESHOLD}s" "$CURRENT_PRIMARY"
+      emit_check long_transactions WARN LONG_TRX_UNKNOWN "could not query transactions older than ${LONG_TX_THRESHOLD}s" "$CURRENT_PRIMARY"
     fi
 
     if [[ -n "$EXPECTED_VERSION" ]]; then
@@ -366,7 +380,7 @@ if bool_enabled "$CHECK_SQL"; then
         emit_check version BLOCK VERSION_MISMATCH "@@version=${db_version:-<empty>} expected contains ${EXPECTED_VERSION}" "$CURRENT_PRIMARY"
       fi
     fi
-  else
+  elif [[ "$ROOT_PASSWORD_CHECKED" -ne 1 ]]; then
     emit_check root_password BLOCK ROOT_PASSWORD_UNAVAILABLE "cannot read MARIADB_ROOT_PASSWORD from ready MariaDB pods"
   fi
   [[ "$JSON_ONLY" -ne 1 ]] && echo

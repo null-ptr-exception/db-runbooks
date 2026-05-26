@@ -23,30 +23,9 @@ spec:
             - name: PORT
               value: "8080"
             - name: SECRET_NAME
-              value: kube-federated-auth
+              value: kube-federated-auth-tokens
           ports:
             - containerPort: 8080
-          startupProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            periodSeconds: 5
-            timeoutSeconds: 5
-            failureThreshold: 36
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 5
-            timeoutSeconds: 5
-            periodSeconds: 10
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8080
-            initialDelaySeconds: 5
-            timeoutSeconds: 5
-            periodSeconds: 10
           volumeMounts:
             - name: config
               mountPath: /etc/kube-federated-auth/config

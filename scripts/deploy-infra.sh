@@ -12,6 +12,45 @@ export DB_MODE="${DB_MODE:-single}"
 export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
 export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
+kubectl_apply_with_retry() {
+  local ctx="$1"
+  local manifest="$2"
+  local attempt
+
+  for attempt in 1 2 3 4 5; do
+    if kubectl --context "$ctx" apply -f "$manifest"; then
+      return 0
+    fi
+
+    if [[ "$attempt" -eq 5 ]]; then
+      return 1
+    fi
+
+    echo "kubectl apply failed for ${manifest} on ${ctx} (attempt ${attempt}/5); retrying in 5s..."
+    sleep 5
+  done
+}
+
+wait_for_log_message() {
+  local ctx="$1"
+  local namespace="$2"
+  local selector="$3"
+  local message="$4"
+  local timeout="${5:-240}"
+  local elapsed=0
+
+  while (( elapsed < timeout )); do
+    if kubectl --context "$ctx" -n "$namespace" logs -l "$selector" --tail=50 2>/dev/null | grep -Fq "$message"; then
+      return 0
+    fi
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  return 1
+}
+
 # ---------------------------------------------------------------------------
 # deploy_dbs_cluster <context> <cluster_name> <peer_dbs_ip_or_empty>
 #
@@ -124,10 +163,11 @@ else
 fi
 
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
-kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
+kubectl_apply_with_retry "kind-cluster-auth" "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
 
 echo "Waiting for kube-federated-auth to be ready..."
 kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=240s
+wait_for_log_message "kind-cluster-auth" "db-ops" "app=kube-federated-auth" "starting server" 240
 
 echo "=== Step 5: Build aqsh images ==="
 

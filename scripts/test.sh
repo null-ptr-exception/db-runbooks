@@ -29,3 +29,8 @@ else
     "${ROOT_DIR}/tests/mongodb/restart.bats" \
     "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
 fi
+
+if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+  echo "=== Running MinIO tests ==="
+  bats --recursive "${ROOT_DIR}/tests/minio"
+fi

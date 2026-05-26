@@ -58,3 +58,19 @@ tasks:
         required: false
         type: string
         default: MONGO_ROOT_PASS
+  backup:
+    script: backup/backup-mongodb.sh
+    description: "Backup MongoDB database to MinIO"
+    timeout: 15m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: db-backups

@@ -178,10 +178,20 @@ deploy_dbs_cluster() {
   echo "  Waiting for aqsh-mongodb..."
   wait_for_deployment_ready "$ctx" "db-ops" "aqsh-mongodb" "app=aqsh-mongodb" "120s" "120s"
 
-  if [[ -n "$peer_ip" ]]; then
-    echo "  Step 5: nginx TCP proxy (peer: ${peer_ip})"
-    PEER_DBS_IP="$peer_ip" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
-      | kubectl --context "$ctx" apply -f -
+  if [[ -n "$peer_ip" ]] || [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+    echo "  Step 5: nginx proxy (peer: ${peer_ip}, minio: ${ENABLE_MINIO:-false})"
+
+    if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+      # Use HTTP+stream config
+      export PEER_DBS_IP="${peer_ip}" CLUSTER_MINIO_IP
+      envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap-http.yaml.tpl" \
+        | kubectl --context "$ctx" apply -f -
+    else
+      # Use stream-only config (existing)
+      PEER_DBS_IP="$peer_ip" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+        | kubectl --context "$ctx" apply -f -
+    fi
+
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
     kubectl --context "$ctx" -n db-ops rollout restart deployment/nginx-proxy
     echo "  Waiting for nginx-proxy..."
@@ -210,6 +220,12 @@ else
   kubectl --context "${CLUSTER_DBS_CONTEXT}" apply -f "${ROOT_DIR}/k8s/cluster-dbs/federated-auth-rbac.yaml"
 fi
 
+# Bootstrap cluster-minio namespace + federated-auth SA if enabled
+if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+  kubectl --context kind-cluster-minio apply -f "${ROOT_DIR}/k8s/cluster-minio/namespace.yaml"
+  kubectl --context kind-cluster-minio apply -f "${ROOT_DIR}/k8s/cluster-minio/federated-auth-rbac.yaml"
+fi
+
 echo "=== Step 3: Bootstrap credentials ==="
 
 "${SCRIPT_DIR}/setup-credentials.sh"
@@ -223,13 +239,27 @@ echo "=== Step 4: Deploy kube-federated-auth ==="
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/rbac.yaml"
 
 if [[ "$DB_MODE" == "dual" ]]; then
-  export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP
-  envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual.yaml.tpl" \
-    | kubectl --context kind-cluster-auth apply -f -
+  if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+    export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS ISSUER_MINIO
+    export CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP CLUSTER_MINIO_IP
+    envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual-minio.yaml.tpl" \
+      | kubectl --context kind-cluster-auth apply -f -
+  else
+    export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP
+    envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual.yaml.tpl" \
+      | kubectl --context kind-cluster-auth apply -f -
+  fi
 else
-  export ISSUER_DBS CLUSTER_DBS_IP ISSUER_APPS CLUSTER_APPS_IP
-  envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap.yaml.tpl" \
-    | kubectl --context kind-cluster-auth apply -f -
+  if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+    export ISSUER_DBS ISSUER_APPS ISSUER_MINIO
+    export CLUSTER_DBS_IP CLUSTER_APPS_IP CLUSTER_MINIO_IP
+    envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-minio.yaml.tpl" \
+      | kubectl --context kind-cluster-auth apply -f -
+  else
+    export ISSUER_DBS CLUSTER_DBS_IP ISSUER_APPS CLUSTER_APPS_IP
+    envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap.yaml.tpl" \
+      | kubectl --context kind-cluster-auth apply -f -
+  fi
 fi
 
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
@@ -250,6 +280,15 @@ if [[ "$DB_MODE" == "dual" ]]; then
   deploy_dbs_cluster "kind-cluster-dbs-b" "cluster-dbs-b" "${CLUSTER_DBS_A_IP}"
 else
   deploy_dbs_cluster "${CLUSTER_DBS_CONTEXT}" "cluster-dbs" ""
+fi
+
+if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
+  echo "=== Step 6.5: Deploy MinIO cluster ==="
+  kubectl --context kind-cluster-minio apply -f "${ROOT_DIR}/k8s/cluster-minio/minio-secret.yaml"
+  kubectl --context kind-cluster-minio apply -f "${ROOT_DIR}/k8s/cluster-minio/minio-deployment.yaml"
+
+  echo "Waiting for MinIO to be ready..."
+  wait_for_deployment_ready "kind-cluster-minio" "minio" "minio" "app=minio" "120s" "120s"
 fi
 
 echo "=== Step 7: Deploy test-client ==="

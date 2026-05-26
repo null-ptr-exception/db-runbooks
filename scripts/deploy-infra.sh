@@ -51,22 +51,74 @@ wait_for_log_message() {
   return 1
 }
 
+deployment_rollout_complete() {
+  local ctx="$1"
+  local namespace="$2"
+  local deployment="$3"
+  local generation observed_generation desired_replicas updated_replicas available_replicas unavailable_replicas
+
+  generation=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.metadata.generation}')
+  observed_generation=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.status.observedGeneration}')
+  desired_replicas=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.spec.replicas}')
+  updated_replicas=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.status.updatedReplicas}')
+  available_replicas=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.status.availableReplicas}')
+  unavailable_replicas=$(kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o jsonpath='{.status.unavailableReplicas}')
+
+  generation="${generation:-0}"
+  observed_generation="${observed_generation:-0}"
+  desired_replicas="${desired_replicas:-1}"
+  updated_replicas="${updated_replicas:-0}"
+  available_replicas="${available_replicas:-0}"
+  unavailable_replicas="${unavailable_replicas:-0}"
+
+  [[ "$observed_generation" -ge "$generation" ]] \
+    && [[ "$updated_replicas" -eq "$desired_replicas" ]] \
+    && [[ "$available_replicas" -eq "$desired_replicas" ]] \
+    && [[ "$unavailable_replicas" -eq 0 ]]
+}
+
+wait_for_deployment_rollout_state() {
+  local ctx="$1"
+  local namespace="$2"
+  local deployment="$3"
+  local timeout="${4:-120s}"
+  local timeout_seconds="${timeout%s}"
+  local elapsed=0
+
+  while (( elapsed < timeout_seconds )); do
+    if deployment_rollout_complete "$ctx" "$namespace" "$deployment"; then
+      return 0
+    fi
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  return 1
+}
+
 wait_for_deployment_ready() {
   local ctx="$1"
   local namespace="$2"
   local deployment="$3"
   local selector="$4"
   local rollout_timeout="${5:-120s}"
-  local pod_timeout="${6:-120s}"
+  local state_timeout="${6:-120s}"
 
   if kubectl --context "$ctx" -n "$namespace" rollout status "deployment/${deployment}" --timeout="$rollout_timeout"; then
     return 0
   fi
 
-  echo "rollout status timed out for deployment/${deployment}; checking pod readiness..."
+  echo "rollout status timed out for deployment/${deployment}; checking deployment status..."
   kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o wide || true
   kubectl --context "$ctx" -n "$namespace" get pods -l "$selector" -o wide || true
-  kubectl --context "$ctx" -n "$namespace" wait pod -l "$selector" --for=condition=Ready --timeout="$pod_timeout"
+
+  if wait_for_deployment_rollout_state "$ctx" "$namespace" "$deployment" "$state_timeout"; then
+    return 0
+  fi
+
+  kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o yaml || true
+  return 1
 }
 
 # ---------------------------------------------------------------------------

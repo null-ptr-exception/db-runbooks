@@ -228,8 +228,7 @@ EOF
   kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
-  kubectl --context "$ctx" -n "$namespace" wait pod \
-    -l app=mongodb --for=condition=Ready --timeout=180s
+  kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=180s
 }
 
 # ---------------------------------------------------------------------------

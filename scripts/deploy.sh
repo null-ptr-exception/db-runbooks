@@ -114,8 +114,7 @@ EOF
 
   echo "Waiting for MongoDB instances in ${ctx}..."
   for ns in "${namespaces[@]}"; do
-    kubectl --context "$ctx" -n "$ns" wait pod \
-      -l app=mongodb --for=condition=Ready --timeout=180s
+    kubectl --context "$ctx" -n "$ns" rollout status statefulset/mongodb --timeout=180s
   done
 }
 

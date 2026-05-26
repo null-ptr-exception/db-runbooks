@@ -26,15 +26,15 @@ teardown_file() {
 @test "peer-db-proxy on cluster-a reaches mongodb on cluster-b" {
   run kubectl --context kind-cluster-dbs-a -n db-ops exec \
     deploy/nginx-proxy -- sh -c \
-    'nc -zv peer-db-proxy 27017 2>&1; echo "exit:$?"'
-  refute_output --partial "FAILED"
+    'command -v nc >/dev/null && nc -zv peer-db-proxy 27017'
+  assert_success
 }
 
 @test "peer-db-proxy on cluster-b reaches mongodb on cluster-a" {
   run kubectl --context kind-cluster-dbs-b -n db-ops exec \
     deploy/nginx-proxy -- sh -c \
-    'nc -zv peer-db-proxy 27017 2>&1; echo "exit:$?"'
-  refute_output --partial "FAILED"
+    'command -v nc >/dev/null && nc -zv peer-db-proxy 27017'
+  assert_success
 }
 
 @test "restart task completes on cluster-a" {

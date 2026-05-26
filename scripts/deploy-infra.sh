@@ -74,6 +74,7 @@ deploy_dbs_cluster() {
     PEER_DBS_IP="$peer_ip" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
       | kubectl --context "$ctx" apply -f -
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+    kubectl --context "$ctx" -n db-ops rollout restart deployment/nginx-proxy
     echo "  Waiting for nginx-proxy..."
     kubectl --context "$ctx" -n db-ops rollout status deployment/nginx-proxy --timeout=60s
   fi

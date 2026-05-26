@@ -178,7 +178,7 @@ EOF
 import sys, re
 docs = open('${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml').read().split('\n---\n')
 for doc in docs:
-    if re.search(r'^kind:\\s*Secret', doc, re.MULTILINE):
+    if re.search(r'^kind:\s*Secret', doc, re.MULTILINE):
         print(doc)
 " | kubectl --context "$ctx" -n "$namespace" apply -f -
     kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
@@ -280,7 +280,7 @@ EOF
 import sys, re
 docs = open('${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml').read().split('\n---\n')
 for doc in docs:
-    if re.search(r'^kind:\\s*Secret', doc, re.MULTILINE):
+    if re.search(r'^kind:\s*Secret', doc, re.MULTILINE):
         print(doc)
 " | kubectl --context "$ctx" -n "$namespace" apply -f -
       kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"

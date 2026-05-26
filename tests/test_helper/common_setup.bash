@@ -228,7 +228,16 @@ EOF
   kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
-  kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=180s
+  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=240s 2>/dev/null; then
+    echo "Rollout status timed out, falling back to wait pod..."
+    kubectl --context "$ctx" -n "$namespace" wait pod \
+      -l app=mongodb --for=condition=Ready --timeout=60s || {
+      echo "MongoDB pod still not ready. Checking pod status..."
+      kubectl --context "$ctx" -n "$namespace" get pods -l app=mongodb
+      kubectl --context "$ctx" -n "$namespace" describe pod -l app=mongodb | tail -30
+      return 1
+    }
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -238,8 +247,31 @@ EOF
 # ---------------------------------------------------------------------------
 deploy_mongodb_dual() {
   local namespace="$1"
-  deploy_mongodb "$namespace" "kind-cluster-dbs-a"
-  deploy_mongodb "$namespace" "kind-cluster-dbs-b"
+  local ctx_a="kind-cluster-dbs-a"
+  local ctx_b="kind-cluster-dbs-b"
+
+  deploy_mongodb "$namespace" "$ctx_a"
+  deploy_mongodb "$namespace" "$ctx_b"
+
+  # Deploy nginx-proxy for peer-db-proxy connectivity
+  echo "Deploying nginx-proxy for cross-cluster connectivity..."
+
+  # Deploy to cluster-a with cluster-b as peer
+  PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_a" apply -f -
+  kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Deploy to cluster-b with cluster-a as peer
+  PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_b" apply -f -
+  kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Wait for nginx-proxy to be ready
+  echo "Waiting for nginx-proxy on both clusters..."
+  kubectl --context "$ctx_a" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+  kubectl --context "$ctx_b" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
 }
 
 # ---------------------------------------------------------------------------
@@ -297,4 +329,24 @@ for doc in docs:
         -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=180s
     fi
   done
+
+  # Deploy nginx-proxy for peer-db-proxy connectivity
+  echo "Deploying nginx-proxy for cross-cluster connectivity..."
+
+  # Deploy to cluster-a with cluster-b as peer
+  PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_a" apply -f -
+  kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Deploy to cluster-b with cluster-a as peer
+  PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_b" apply -f -
+  kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Wait for nginx-proxy to be ready
+  echo "Waiting for nginx-proxy on both clusters..."
+  kubectl --context "$ctx_a" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+  kubectl --context "$ctx_b" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
 }

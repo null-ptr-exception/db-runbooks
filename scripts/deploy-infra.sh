@@ -63,7 +63,7 @@ deploy_dbs_cluster() {
   kubectl --context "$ctx" -n db-ops rollout restart deployment/aqsh-mongodb
 
   echo "  Waiting for Redis..."
-  kubectl --context "$ctx" -n db-ops rollout status deployment/redis --timeout=60s
+  kubectl --context "$ctx" -n db-ops rollout status deployment/redis --timeout=120s
   echo "  Waiting for aqsh-mariadb..."
   kubectl --context "$ctx" -n db-ops rollout status deployment/aqsh-mariadb --timeout=120s
   echo "  Waiting for aqsh-mongodb..."

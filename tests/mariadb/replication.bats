@@ -8,6 +8,21 @@ setup() {
   load '../test_helper/common_setup'
 }
 
+peer_proxy_mariadb_ping() {
+  local source_ctx="$1"
+  local target_ctx="$2"
+  local password
+
+  password=$(
+    kubectl --context "$target_ctx" -n mariadb-1 get secret mariadb \
+      -o jsonpath='{.data.password}' | base64 -d
+  )
+
+  kubectl --context "$source_ctx" -n db-ops exec deploy/aqsh-mariadb -c aqsh -- \
+    sh -ceu 'MARIADB_PWD="$1" mariadb-admin --protocol=tcp ping -h peer-db-proxy -P 3306 -u root --connect-timeout=5 --silent' \
+    sh "$password"
+}
+
 teardown_file() {
   kubectl --context kind-cluster-dbs-a delete ns mariadb-1 --ignore-not-found
   kubectl --context kind-cluster-dbs-b delete ns mariadb-1 --ignore-not-found
@@ -21,6 +36,16 @@ teardown_file() {
 @test "mariadb aqsh on cluster-b is reachable" {
   http_post "${MARIADB_AQSH_B_URL}/tasks/common%2Fhello" '{"name": "replication-test-b"}'
   assert_equal "$HTTP_CODE" "202"
+}
+
+@test "peer-db-proxy on cluster-a reaches mariadb on cluster-b" {
+  run peer_proxy_mariadb_ping "kind-cluster-dbs-a" "kind-cluster-dbs-b"
+  assert_success
+}
+
+@test "peer-db-proxy on cluster-b reaches mariadb on cluster-a" {
+  run peer_proxy_mariadb_ping "kind-cluster-dbs-b" "kind-cluster-dbs-a"
+  assert_success
 }
 
 @test "restart task completes on cluster-a" {

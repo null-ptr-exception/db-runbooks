@@ -55,9 +55,10 @@ for doc in docs:
         print(doc)
 " | kubectl --context "$ctx" -n "$ns" apply -f -
       kubectl --context "$ctx" -n "$ns" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
-      if [[ "$DB_MODE" == "dual" ]]; then
-        kubectl --context "$ctx" -n "$ns" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
-      fi
+    fi
+
+    if [[ "$DB_MODE" == "dual" ]]; then
+      kubectl --context "$ctx" -n "$ns" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
     fi
   done
 

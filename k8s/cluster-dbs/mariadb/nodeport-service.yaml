@@ -8,7 +8,7 @@ metadata:
 spec:
   type: NodePort
   selector:
-    app: mariadb
+    app.kubernetes.io/name: mariadb
   ports:
     - port: 3306
       targetPort: 3306

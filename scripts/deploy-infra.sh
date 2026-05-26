@@ -51,6 +51,24 @@ wait_for_log_message() {
   return 1
 }
 
+wait_for_deployment_ready() {
+  local ctx="$1"
+  local namespace="$2"
+  local deployment="$3"
+  local selector="$4"
+  local rollout_timeout="${5:-120s}"
+  local pod_timeout="${6:-120s}"
+
+  if kubectl --context "$ctx" -n "$namespace" rollout status "deployment/${deployment}" --timeout="$rollout_timeout"; then
+    return 0
+  fi
+
+  echo "rollout status timed out for deployment/${deployment}; checking pod readiness..."
+  kubectl --context "$ctx" -n "$namespace" get deployment "$deployment" -o wide || true
+  kubectl --context "$ctx" -n "$namespace" get pods -l "$selector" -o wide || true
+  kubectl --context "$ctx" -n "$namespace" wait pod -l "$selector" --for=condition=Ready --timeout="$pod_timeout"
+}
+
 # ---------------------------------------------------------------------------
 # deploy_dbs_cluster <context> <cluster_name> <peer_dbs_ip_or_empty>
 #
@@ -102,11 +120,11 @@ deploy_dbs_cluster() {
   kubectl --context "$ctx" -n db-ops rollout restart deployment/aqsh-mongodb
 
   echo "  Waiting for Redis..."
-  kubectl --context "$ctx" -n db-ops rollout status deployment/redis --timeout=120s
+  wait_for_deployment_ready "$ctx" "db-ops" "redis" "app=redis" "120s" "120s"
   echo "  Waiting for aqsh-mariadb..."
-  kubectl --context "$ctx" -n db-ops rollout status deployment/aqsh-mariadb --timeout=120s
+  wait_for_deployment_ready "$ctx" "db-ops" "aqsh-mariadb" "app=aqsh-mariadb" "120s" "120s"
   echo "  Waiting for aqsh-mongodb..."
-  kubectl --context "$ctx" -n db-ops rollout status deployment/aqsh-mongodb --timeout=120s
+  wait_for_deployment_ready "$ctx" "db-ops" "aqsh-mongodb" "app=aqsh-mongodb" "120s" "120s"
 
   if [[ -n "$peer_ip" ]]; then
     echo "  Step 5: nginx TCP proxy (peer: ${peer_ip})"
@@ -115,7 +133,7 @@ deploy_dbs_cluster() {
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
     kubectl --context "$ctx" -n db-ops rollout restart deployment/nginx-proxy
     echo "  Waiting for nginx-proxy..."
-    kubectl --context "$ctx" -n db-ops rollout status deployment/nginx-proxy --timeout=60s
+    wait_for_deployment_ready "$ctx" "db-ops" "nginx-proxy" "app=nginx-proxy" "60s" "60s"
   fi
 }
 

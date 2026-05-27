@@ -180,22 +180,33 @@ deploy_dbs_cluster() {
 
   if [[ -n "$peer_ip" ]] || [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
     echo "  Step 5: nginx proxy (peer: ${peer_ip}, minio: ${ENABLE_MINIO:-false})"
+    local nginx_deployment_exists="false"
+
+    if kubectl --context "$ctx" -n db-ops get deployment nginx-proxy >/dev/null 2>&1; then
+      nginx_deployment_exists="true"
+    fi
 
     if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
       # Use HTTP+stream config
       export PEER_DBS_IP="${peer_ip}" CLUSTER_MINIO_IP
-      envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap-http.yaml.tpl" \
+      envsubst '${PEER_DBS_IP} ${CLUSTER_MINIO_IP}' < "${ROOT_DIR}/k8s/nginx-proxy/configmap-http.yaml.tpl" \
         | kubectl --context "$ctx" apply -f -
     else
       # Use stream-only config (existing)
-      PEER_DBS_IP="$peer_ip" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+      PEER_DBS_IP="$peer_ip" envsubst '${PEER_DBS_IP}' < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
         | kubectl --context "$ctx" apply -f -
     fi
 
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
-    kubectl --context "$ctx" -n db-ops rollout restart deployment/nginx-proxy
+
+    # Restart only when deployment already exists so reruns pick new ConfigMap
+    # without introducing an extra rollout during first-time bootstrap.
+    if [[ "$nginx_deployment_exists" == "true" ]]; then
+      kubectl --context "$ctx" -n db-ops rollout restart deployment/nginx-proxy
+    fi
+
     echo "  Waiting for nginx-proxy..."
-    wait_for_deployment_ready "$ctx" "db-ops" "nginx-proxy" "app=nginx-proxy" "60s" "60s"
+    wait_for_deployment_ready "$ctx" "db-ops" "nginx-proxy" "app=nginx-proxy" "120s" "120s"
   fi
 }
 

@@ -19,14 +19,7 @@ BACKUP_DATABASES="${BACKUP_DATABASES:---all-databases}"
 
 log_info "Starting MariaDB backup for namespace: ${DB_NAMESPACE}"
 
-# Determine pod and service names
-if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
-  POD_NAME="mariadb-0"
-  SERVICE_NAME="mariadb"
-else
-  POD_NAME="mariadb-0"
-  SERVICE_NAME="mariadb"
-fi
+POD_NAME="mariadb-0"
 
 log_info "Using pod: ${POD_NAME}"
 

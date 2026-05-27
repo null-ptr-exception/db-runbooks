@@ -54,3 +54,33 @@ tasks:
         required: false
         type: string
         default: --all-databases
+  setup-replication:
+    script: mariadb/setup-replication.sh
+    description: "Configure GTID-based MariaDB replication from primary to replicas"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mariadb-[0-9]+$'
+      - name: topology
+        env: REPL_TOPOLOGY
+        required: true
+        type: string
+        pattern: '^(2\+1|1\+2|3\+0)$'
+      - name: cluster_a_ip
+        env: CLUSTER_A_IP
+        required: true
+        type: string
+      - name: cluster_b_ip
+        env: CLUSTER_B_IP
+        required: false
+        type: string
+        default: ""
+      - name: credential_secret
+        env: MARIADB_CRED_SECRET
+        required: false
+        type: string
+        default: mariadb

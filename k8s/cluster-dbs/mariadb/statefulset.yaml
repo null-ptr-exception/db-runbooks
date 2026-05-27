@@ -25,14 +25,32 @@ spec:
       containers:
         - name: mariadb
           image: mariadb:10.6
-          ports:
-            - containerPort: 3306
+          # server-id is derived from pod ordinal + BASE_SERVER_ID so each pod
+          # gets a unique ID required for GTID-based replication.
+          # cluster-a uses BASE_SERVER_ID=1  → pod-0: id=1, pod-1: id=2, pod-2: id=3
+          # cluster-b uses BASE_SERVER_ID=10 → pod-0: id=10, pod-1: id=11
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              POD_ORDINAL="${HOSTNAME##*-}"
+              SERVER_ID=$(( ${BASE_SERVER_ID:-1} + POD_ORDINAL ))
+              exec mariadbd \
+                --server-id="${SERVER_ID}" \
+                --log-bin=mysql-bin \
+                --binlog-format=ROW \
+                --gtid-strict-mode=ON \
+                --log-slave-updates=ON \
+                "$@"
           env:
             - name: MARIADB_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: mariadb
                   key: password
+            - name: BASE_SERVER_ID
+              value: "1"
+          ports:
+            - containerPort: 3306
           securityContext:
             allowPrivilegeEscalation: false
             privileged: false

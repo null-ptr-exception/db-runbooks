@@ -52,6 +52,9 @@ if [[ "$DB_MODE" == "dual" ]]; then
   echo "cluster-dbs-a: $CLUSTER_DBS_A_IP"
   echo "cluster-dbs-b: $CLUSTER_DBS_B_IP"
 
+  _MONGO_TOPOLOGY="${MONGO_TOPOLOGY:-2+1}"
+  _MARIADB_TOPOLOGY="${MARIADB_TOPOLOGY:-2+1}"
+
   cat > "$ENV_FILE" <<EOF
 DB_MODE=${DB_MODE}
 CLUSTER_AUTH_IP=${CLUSTER_AUTH_IP}
@@ -61,12 +64,17 @@ CLUSTER_DBS_IP=${CLUSTER_DBS_A_IP}
 CLUSTER_DBS_CONTEXT=kind-cluster-dbs-a
 CLUSTER_APPS_IP=${CLUSTER_APPS_IP}
 ENABLE_MINIO=${ENABLE_MINIO}
+MONGO_TOPOLOGY=${_MONGO_TOPOLOGY}
+MARIADB_TOPOLOGY=${_MARIADB_TOPOLOGY}
 $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_IP=${CLUSTER_MINIO_IP}"; fi)
 $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_CONTEXT=kind-cluster-minio"; fi)
 EOF
 else
   CLUSTER_DBS_IP=$(get_node_ip cluster-dbs)
   echo "cluster-dbs:  $CLUSTER_DBS_IP"
+
+  _MONGO_TOPOLOGY="${MONGO_TOPOLOGY:-standalone}"
+  _MARIADB_TOPOLOGY="${MARIADB_TOPOLOGY:-standalone}"
 
   cat > "$ENV_FILE" <<EOF
 DB_MODE=${DB_MODE}
@@ -75,6 +83,8 @@ CLUSTER_DBS_IP=${CLUSTER_DBS_IP}
 CLUSTER_DBS_CONTEXT=kind-cluster-dbs
 CLUSTER_APPS_IP=${CLUSTER_APPS_IP}
 ENABLE_MINIO=${ENABLE_MINIO}
+MONGO_TOPOLOGY=${_MONGO_TOPOLOGY}
+MARIADB_TOPOLOGY=${_MARIADB_TOPOLOGY}
 $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_IP=${CLUSTER_MINIO_IP}"; fi)
 $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_CONTEXT=kind-cluster-minio"; fi)
 EOF

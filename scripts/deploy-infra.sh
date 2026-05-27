@@ -284,6 +284,27 @@ echo "=== Step 5: Build aqsh images ==="
 
 skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest --quiet
 
+echo "=== Step 5.5: Preload DB images into Kind cluster(s) ==="
+# Pre-loading avoids image pull latency competing for CPU during pod startup.
+
+_kind_load_image() {
+  local image="$1" cluster="$2"
+  echo "  Loading ${image} into ${cluster}..."
+  docker pull --quiet "$image" || true
+  kind load docker-image "$image" --name "$cluster"
+}
+
+if [[ "$DB_MODE" == "dual" ]]; then
+  for img in mongo:7 mariadb:10.6; do
+    _kind_load_image "$img" "cluster-dbs-a"
+    _kind_load_image "$img" "cluster-dbs-b"
+  done
+else
+  for img in mongo:7 mariadb:10.6; do
+    _kind_load_image "$img" "cluster-dbs"
+  done
+fi
+
 echo "=== Step 6: Deploy DB cluster(s) ==="
 
 if [[ "$DB_MODE" == "dual" ]]; then

@@ -1,16 +1,15 @@
+REQUIRED_MONGO_TOPOLOGY="2+1"
+
 setup_file() {
   load '../test_helper/common_setup'
   common_setup --create-token
-  deploy_mongodb_dual "mongo-1"
+  skip_unless_mongo_topology "$REQUIRED_MONGO_TOPOLOGY"
+  assert_mongodb_ready "mongo-1" "kind-cluster-dbs-a"
+  assert_mongodb_ready "mongo-1" "kind-cluster-dbs-b"
 }
 
 setup() {
   load '../test_helper/common_setup'
-}
-
-teardown_file() {
-  kubectl --context kind-cluster-dbs-a delete ns mongo-1 --ignore-not-found
-  kubectl --context kind-cluster-dbs-b delete ns mongo-1 --ignore-not-found
 }
 
 @test "mongodb aqsh on cluster-a is reachable" {

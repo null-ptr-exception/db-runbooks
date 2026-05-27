@@ -1,7 +1,11 @@
+REQUIRED_MARIADB_TOPOLOGY="2+1"
+
 setup_file() {
   load '../test_helper/common_setup'
   common_setup --create-token
-  deploy_mariadb_dual "mariadb-1"
+  skip_unless_mariadb_topology "$REQUIRED_MARIADB_TOPOLOGY"
+  assert_mariadb_ready "mariadb-1" "kind-cluster-dbs-a"
+  assert_mariadb_ready "mariadb-1" "kind-cluster-dbs-b"
 }
 
 setup() {
@@ -21,11 +25,6 @@ peer_proxy_mariadb_ping() {
   kubectl --context "$source_ctx" -n db-ops exec deploy/aqsh-mariadb -c aqsh -- \
     sh -ceu 'MARIADB_PWD="$1" mariadb-admin --protocol=tcp ping -h peer-db-proxy -P 3306 -u root --connect-timeout=5 --silent' \
     sh "$password"
-}
-
-teardown_file() {
-  kubectl --context kind-cluster-dbs-a delete ns mariadb-1 --ignore-not-found
-  kubectl --context kind-cluster-dbs-b delete ns mariadb-1 --ignore-not-found
 }
 
 @test "mariadb aqsh on cluster-a is reachable" {

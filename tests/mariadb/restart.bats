@@ -1,15 +1,11 @@
 setup_file() {
   load '../test_helper/common_setup'
   common_setup --create-token
-  deploy_mariadb "mariadb-1"
+  assert_mariadb_ready "mariadb-1"
 }
 
 setup() {
   load '../test_helper/common_setup'
-}
-
-teardown_file() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mariadb-1 --ignore-not-found
 }
 
 @test "restart task completes successfully" {

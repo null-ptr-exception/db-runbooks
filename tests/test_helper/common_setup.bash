@@ -121,7 +121,7 @@ wait_for_task() {
 # ---------------------------------------------------------------------------
 _wait_for_ns_deleted() {
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" elapsed=0
-  while (( elapsed < 60 )); do
+  while (( elapsed < 180 )); do
     local phase
     phase=$(kubectl --context "$ctx" get ns "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null || true)
     if [[ -z "$phase" ]]; then
@@ -134,7 +134,7 @@ _wait_for_ns_deleted() {
     sleep 3
     elapsed=$((elapsed + 3))
   done
-  echo "Namespace ${namespace} still Terminating after 60s" >&2
+  echo "Namespace ${namespace} still Terminating after 180s" >&2
   return 1
 }
 
@@ -190,10 +190,18 @@ for doc in docs:
     kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
     kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
     echo "Waiting for MariaDB in ${namespace} to be ready..."
-    if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
-      echo "Rollout status timed out, falling back to wait pod..."
+    if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=480s; then
+      echo "Rollout status timed out, waiting for pod to exist before polling ready..."
+      local pod_wait=0
+      while (( pod_wait < 120 )); do
+        if kubectl --context "$ctx" -n "$namespace" get pod \
+            -l app.kubernetes.io/name=mariadb --no-headers 2>/dev/null | grep -q .; then
+          break
+        fi
+        sleep 5; pod_wait=$((pod_wait + 5))
+      done
       kubectl --context "$ctx" -n "$namespace" wait pod \
-        -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+        -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=120s || {
         echo "MariaDB pod still not ready. Checking pod status..."
         kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
         kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
@@ -242,10 +250,18 @@ EOF
   kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
-  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=240s 2>/dev/null; then
-    echo "Rollout status timed out, falling back to wait pod..."
+  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=480s; then
+    echo "Rollout status timed out, waiting for pod to exist before polling ready..."
+    local pod_wait=0
+    while (( pod_wait < 120 )); do
+      if kubectl --context "$ctx" -n "$namespace" get pod \
+          -l app=mongodb --no-headers 2>/dev/null | grep -q .; then
+        break
+      fi
+      sleep 5; pod_wait=$((pod_wait + 5))
+    done
     kubectl --context "$ctx" -n "$namespace" wait pod \
-      -l app=mongodb --for=condition=Ready --timeout=60s || {
+      -l app=mongodb --for=condition=Ready --timeout=120s || {
       echo "MongoDB pod still not ready. Checking pod status..."
       kubectl --context "$ctx" -n "$namespace" get pods -l app=mongodb
       kubectl --context "$ctx" -n "$namespace" describe pod -l app=mongodb | tail -30
@@ -346,10 +362,18 @@ for doc in docs:
         return 1
       fi
     else
-      if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
-        echo "Rollout status timed out on $ctx, falling back to wait pod..."
+      if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=480s; then
+        echo "Rollout status timed out on $ctx, waiting for pod to exist before polling ready..."
+        local pod_wait=0
+        while (( pod_wait < 120 )); do
+          if kubectl --context "$ctx" -n "$namespace" get pod \
+              -l app.kubernetes.io/name=mariadb --no-headers 2>/dev/null | grep -q .; then
+            break
+          fi
+          sleep 5; pod_wait=$((pod_wait + 5))
+        done
         kubectl --context "$ctx" -n "$namespace" wait pod \
-          -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+          -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=120s || {
           echo "MariaDB pod still not ready on $ctx. Checking pod status..."
           kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
           kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
@@ -378,4 +402,98 @@ for doc in docs:
     -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
   kubectl --context "$ctx_b" -n db-ops wait pod \
     -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+}
+
+# ---------------------------------------------------------------------------
+# skip_unless_mongo_topology <required>
+#
+# Skips the current bats test/file if MONGO_TOPOLOGY doesn't match.
+# Pass "any" to skip the guard entirely.
+# ---------------------------------------------------------------------------
+skip_unless_mongo_topology() {
+  local required="$1"
+  local current="${MONGO_TOPOLOGY:-standalone}"
+  if [[ "$required" != "any" && "$current" != "$required" ]]; then
+    skip "Requires MONGO_TOPOLOGY=${required}, current=${current}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# skip_unless_mariadb_topology <required>
+# ---------------------------------------------------------------------------
+skip_unless_mariadb_topology() {
+  local required="$1"
+  local current="${MARIADB_TOPOLOGY:-standalone}"
+  if [[ "$required" != "any" && "$current" != "$required" ]]; then
+    skip "Requires MARIADB_TOPOLOGY=${required}, current=${current}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# assert_mongodb_ready <namespace> [context]
+#
+# Quick readiness check — assumes DB was already deployed by setup_suite.
+# Does not re-deploy; just verifies pods are Ready.
+# ---------------------------------------------------------------------------
+assert_mongodb_ready() {
+  local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  kubectl --context "$ctx" -n "$namespace" wait pod \
+    -l app=mongodb --for=condition=Ready --timeout=30s
+}
+
+# ---------------------------------------------------------------------------
+# assert_mariadb_ready <namespace> [context]
+# ---------------------------------------------------------------------------
+assert_mariadb_ready() {
+  local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
+    kubectl --context "$ctx" -n "$namespace" wait \
+      --for=condition=Ready mariadb/mariadb --timeout=30s
+  else
+    kubectl --context "$ctx" -n "$namespace" wait pod \
+      -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=30s
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# deploy_mongodb_with_topology <namespace> <topology>
+#
+# Dispatches to the appropriate deploy function based on topology.
+# Topology: "standalone" | "3+0" | "2+1" | "1+2"
+# ---------------------------------------------------------------------------
+deploy_mongodb_with_topology() {
+  local namespace="$1" topology="${2:-standalone}"
+  case "$topology" in
+    standalone|3+0)
+      deploy_mongodb "$namespace"
+      ;;
+    2+1|1+2)
+      deploy_mongodb_dual "$namespace"
+      ;;
+    *)
+      echo "Unknown MONGO_TOPOLOGY: ${topology}" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# deploy_mariadb_with_topology <namespace> <topology>
+# ---------------------------------------------------------------------------
+deploy_mariadb_with_topology() {
+  local namespace="$1" topology="${2:-standalone}"
+  case "$topology" in
+    standalone|3+0)
+      deploy_mariadb "$namespace"
+      ;;
+    2+1|1+2)
+      deploy_mariadb_dual "$namespace"
+      ;;
+    *)
+      echo "Unknown MARIADB_TOPOLOGY: ${topology}" >&2
+      return 1
+      ;;
+  esac
 }

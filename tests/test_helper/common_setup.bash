@@ -306,6 +306,7 @@ EOF
 
     if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
       kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml"
+      kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
     else
       python3 -c "
 import sys, re

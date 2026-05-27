@@ -75,3 +75,33 @@ tasks:
         required: false
         type: string
         default: db-backups
+  rs-init:
+    script: mongodb/rs-init.sh
+    description: "Initialize or verify a MongoDB Replica Set across clusters"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: topology
+        env: RS_TOPOLOGY
+        required: true
+        type: string
+        pattern: '^(2\+1|1\+2|3\+0)$'
+      - name: cluster_a_ip
+        env: CLUSTER_A_IP
+        required: true
+        type: string
+      - name: cluster_b_ip
+        env: CLUSTER_B_IP
+        required: false
+        type: string
+        default: ""
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials

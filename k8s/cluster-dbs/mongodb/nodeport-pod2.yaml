@@ -1,15 +1,15 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: mongodb-nodeport
+  name: mongodb-2-nodeport
   labels:
     app.kubernetes.io/name: mongodb
     app.kubernetes.io/component: database
 spec:
   type: NodePort
   selector:
-    statefulset.kubernetes.io/pod-name: mongodb-0
+    statefulset.kubernetes.io/pod-name: mongodb-2
   ports:
     - port: 27017
       targetPort: 27017
-      nodePort: 30090
+      nodePort: 30096

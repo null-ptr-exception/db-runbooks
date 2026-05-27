@@ -184,8 +184,16 @@ for doc in docs:
     kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
     kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
     echo "Waiting for MariaDB in ${namespace} to be ready..."
-    kubectl --context "$ctx" -n "$namespace" wait pod \
-      -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=180s
+    if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
+      echo "Rollout status timed out, falling back to wait pod..."
+      kubectl --context "$ctx" -n "$namespace" wait pod \
+        -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+        echo "MariaDB pod still not ready. Checking pod status..."
+        kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
+        kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
+        return 1
+      }
+    fi
   fi
 }
 
@@ -326,8 +334,16 @@ for doc in docs:
       kubectl --context "$ctx" -n "$namespace" wait \
         --for=condition=Ready mariadb/mariadb --timeout=180s
     else
-      kubectl --context "$ctx" -n "$namespace" wait pod \
-        -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=180s
+      if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
+        echo "Rollout status timed out on $ctx, falling back to wait pod..."
+        kubectl --context "$ctx" -n "$namespace" wait pod \
+          -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+          echo "MariaDB pod still not ready on $ctx. Checking pod status..."
+          kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
+          kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
+          return 1
+        }
+      fi
     fi
   done
 

@@ -13,6 +13,25 @@ data:
       worker_connections 1024;
     }
 
+    # HTTP block for healthz endpoint
+    http {
+      access_log /dev/stdout;
+      client_body_temp_path /tmp/client_temp;
+      proxy_temp_path /tmp/proxy_temp;
+      fastcgi_temp_path /tmp/fastcgi_temp;
+      uwsgi_temp_path /tmp/uwsgi_temp;
+      scgi_temp_path /tmp/scgi_temp;
+
+      server {
+        listen 80;
+
+        location /healthz {
+          return 200 "ok\n";
+          add_header Content-Type text/plain;
+        }
+      }
+    }
+
     stream {
       log_format proxy '$remote_addr [$time_local] '
                        '$protocol $status $bytes_sent $bytes_received '

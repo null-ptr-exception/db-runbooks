@@ -170,8 +170,14 @@ EOF
   if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml"
     echo "Waiting for MariaDB in ${namespace} to be ready..."
-    kubectl --context "$ctx" -n "$namespace" wait \
-      --for=condition=Ready mariadb/mariadb --timeout=180s
+    if ! kubectl --context "$ctx" -n "$namespace" wait \
+      --for=condition=Ready mariadb/mariadb --timeout=300s 2>/dev/null; then
+      echo "MariaDB CR not ready after 300s. Checking status..."
+      kubectl --context "$ctx" -n "$namespace" get mariadb mariadb -o yaml | tail -50
+      kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/instance=mariadb
+      kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/instance=mariadb | tail -30
+      return 1
+    fi
   else
     # Extract only the Secret document from the operator yaml, then apply native StatefulSet
     python3 -c "
@@ -331,8 +337,14 @@ for doc in docs:
   echo "Waiting for MariaDB in ${namespace} on both clusters..."
   for ctx in "$ctx_a" "$ctx_b"; do
     if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
-      kubectl --context "$ctx" -n "$namespace" wait \
-        --for=condition=Ready mariadb/mariadb --timeout=180s
+      if ! kubectl --context "$ctx" -n "$namespace" wait \
+        --for=condition=Ready mariadb/mariadb --timeout=300s 2>/dev/null; then
+        echo "MariaDB CR not ready on $ctx after 300s. Checking status..."
+        kubectl --context "$ctx" -n "$namespace" get mariadb mariadb -o yaml | tail -50
+        kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/instance=mariadb
+        kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/instance=mariadb | tail -30
+        return 1
+      fi
     else
       if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
         echo "Rollout status timed out on $ctx, falling back to wait pod..."

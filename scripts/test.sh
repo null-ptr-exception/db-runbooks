@@ -17,18 +17,13 @@ trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 "${SCRIPT_DIR}/setup-clusters.sh"
 "${SCRIPT_DIR}/deploy-infra.sh"
 
-if [[ "$DB_MODE" == "dual" ]]; then
-  bats --recursive \
-    "${ROOT_DIR}/tests/common" \
-    "${ROOT_DIR}/tests/mariadb/replication.bats" \
-    "${ROOT_DIR}/tests/mongodb"
-else
-  bats --recursive \
-    "${ROOT_DIR}/tests/common" \
-    "${ROOT_DIR}/tests/mariadb/restart.bats" \
-    "${ROOT_DIR}/tests/mongodb/restart.bats" \
-    "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
-fi
+# Run all tests — topology guards (skip_unless_mongo_topology /
+# skip_unless_mariadb_topology) handle skipping tests that require a topology
+# not currently deployed (e.g., replication tests skip in standalone mode).
+bats --recursive \
+  "${ROOT_DIR}/tests/common" \
+  "${ROOT_DIR}/tests/mariadb" \
+  "${ROOT_DIR}/tests/mongodb"
 
 if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
   echo "=== Running MinIO tests ==="

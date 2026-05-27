@@ -14,6 +14,36 @@ source "$ENV_FILE"
 DB_MODE="${DB_MODE:-single}"
 USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
 CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+MONGO_TOPOLOGY="${MONGO_TOPOLOGY:-standalone}"
+MARIADB_TOPOLOGY="${MARIADB_TOPOLOGY:-standalone}"
+
+# ---------------------------------------------------------------------------
+# _apply_per_pod_nodeports <db> <topology> <context> <namespace>
+#   db: "mongodb" or "mariadb"
+#   topology: standalone / 2+1 / 1+2 / 3+0
+# Applies per-pod NodePort Service yamls that exist for pod-0 (always),
+# pod-1 (when topology has ≥2 pods on this cluster), pod-2 (3+0 only).
+# ---------------------------------------------------------------------------
+_apply_per_pod_nodeports() {
+  local db="$1" topology="$2" ctx="$3" ns="$4"
+  local db_dir="${ROOT_DIR}/k8s/cluster-dbs/${db}"
+
+  # pod-0 NodePort (always apply when topology != standalone)
+  if [[ "$topology" != "standalone" ]]; then
+    kubectl --context "$ctx" -n "$ns" apply -f "${db_dir}/nodeport-pod0.yaml"
+  fi
+
+  # pod-1 NodePort: needed for 2+1, 1+2 (on the ≥2-pod cluster), and 3+0
+  local members_a="${topology%%+*}"
+  if [[ "$topology" == "3+0" || "$members_a" -ge 2 ]]; then
+    kubectl --context "$ctx" -n "$ns" apply -f "${db_dir}/nodeport-pod1.yaml"
+  fi
+
+  # pod-2 NodePort: only 3+0
+  if [[ "$topology" == "3+0" ]]; then
+    kubectl --context "$ctx" -n "$ns" apply -f "${db_dir}/nodeport-pod2.yaml"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # deploy_mariadb_to_cluster <context> <namespace_list...>
@@ -59,6 +89,7 @@ for doc in docs:
 
     if [[ "$DB_MODE" == "dual" ]]; then
       kubectl --context "$ctx" -n "$ns" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
+      _apply_per_pod_nodeports "mariadb" "$MARIADB_TOPOLOGY" "$ctx" "$ns"
     fi
   done
 
@@ -109,6 +140,7 @@ EOF
     kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/${ns}.yaml"
     if [[ "$DB_MODE" == "dual" ]]; then
       kubectl --context "$ctx" -n "$ns" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
+      _apply_per_pod_nodeports "mongodb" "$MONGO_TOPOLOGY" "$ctx" "$ns"
     fi
   done
 

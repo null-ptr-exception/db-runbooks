@@ -126,7 +126,24 @@ ENABLE_MINIO=true ./scripts/setup-clusters.sh
 | **cluster-apps** | `kind-cluster-apps` | `db-ops`, `app-a`, `app-b` | Client workloads |
 | **cluster-minio** | `kind-cluster-minio` | `db-ops`, `minio` | Object storage (optional) |
 
-> **Dual-mode**: Set `DB_MODE=dual` to create `cluster-dbs-a` and `cluster-dbs-b` instead of single `cluster-dbs`, enabling peer-to-peer replication testing.
+> **Dual-mode**: Set `DB_MODE=dual` to create `cluster-dbs-a` and `cluster-dbs-b` instead of single `cluster-dbs`, enabling cross-cluster GTID replication (MariaDB) and Replica Set formation (MongoDB).
+
+### Dual Mode (4 clusters)
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  cluster-dbs-a                         cluster-dbs-b                    │
+│                                                                          │
+│  MariaDB (GTID primary) ◀──────────────▶ MariaDB (GTID replica)         │
+│  MongoDB (RS member)   ◀──────────────▶ MongoDB (RS member)             │
+│  aqsh + nginx-proxy                    aqsh + nginx-proxy               │
+│  NodePort: 30081/30082                 NodePort: 30081/30082            │
+│  Peer NodePort: 30091 (MariaDB)        Peer NodePort: 30091 (MariaDB)   │
+│                 30090 (MongoDB-0)                       30090 (MongoDB-0)│
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+> **Topology variables**: `MONGO_TOPOLOGY` and `MARIADB_TOPOLOGY` control how many replicas are deployed. Defaults: `2+1` (dual mode), `standalone` (single mode).
 
 ---
 
@@ -138,10 +155,14 @@ ENABLE_MINIO=true ./scripts/setup-clusters.sh
 | aqsh-mariadb | cluster-dbs | **30081** | All | MariaDB tasks |
 | aqsh-mongodb | cluster-dbs | **30082** | All | MongoDB tasks |
 | nginx HTTP gateway | cluster-dbs | **30083** | `ENABLE_MINIO=true` | HTTP proxy |
-| MongoDB peer | cluster-dbs-a/b | 30090 | `DB_MODE=dual` | Replication |
-| MariaDB peer | cluster-dbs-a/b | 30091 | `DB_MODE=dual` | Replication |
+| MongoDB-0 peer NodePort | cluster-dbs-a/b | 30090 | `DB_MODE=dual` | RS member 0 (cross-cluster) |
+| MariaDB-0 peer NodePort | cluster-dbs-a/b | 30091 | `DB_MODE=dual` | GTID primary/replica |
 | MinIO API | cluster-minio | **30092** | `ENABLE_MINIO=true` | S3 API |
 | MinIO Console | cluster-minio | **30093** | `ENABLE_MINIO=true` | Web UI |
+| MongoDB-1 per-pod NodePort | cluster-dbs-a/b | 30094 | `DB_MODE=dual` | RS member 1 |
+| MariaDB-1 per-pod NodePort | cluster-dbs-a/b | 30095 | `DB_MODE=dual` | In-cluster replica 1 |
+| MongoDB-2 per-pod NodePort | cluster-dbs-a/b | 30096 | `DB_MODE=dual` | RS member 2 |
+| MariaDB-2 per-pod NodePort | cluster-dbs-a/b | 30097 | `DB_MODE=dual` | In-cluster replica 2 |
 
 ---
 
@@ -152,11 +173,18 @@ ENABLE_MINIO=true ./scripts/setup-clusters.sh
 | `DB_MODE` | `single` | `single`, `dual` | Cluster topology (1 or 2 DB clusters) |
 | `USE_MARIADB_OPERATOR` | `true` | `true`, `false` | Use operator or native StatefulSet |
 | `ENABLE_MINIO` | `false` | `true`, `false` | Deploy optional MinIO cluster |
+| `MONGO_TOPOLOGY` | `standalone` (single) / `2+1` (dual) | `standalone`, `2+1`, `1+2`, `3+0` | MongoDB replica count per cluster (local+remote) |
+| `MARIADB_TOPOLOGY` | `standalone` (single) / `2+1` (dual) | `standalone`, `2+1`, `1+2`, `3+0` | MariaDB replica count per cluster (local+remote) |
+
+> Topology format `X+Y`: `X` = in-cluster replicas, `Y` = cross-cluster (remote) replicas.
 
 **Examples**:
 ```bash
 # Dual-mode with native MariaDB + MinIO
 DB_MODE=dual USE_MARIADB_OPERATOR=false ENABLE_MINIO=true ./scripts/setup.sh
+
+# Dual-mode with custom topology (3 local MongoDB members, no cross-cluster)
+DB_MODE=dual MONGO_TOPOLOGY=3+0 ./scripts/setup.sh
 ```
 
 ---
@@ -171,9 +199,13 @@ Submit tasks via `POST /tasks/<name>` with Bearer token + JSON body.
 | `restart` | `:30081` (MariaDB) | Rolling restart StatefulSet | `namespace` (e.g., `mariadb-1`) | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
 | `restart` | `:30082` (MongoDB) | Rolling restart StatefulSet | `namespace` (e.g., `mongo-1`) | [docs/mongodb/restart.md](docs/mongodb/restart.md) |
 | `sanity-check` | `:30082` (MongoDB) | 3-layer health check | `namespace` | [docs/mongodb/sanity-check.md](docs/mongodb/sanity-check.md) |
+| `rs-init` | `:30082` (MongoDB) | Initialize (or verify) MongoDB Replica Set | `namespace`, `topology`, `cluster_a_ip`, `cluster_b_ip` | — |
+| `setup-replication` | `:30081` (MariaDB) | Configure GTID replication between clusters | `namespace`, `topology`, `cluster_a_ip`, `cluster_b_ip` | — |
 | `backup`* | `:30081` or `:30082` | Backup to MinIO | `namespace`, `bucket` (optional) | — |
 
-\* Only available when `ENABLE_MINIO=true` and Phase 5 is implemented
+\* Only available when `ENABLE_MINIO=true`
+
+> `rs-init` and `setup-replication` are **idempotent** — safe to call multiple times. Both skip already-configured members automatically.
 
 ### Task API Example
 
@@ -220,8 +252,8 @@ open "http://${CLUSTER_MINIO_IP}:30093"  # Web UI
 ```
 aqsh-tasks/
 ├── Dockerfile              # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
-├── tasks-mariadb.yaml      # Task definitions: restart, common/hello, backup*
-├── tasks-mongodb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
+├── tasks-mariadb.yaml      # Task definitions: restart, setup-replication, common/hello, backup*
+├── tasks-mongodb.yaml      # Task definitions: restart, rs-init, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries
 │   ├── logging.sh          # log_info / log_error / log_debug
 │   ├── response.sh         # response_ok / response_err (JSON helpers)
@@ -232,36 +264,59 @@ aqsh-tasks/
 │   └── custom.sh           # Extensible custom check hooks
 └── scripts/
     ├── common/hello.sh
-    ├── mariadb/restart.sh
+    ├── mariadb/
+    │   ├── restart.sh
+    │   └── setup-replication.sh  # GTID replication setup (idempotent)
     ├── mongodb/
     │   ├── restart.sh
+    │   ├── rs-init.sh            # RS initialization (idempotent, multi-topology)
     │   └── sanity-check.sh
-    └── backup/             # Created in Phase 5
+    └── backup/
         ├── backup-mariadb.sh*
         └── backup-mongodb.sh*
 
 scripts/
 ├── preflight.sh            # Auto-install prerequisites (kind, kubectl, helm, skaffold)
 ├── setup.sh                # Orchestrator (preflight → clusters → infra → databases)
-├── setup-clusters.sh       # Create Kind clusters, extract IPs → .env
+├── setup-clusters.sh       # Create Kind clusters, extract IPs + TOPOLOGY vars → .env
 ├── setup-credentials.sh    # Bootstrap cross-cluster CA certs + tokens
 ├── deploy-infra.sh         # Deploy federated-auth, aqsh, nginx, MinIO
+│                           # Also preloads mongo:7 + mariadb:10.6 images (Step 5.5)
 ├── deploy.sh               # Deploy databases (MariaDB + MongoDB)
 ├── test.sh                 # End-to-end validation
 └── teardown.sh             # Delete all clusters
 
 k8s/
 ├── cluster-auth/           # kube-federated-auth + ConfigMaps (4 variants for dual/minio combos)
-├── cluster-dbs/            # aqsh + kube-auth-proxy + Redis + MariaDB + MongoDB + nginx
+├── cluster-dbs/
+│   ├── mariadb/
+│   │   ├── statefulset.yaml          # GTID binlog + dynamic server-id via pod ordinal
+│   │   ├── nodeport-service.yaml     # Targets pod-name=mariadb-0
+│   │   ├── nodeport-pod1.yaml        # Port 30095 (pod 1)
+│   │   └── nodeport-pod2.yaml        # Port 30097 (pod 2)
+│   └── mongodb/
+│       ├── mongo-1-rs.yaml.tpl       # RS-mode StatefulSet (--replSet rs0)
+│       ├── nodeport-pod0.yaml        # Port 30090 (pod 0)
+│       ├── nodeport-pod1.yaml        # Port 30094 (pod 1)
+│       └── nodeport-pod2.yaml        # Port 30096 (pod 2)
 ├── cluster-apps/           # test-client pod
 ├── cluster-minio/          # MinIO deployment + PVC + RBAC (when ENABLE_MINIO=true)
 └── nginx-proxy/            # nginx HTTP+stream configs
 
 tests/
-├── common/                 # Auth + hello task tests
-├── mariadb/                # MariaDB restart tests
-├── mongodb/                # MongoDB restart + sanity-check tests
-└── minio/                  # MinIO deployment + backup tests (Phase 6)
+├── setup_suite.bash        # Suite-level DB deployment (deploy once, not per-file)
+├── test_helper/
+│   └── common_setup.bash   # skip_unless_*_topology, assert_*_ready, deploy_*_with_topology
+├── common/                 # Auth + hello task + in-pod tests
+├── mariadb/
+│   ├── restart.bats
+│   └── replication.bats    # GTID setup-replication + correctness (REQUIRED_TOPOLOGY=2+1)
+├── mongodb/
+│   ├── restart.bats
+│   ├── rs_init.bats         # RS init idempotency (skips if MONGO_TOPOLOGY=standalone)
+│   ├── replication.bats    # RS formation + peer connectivity (REQUIRED_TOPOLOGY=2+1)
+│   └── sanity_check.bats
+└── minio/                  # MinIO deployment + backup tests
 ```
 
 ### Iterating on Task Scripts
@@ -327,7 +382,11 @@ ENABLE_MINIO=true ./scripts/test.sh
 - Task execution: `common/hello`, `restart`, `sanity-check`
 - Log streaming: `/tasks/<id>/logs`
 - In-pod requests: test-client → aqsh via NodePort
+- Replication (dual mode, `MONGO_TOPOLOGY=2+1`): MongoDB RS init, RS correctness, MongoDB peer-proxy connectivity
+- Replication (dual mode, `MARIADB_TOPOLOGY=2+1`): MariaDB GTID setup-replication, data written on primary readable on replica (30s lag window)
 - MinIO (optional): deployment, nginx proxy routing, backup tasks
+
+**Topology-aware skipping**: Tests declare `REQUIRED_MONGO_TOPOLOGY` / `REQUIRED_MARIADB_TOPOLOGY` and are automatically skipped when the deployed topology doesn't match (e.g., replication tests skip in `standalone` mode).
 
 ---
 

@@ -92,9 +92,13 @@ nginx HTTP gateway (cluster-dbs:30083)
 | aqsh-mariadb | cluster-dbs | 30081 | All | MariaDB task API |
 | aqsh-mongodb | cluster-dbs | 30082 | All | MongoDB task API |
 | **nginx HTTP gateway** | **cluster-dbs** | **30083** | **ENABLE_MINIO=true** | **HTTP proxy for aqsh + MinIO** |
-| MongoDB peer (NodePort) | cluster-dbs-a/b | 30090 | dual | Replication target |
-| MariaDB peer (NodePort) | cluster-dbs-a/b | 30091 | dual | Replication target |
+| mongodb-0 NodePort | cluster-dbs / cluster-dbs-a/b | 30090 | All | Per-pod, primary/secondary |
+| mariadb-0 NodePort | cluster-dbs / cluster-dbs-a/b | 30091 | All | Per-pod, primary/secondary |
 | **MinIO API** | **cluster-minio** | **30092** | **ENABLE_MINIO=true** | **S3-compatible API** |
 | **MinIO Console** | **cluster-minio** | **30093** | **ENABLE_MINIO=true** | **Web UI** |
+| **mongodb-1 NodePort** | **cluster-dbs-a or cluster-dbs** | **30094** | **topology needs pod-1** | **Per-pod secondary (NEW)** |
+| **mariadb-1 NodePort** | **cluster-dbs-a or cluster-dbs** | **30095** | **topology needs pod-1** | **Per-pod secondary (NEW)** |
+| **mongodb-2 NodePort** | **cluster-dbs** | **30096** | **topology=3+0** | **Per-pod secondary (NEW)** |
+| **mariadb-2 NodePort** | **cluster-dbs** | **30097** | **topology=3+0** | **Per-pod secondary (NEW)** |
 
-**No port conflicts**: MinIO uses 30092-30093 on cluster-minio; dual-mode DB NodePorts use 30090-30091 on cluster-dbs-a/b.
+**No port conflicts**: MinIO uses 30092-30093 on cluster-minio; per-pod DB NodePorts use 30090-30097 across cluster-dbs / cluster-dbs-a/b.

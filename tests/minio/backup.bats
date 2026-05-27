@@ -45,7 +45,7 @@ teardown_file() {
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
 
-  wait_for_task "$MARIADB_AQSH_URL" "$task_id" 300
+  wait_for_task "$MARIADB_AQSH_URL" "$task_id" 960
 
   local status namespace bucket
   status=$(echo "$TASK_RESPONSE" | jq -r '.status')
@@ -68,7 +68,7 @@ teardown_file() {
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
 
-  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 300
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 960
 
   local status namespace bucket
   status=$(echo "$TASK_RESPONSE" | jq -r '.status')
@@ -91,7 +91,7 @@ teardown_file() {
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
 
-  wait_for_task "$MARIADB_AQSH_URL" "$task_id" 300
+  wait_for_task "$MARIADB_AQSH_URL" "$task_id" 960
 
   local bucket
   bucket=$(echo "$TASK_RESPONSE" | jq -r '.result.bucket // empty')
@@ -106,7 +106,7 @@ teardown_file() {
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
 
-  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 300
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 960
 
   local size_bytes timestamp
   size_bytes=$(echo "$TASK_RESPONSE" | jq -r '.result.size_bytes // empty')

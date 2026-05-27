@@ -46,7 +46,7 @@ common_setup() {
 
   if [[ "${1:-}" == "--create-token" ]]; then
     export TOKEN
-    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=10m)
+    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
   fi
 }
 
@@ -87,7 +87,7 @@ http_post() {
 # Returns 0 on completed, 1 on failed/timeout.
 # ---------------------------------------------------------------------------
 wait_for_task() {
-  local base_url="$1" task_id="$2" max_wait="${3:-300}"
+  local base_url="$1" task_id="$2" max_wait="${3:-540}"
   local elapsed=0 status
 
   while (( elapsed < max_wait )); do

@@ -8,13 +8,19 @@ setup_file() {
   common_setup --create-token
   local topo="${MONGO_TOPOLOGY:-standalone}"
   if [[ "$topo" == "standalone" ]]; then
-    skip "rs-init tests require a Replica Set topology (MONGO_TOPOLOGY=2+1, 1+2, or 3+0)"
+    export RUN_RS_INIT_TESTS="false"
+    return 0
   fi
+
+  export RUN_RS_INIT_TESTS="true"
   assert_mongodb_ready "mongo-1"
 }
 
 setup() {
   load '../test_helper/common_setup'
+  if [[ "${RUN_RS_INIT_TESTS:-false}" != "true" ]]; then
+    skip "rs-init tests require a Replica Set topology (MONGO_TOPOLOGY=2+1, 1+2, or 3+0)"
+  fi
 }
 
 @test "rs-init task succeeds on cluster-a" {

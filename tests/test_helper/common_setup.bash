@@ -23,6 +23,8 @@ common_setup() {
   export DB_MODE="${DB_MODE:-single}"
   export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
   export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+  export MONGO_TOPOLOGY="${MONGO_TOPOLOGY:-standalone}"
+  export MARIADB_TOPOLOGY="${MARIADB_TOPOLOGY:-standalone}"
 
   export CLUSTER_DBS_IP
   export MARIADB_AQSH_URL="http://${CLUSTER_DBS_IP}:30081"
@@ -448,7 +450,11 @@ assert_mongodb_ready() {
 assert_mariadb_ready() {
   local namespace="$1"
   local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
-  if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
+  if [[ "${MARIADB_TOPOLOGY:-standalone}" != "standalone" ]]; then
+    # Replication mode: native StatefulSet, wait for pods.
+    kubectl --context "$ctx" -n "$namespace" wait pod \
+      -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=30s
+  elif [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
     kubectl --context "$ctx" -n "$namespace" wait \
       --for=condition=Ready mariadb/mariadb --timeout=30s
   else

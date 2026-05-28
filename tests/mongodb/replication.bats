@@ -3,13 +3,22 @@ REQUIRED_MONGO_TOPOLOGY="2+1"
 setup_file() {
   load '../test_helper/common_setup'
   common_setup --create-token
-  skip_unless_mongo_topology "$REQUIRED_MONGO_TOPOLOGY"
+
+  if [[ "${MONGO_TOPOLOGY:-standalone}" != "$REQUIRED_MONGO_TOPOLOGY" ]]; then
+    export RUN_MONGO_REPLICATION_TESTS="false"
+    return 0
+  fi
+
+  export RUN_MONGO_REPLICATION_TESTS="true"
   assert_mongodb_ready "mongo-1" "kind-cluster-dbs-a"
   assert_mongodb_ready "mongo-1" "kind-cluster-dbs-b"
 }
 
 setup() {
   load '../test_helper/common_setup'
+  if [[ "${RUN_MONGO_REPLICATION_TESTS:-false}" != "true" ]]; then
+    skip "Requires MONGO_TOPOLOGY=${REQUIRED_MONGO_TOPOLOGY}, current=${MONGO_TOPOLOGY:-standalone}"
+  fi
 }
 
 @test "mongodb aqsh on cluster-a is reachable" {

@@ -3,13 +3,22 @@ REQUIRED_MARIADB_TOPOLOGY="2+1"
 setup_file() {
   load '../test_helper/common_setup'
   common_setup --create-token
-  skip_unless_mariadb_topology "$REQUIRED_MARIADB_TOPOLOGY"
+
+  if [[ "${MARIADB_TOPOLOGY:-standalone}" != "$REQUIRED_MARIADB_TOPOLOGY" ]]; then
+    export RUN_MARIADB_REPLICATION_TESTS="false"
+    return 0
+  fi
+
+  export RUN_MARIADB_REPLICATION_TESTS="true"
   assert_mariadb_ready "mariadb-1" "kind-cluster-dbs-a"
   assert_mariadb_ready "mariadb-1" "kind-cluster-dbs-b"
 }
 
 setup() {
   load '../test_helper/common_setup'
+  if [[ "${RUN_MARIADB_REPLICATION_TESTS:-false}" != "true" ]]; then
+    skip "Requires MARIADB_TOPOLOGY=${REQUIRED_MARIADB_TOPOLOGY}, current=${MARIADB_TOPOLOGY:-standalone}"
+  fi
 }
 
 peer_proxy_mariadb_ping() {

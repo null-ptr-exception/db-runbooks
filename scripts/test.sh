@@ -16,6 +16,7 @@ trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 # Global setup: create clusters and deploy shared infrastructure
 "${SCRIPT_DIR}/setup-clusters.sh"
 "${SCRIPT_DIR}/deploy-infra.sh"
+"${SCRIPT_DIR}/deploy.sh"
 
 # Run all tests — topology guards (skip_unless_mongo_topology /
 # skip_unless_mariadb_topology) handle skipping tests that require a topology

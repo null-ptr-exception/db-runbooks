@@ -21,7 +21,10 @@ RUN apt-get update \
     && curl -fsSLo /tmp/kubectl.sha256 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl.sha256" \
     && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
-    && rm -f /tmp/kubectl.sha256
+    && rm -f /tmp/kubectl.sha256 \
+    # MinIO client (mc)
+    && curl -fsSLo /usr/local/bin/mc "https://dl.min.io/client/mc/release/linux-$(dpkg --print-architecture)/mc" \
+    && chmod +x /usr/local/bin/mc
 
 COPY ${TASKS_YAML} /etc/aqsh/tasks.yaml
 COPY --chmod=0755 lib/ /tasks/lib/

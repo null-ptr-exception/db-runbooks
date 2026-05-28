@@ -12,12 +12,30 @@ permissions:
 jobs:
   integration:
     runs-on: [self-hosted, kata-rophy]
-    timeout-minutes: 45
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # Kind clusters share the host — must be sequential
+      matrix:
+        include:
+          - db_mode: single
+            use_mariadb_operator: "true"
+          - db_mode: single
+            use_mariadb_operator: "false"
+          - db_mode: dual
+            use_mariadb_operator: "true"
+          - db_mode: dual
+            use_mariadb_operator: "false"
+    env:
+      DB_MODE: ${{ matrix.db_mode }}
+      USE_MARIADB_OPERATOR: ${{ matrix.use_mariadb_operator }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
-      - name: Run BATS tests
+      - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
         run: ./scripts/test.sh
 
       - name: Tear down clusters

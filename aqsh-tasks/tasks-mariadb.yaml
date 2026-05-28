@@ -5,6 +5,7 @@ defaults:
 tasks:
   common/hello:
     script: common/hello.sh
+    timeout: 1m
     allowed_groups: ["system:serviceaccounts"]
     input:
       - name: name
@@ -14,7 +15,7 @@ tasks:
   restart:
     script: mariadb/restart.sh
     description: "Rolling restart of a MariaDB StatefulSet"
-    timeout: 5m
+    timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
       - name: namespace
@@ -32,3 +33,24 @@ tasks:
         required: false
         type: string
         default: app.kubernetes.io/name=mariadb
+  backup:
+    script: backup/backup-mariadb.sh
+    description: "Backup MariaDB database to MinIO"
+    timeout: 15m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mariadb-[0-9]+$'
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: db-backups
+      - name: backup_databases
+        env: BACKUP_DATABASES
+        required: false
+        type: string
+        default: --all-databases

@@ -9,7 +9,7 @@ setup() {
 }
 
 teardown_file() {
-  kubectl --context kind-cluster-dbs delete ns mariadb-1 --ignore-not-found
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mariadb-1 --ignore-not-found
 }
 
 @test "restart task completes successfully" {
@@ -23,7 +23,7 @@ teardown_file() {
 
 @test "restart advances StatefulSet generation and all replicas ready" {
   local before_generation
-  before_generation=$(kubectl --context kind-cluster-dbs -n mariadb-1 \
+  before_generation=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 \
     get statefulset mariadb -o jsonpath='{.status.observedGeneration}')
 
   http_post "${MARIADB_AQSH_URL}/tasks/restart" '{"namespace": "mariadb-1"}'
@@ -34,16 +34,16 @@ teardown_file() {
   wait_for_task "$MARIADB_AQSH_URL" "$task_id"
 
   # Wait for pods to be ready after restart
-  kubectl --context kind-cluster-dbs -n mariadb-1 wait pod \
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 wait pod \
     -l app.kubernetes.io/name=mariadb \
     --for=condition=Ready --timeout=120s >/dev/null 2>&1
 
   local after_generation ready replicas
-  after_generation=$(kubectl --context kind-cluster-dbs -n mariadb-1 \
+  after_generation=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 \
     get statefulset mariadb -o jsonpath='{.status.observedGeneration}')
-  ready=$(kubectl --context kind-cluster-dbs -n mariadb-1 \
+  ready=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 \
     get statefulset mariadb -o jsonpath='{.status.readyReplicas}')
-  replicas=$(kubectl --context kind-cluster-dbs -n mariadb-1 \
+  replicas=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 \
     get statefulset mariadb -o jsonpath='{.status.replicas}')
 
   echo "generation: ${before_generation} → ${after_generation}, ready: ${ready}/${replicas}"

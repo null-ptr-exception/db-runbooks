@@ -20,10 +20,22 @@ common_setup() {
   # shellcheck source=/dev/null
   source "${ROOT_DIR}/.env"
 
+  export DB_MODE="${DB_MODE:-single}"
+  export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
+  export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+
   export CLUSTER_DBS_IP
   export MARIADB_AQSH_URL="http://${CLUSTER_DBS_IP}:30081"
   export MONGODB_AQSH_URL="http://${CLUSTER_DBS_IP}:30082"
   export FEDAUTH_URL="http://${CLUSTER_AUTH_IP}:30080"
+
+  if [[ "$DB_MODE" == "dual" ]]; then
+    export CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP
+    export MARIADB_AQSH_A_URL="http://${CLUSTER_DBS_A_IP}:30081"
+    export MARIADB_AQSH_B_URL="http://${CLUSTER_DBS_B_IP}:30081"
+    export MONGODB_AQSH_A_URL="http://${CLUSTER_DBS_A_IP}:30082"
+    export MONGODB_AQSH_B_URL="http://${CLUSTER_DBS_B_IP}:30082"
+  fi
 
   # Wait for test-client pod to be ready, then resolve its name
   kubectl --context kind-cluster-apps -n app-a wait pod \
@@ -34,7 +46,7 @@ common_setup() {
 
   if [[ "${1:-}" == "--create-token" ]]; then
     export TOKEN
-    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=10m)
+    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
   fi
 }
 
@@ -75,7 +87,7 @@ http_post() {
 # Returns 0 on completed, 1 on failed/timeout.
 # ---------------------------------------------------------------------------
 wait_for_task() {
-  local base_url="$1" task_id="$2" max_wait="${3:-300}"
+  local base_url="$1" task_id="$2" max_wait="${3:-540}"
   local elapsed=0 status
 
   while (( elapsed < max_wait )); do
@@ -108,10 +120,10 @@ wait_for_task() {
 # fully removed before proceeding.
 # ---------------------------------------------------------------------------
 _wait_for_ns_deleted() {
-  local namespace="$1" elapsed=0
+  local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" elapsed=0
   while (( elapsed < 60 )); do
     local phase
-    phase=$(kubectl --context kind-cluster-dbs get ns "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    phase=$(kubectl --context "$ctx" get ns "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null || true)
     if [[ -z "$phase" ]]; then
       return 0
     fi
@@ -134,12 +146,13 @@ _wait_for_ns_deleted() {
 # ---------------------------------------------------------------------------
 deploy_mariadb() {
   local namespace="$1"
+  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
-  _wait_for_ns_deleted "$namespace"
-  kubectl --context kind-cluster-dbs create ns "$namespace" --dry-run=client -o yaml \
-    | kubectl --context kind-cluster-dbs apply -f -
+  _wait_for_ns_deleted "$namespace" "$ctx"
+  kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
+    | kubectl --context "$ctx" apply -f -
 
-  kubectl --context kind-cluster-dbs -n "$namespace" apply -f - <<EOF
+  kubectl --context "$ctx" -n "$namespace" apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -154,11 +167,40 @@ subjects:
     namespace: db-ops
 EOF
 
-  kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml"
-
-  echo "Waiting for MariaDB in ${namespace} to be ready..."
-  kubectl --context kind-cluster-dbs -n "$namespace" wait \
-    --for=condition=Ready mariadb/mariadb --timeout=180s
+  if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
+    kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml"
+    echo "Waiting for MariaDB in ${namespace} to be ready..."
+    if ! kubectl --context "$ctx" -n "$namespace" wait \
+      --for=condition=Ready mariadb/mariadb --timeout=300s 2>/dev/null; then
+      echo "MariaDB CR not ready after 300s. Checking status..."
+      kubectl --context "$ctx" -n "$namespace" get mariadb mariadb -o yaml | tail -50
+      kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/instance=mariadb
+      kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/instance=mariadb | tail -30
+      return 1
+    fi
+  else
+    # Extract only the Secret document from the operator yaml, then apply native StatefulSet
+    python3 -c "
+import sys, re
+docs = open('${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml').read().split('\n---\n')
+for doc in docs:
+    if re.search(r'^kind:\s*Secret', doc, re.MULTILINE):
+        print(doc)
+" | kubectl --context "$ctx" -n "$namespace" apply -f -
+    kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
+    kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
+    echo "Waiting for MariaDB in ${namespace} to be ready..."
+    if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
+      echo "Rollout status timed out, falling back to wait pod..."
+      kubectl --context "$ctx" -n "$namespace" wait pod \
+        -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+        echo "MariaDB pod still not ready. Checking pod status..."
+        kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
+        kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
+        return 1
+      }
+    fi
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -169,12 +211,13 @@ EOF
 # ---------------------------------------------------------------------------
 deploy_mongodb() {
   local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
 
-  _wait_for_ns_deleted "$namespace"
-  kubectl --context kind-cluster-dbs create ns "$namespace" --dry-run=client -o yaml \
-    | kubectl --context kind-cluster-dbs apply -f -
+  _wait_for_ns_deleted "$namespace" "$ctx"
+  kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
+    | kubectl --context "$ctx" apply -f -
 
-  kubectl --context kind-cluster-dbs -n "$namespace" apply -f - <<EOF
+  kubectl --context "$ctx" -n "$namespace" apply -f - <<EOF
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
@@ -189,15 +232,150 @@ subjects:
     namespace: db-ops
 EOF
 
-  if ! kubectl --context kind-cluster-dbs -n "$namespace" get secret mongodb-credentials &>/dev/null; then
-    kubectl --context kind-cluster-dbs -n "$namespace" create secret generic mongodb-credentials \
+  if ! kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials &>/dev/null; then
+    kubectl --context "$ctx" -n "$namespace" create secret generic mongodb-credentials \
       --from-literal="MONGO_ROOT_USER=${namespace}-admin" \
       --from-literal="MONGO_ROOT_PASS=$(openssl rand -base64 16 | tr -d '=+/')"
   fi
 
-  kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/${namespace}.yaml"
+  kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/${namespace}.yaml"
+  kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
-  kubectl --context kind-cluster-dbs -n "$namespace" wait pod \
-    -l app=mongodb --for=condition=Ready --timeout=180s
+  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=240s 2>/dev/null; then
+    echo "Rollout status timed out, falling back to wait pod..."
+    kubectl --context "$ctx" -n "$namespace" wait pod \
+      -l app=mongodb --for=condition=Ready --timeout=60s || {
+      echo "MongoDB pod still not ready. Checking pod status..."
+      kubectl --context "$ctx" -n "$namespace" get pods -l app=mongodb
+      kubectl --context "$ctx" -n "$namespace" describe pod -l app=mongodb | tail -30
+      return 1
+    }
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# deploy_mongodb_dual <namespace>
+#
+# Deploys MongoDB into <namespace> on both cluster-dbs-a and cluster-dbs-b.
+# ---------------------------------------------------------------------------
+deploy_mongodb_dual() {
+  local namespace="$1"
+  local ctx_a="kind-cluster-dbs-a"
+  local ctx_b="kind-cluster-dbs-b"
+
+  deploy_mongodb "$namespace" "$ctx_a"
+  deploy_mongodb "$namespace" "$ctx_b"
+
+  # Deploy nginx-proxy for peer-db-proxy connectivity
+  echo "Deploying nginx-proxy for cross-cluster connectivity..."
+
+  # Deploy to cluster-a with cluster-b as peer
+  PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_a" apply -f -
+  kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Deploy to cluster-b with cluster-a as peer
+  PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_b" apply -f -
+  kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Wait for nginx-proxy to be ready
+  echo "Waiting for nginx-proxy on both clusters..."
+  kubectl --context "$ctx_a" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+  kubectl --context "$ctx_b" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+}
+
+# ---------------------------------------------------------------------------
+# deploy_mariadb_dual <namespace>
+#
+# Deploys MariaDB into <namespace> on both cluster-dbs-a and cluster-dbs-b.
+# ---------------------------------------------------------------------------
+deploy_mariadb_dual() {
+  local namespace="$1"
+  local ctx_a="kind-cluster-dbs-a"
+  local ctx_b="kind-cluster-dbs-b"
+
+  for ctx in "$ctx_a" "$ctx_b"; do
+    _wait_for_ns_deleted "$namespace" "$ctx"
+    kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
+      | kubectl --context "$ctx" apply -f -
+
+    kubectl --context "$ctx" -n "$namespace" apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aqsh-mariadb-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aqsh-mariadb-manager
+subjects:
+  - kind: ServiceAccount
+    name: kube-auth-proxy
+    namespace: db-ops
+EOF
+
+    if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
+      kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml"
+      kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
+    else
+      python3 -c "
+import sys, re
+docs = open('${ROOT_DIR}/k8s/cluster-dbs/mariadb/${namespace}.yaml').read().split('\n---\n')
+for doc in docs:
+    if re.search(r'^kind:\s*Secret', doc, re.MULTILINE):
+        print(doc)
+" | kubectl --context "$ctx" -n "$namespace" apply -f -
+      kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/statefulset.yaml"
+      kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mariadb/nodeport-service.yaml"
+    fi
+  done
+
+  echo "Waiting for MariaDB in ${namespace} on both clusters..."
+  for ctx in "$ctx_a" "$ctx_b"; do
+    if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
+      if ! kubectl --context "$ctx" -n "$namespace" wait \
+        --for=condition=Ready mariadb/mariadb --timeout=300s 2>/dev/null; then
+        echo "MariaDB CR not ready on $ctx after 300s. Checking status..."
+        kubectl --context "$ctx" -n "$namespace" get mariadb mariadb -o yaml | tail -50
+        kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/instance=mariadb
+        kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/instance=mariadb | tail -30
+        return 1
+      fi
+    else
+      if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mariadb --timeout=240s 2>/dev/null; then
+        echo "Rollout status timed out on $ctx, falling back to wait pod..."
+        kubectl --context "$ctx" -n "$namespace" wait pod \
+          -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=60s || {
+          echo "MariaDB pod still not ready on $ctx. Checking pod status..."
+          kubectl --context "$ctx" -n "$namespace" get pods -l app.kubernetes.io/name=mariadb
+          kubectl --context "$ctx" -n "$namespace" describe pod -l app.kubernetes.io/name=mariadb | tail -30
+          return 1
+        }
+      fi
+    fi
+  done
+
+  # Deploy nginx-proxy for peer-db-proxy connectivity
+  echo "Deploying nginx-proxy for cross-cluster connectivity..."
+
+  # Deploy to cluster-a with cluster-b as peer
+  PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_a" apply -f -
+  kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Deploy to cluster-b with cluster-a as peer
+  PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
+    | kubectl --context "$ctx_b" apply -f -
+  kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
+
+  # Wait for nginx-proxy to be ready
+  echo "Waiting for nginx-proxy on both clusters..."
+  kubectl --context "$ctx_a" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
+  kubectl --context "$ctx_b" -n db-ops wait pod \
+    -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
 }

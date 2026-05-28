@@ -12,15 +12,10 @@ data:
       ttl: 60
       max_entries: 1000
     clusters:
-      cluster-auth:
+      cluster-dbs-a:
         issuer: "https://kubernetes.default.svc.cluster.local"
         ca_cert: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
         token_path: "/var/run/secrets/kubernetes.io/serviceaccount/token"
-      cluster-dbs-a:
-        issuer: "${ISSUER_DBS_A}"
-        api_server: "https://${CLUSTER_DBS_A_IP}:6443"
-        ca_cert: "/etc/kube-federated-auth/ca-certs/cluster-dbs-a-ca.crt"
-        token_path: "/etc/kube-federated-auth/tokens/cluster-dbs-a-token"
       cluster-dbs-b:
         issuer: "${ISSUER_DBS_B}"
         api_server: "https://${CLUSTER_DBS_B_IP}:6443"

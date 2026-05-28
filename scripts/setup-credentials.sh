@@ -10,6 +10,12 @@ source "$ENV_FILE"
 
 DB_MODE="${DB_MODE:-single}"
 
+if [[ "$DB_MODE" == "dual" ]]; then
+  FEDAUTH_CONTEXT="kind-cluster-dbs-a"
+else
+  FEDAUTH_CONTEXT="kind-cluster-auth"
+fi
+
 echo "=== Extracting OIDC issuers ==="
 
 get_issuer() {
@@ -68,34 +74,34 @@ EOF
 
   echo "=== Storing CA certs as ConfigMap in cluster-auth ==="
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
-    kubectl --context kind-cluster-auth -n db-ops create configmap kube-federated-auth-ca-certs \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create configmap kube-federated-auth-ca-certs \
       --from-literal="cluster-dbs-a-ca.crt=${CA_DBS_A}" \
       --from-literal="cluster-dbs-b-ca.crt=${CA_DBS_B}" \
       --from-literal="cluster-apps-ca.crt=${CA_APPS}" \
       --from-literal="cluster-minio-ca.crt=${CA_MINIO}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   else
-    kubectl --context kind-cluster-auth -n db-ops create configmap kube-federated-auth-ca-certs \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create configmap kube-federated-auth-ca-certs \
       --from-literal="cluster-dbs-a-ca.crt=${CA_DBS_A}" \
       --from-literal="cluster-dbs-b-ca.crt=${CA_DBS_B}" \
       --from-literal="cluster-apps-ca.crt=${CA_APPS}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   fi
 
   echo "=== Storing tokens as Secret in cluster-auth ==="
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
-    kubectl --context kind-cluster-auth -n db-ops create secret generic kube-federated-auth-tokens \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create secret generic kube-federated-auth-tokens \
       --from-literal="cluster-dbs-a-token=${TOKEN_DBS_A}" \
       --from-literal="cluster-dbs-b-token=${TOKEN_DBS_B}" \
       --from-literal="cluster-apps-token=${TOKEN_APPS}" \
       --from-literal="cluster-minio-token=${TOKEN_MINIO}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   else
-    kubectl --context kind-cluster-auth -n db-ops create secret generic kube-federated-auth-tokens \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create secret generic kube-federated-auth-tokens \
       --from-literal="cluster-dbs-a-token=${TOKEN_DBS_A}" \
       --from-literal="cluster-dbs-b-token=${TOKEN_DBS_B}" \
       --from-literal="cluster-apps-token=${TOKEN_APPS}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   fi
 else
   ISSUER_DBS=$(get_issuer cluster-dbs)
@@ -115,30 +121,30 @@ EOF
 
   echo "=== Storing CA certs as ConfigMap in cluster-auth ==="
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
-    kubectl --context kind-cluster-auth -n db-ops create configmap kube-federated-auth-ca-certs \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create configmap kube-federated-auth-ca-certs \
       --from-literal="cluster-dbs-ca.crt=${CA_DBS}" \
       --from-literal="cluster-apps-ca.crt=${CA_APPS}" \
       --from-literal="cluster-minio-ca.crt=${CA_MINIO}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   else
-    kubectl --context kind-cluster-auth -n db-ops create configmap kube-federated-auth-ca-certs \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create configmap kube-federated-auth-ca-certs \
       --from-literal="cluster-dbs-ca.crt=${CA_DBS}" \
       --from-literal="cluster-apps-ca.crt=${CA_APPS}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   fi
 
   echo "=== Storing tokens as Secret in cluster-auth ==="
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
-    kubectl --context kind-cluster-auth -n db-ops create secret generic kube-federated-auth-tokens \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create secret generic kube-federated-auth-tokens \
       --from-literal="cluster-dbs-token=${TOKEN_DBS}" \
       --from-literal="cluster-apps-token=${TOKEN_APPS}" \
       --from-literal="cluster-minio-token=${TOKEN_MINIO}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   else
-    kubectl --context kind-cluster-auth -n db-ops create secret generic kube-federated-auth-tokens \
+    kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops create secret generic kube-federated-auth-tokens \
       --from-literal="cluster-dbs-token=${TOKEN_DBS}" \
       --from-literal="cluster-apps-token=${TOKEN_APPS}" \
-      --dry-run=client -o yaml | kubectl --context kind-cluster-auth apply -f -
+      --dry-run=client -o yaml | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   fi
 fi
 

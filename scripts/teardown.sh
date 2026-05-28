@@ -19,7 +19,13 @@ else
   DB_CLUSTERS=(cluster-dbs)
 fi
 
-for cluster in cluster-auth "${DB_CLUSTERS[@]}" cluster-apps; do
+if [[ "$DB_MODE" != "dual" ]]; then
+  EXTRA_CLUSTERS=(cluster-auth)
+else
+  EXTRA_CLUSTERS=()
+fi
+
+for cluster in "${EXTRA_CLUSTERS[@]}" "${DB_CLUSTERS[@]}" cluster-apps; do
   if kind get clusters 2>/dev/null | grep -qx "$cluster"; then
     echo "Deleting $cluster..."
     kind delete cluster --name "$cluster"

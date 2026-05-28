@@ -210,9 +210,13 @@ deploy_dbs_cluster() {
   fi
 }
 
-echo "=== Step 1: cluster-auth namespaces and RBAC ==="
-
-kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/namespace.yaml"
+if [[ "$DB_MODE" == "dual" ]]; then
+  FEDAUTH_CONTEXT="kind-cluster-dbs-a"
+else
+  FEDAUTH_CONTEXT="kind-cluster-auth"
+  echo "=== Step 1: cluster-auth namespaces and RBAC ==="
+  kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/namespace.yaml"
+fi
 
 echo "=== Step 2: cluster-apps and cluster-dbs namespaces / RBAC ==="
 
@@ -245,20 +249,20 @@ echo "=== Step 3: Bootstrap credentials ==="
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-echo "=== Step 4: Deploy kube-federated-auth ==="
+echo "=== Step 4: Deploy kube-federated-auth (context: ${FEDAUTH_CONTEXT}) ==="
 
-kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/rbac.yaml"
+kubectl --context "${FEDAUTH_CONTEXT}" apply -f "${ROOT_DIR}/k8s/cluster-auth/rbac.yaml"
 
 if [[ "$DB_MODE" == "dual" ]]; then
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
     export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS ISSUER_MINIO
     export CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP CLUSTER_MINIO_IP
     envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual-minio.yaml.tpl" \
-      | kubectl --context kind-cluster-auth apply -f -
+      | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   else
     export ISSUER_DBS_A ISSUER_DBS_B ISSUER_APPS CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP CLUSTER_APPS_IP
     envsubst < "${ROOT_DIR}/k8s/cluster-auth/configmap-dual.yaml.tpl" \
-      | kubectl --context kind-cluster-auth apply -f -
+      | kubectl --context "${FEDAUTH_CONTEXT}" apply -f -
   fi
 else
   if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
@@ -273,12 +277,12 @@ else
   fi
 fi
 
-kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
-kubectl_apply_with_retry "kind-cluster-auth" "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
+kubectl --context "${FEDAUTH_CONTEXT}" apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
+kubectl_apply_with_retry "${FEDAUTH_CONTEXT}" "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
 
 echo "Waiting for kube-federated-auth to be ready..."
-kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=240s
-wait_for_log_message "kind-cluster-auth" "db-ops" "app=kube-federated-auth" "starting server" 240
+kubectl --context "${FEDAUTH_CONTEXT}" -n db-ops rollout status deployment/kube-federated-auth --timeout=240s
+wait_for_log_message "${FEDAUTH_CONTEXT}" "db-ops" "app=kube-federated-auth" "starting server" 240
 
 echo "=== Step 5: Build aqsh images ==="
 

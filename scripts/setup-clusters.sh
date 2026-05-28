@@ -9,7 +9,9 @@ DB_MODE="${DB_MODE:-single}"
 ENABLE_MINIO="${ENABLE_MINIO:-false}"
 
 if [[ "$DB_MODE" == "dual" ]]; then
-  CLUSTERS=(cluster-auth cluster-dbs-a cluster-dbs-b cluster-apps)
+  # In dual mode, kube-federated-auth is co-located in cluster-dbs-a
+  # to reduce cluster count (3 instead of 4).
+  CLUSTERS=(cluster-dbs-a cluster-dbs-b cluster-apps)
 else
   CLUSTERS=(cluster-auth cluster-dbs cluster-apps)
 fi
@@ -35,10 +37,7 @@ get_node_ip() {
   docker inspect "${1}-control-plane" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
 }
 
-CLUSTER_AUTH_IP=$(get_node_ip cluster-auth)
 CLUSTER_APPS_IP=$(get_node_ip cluster-apps)
-
-echo "cluster-auth: $CLUSTER_AUTH_IP"
 echo "cluster-apps: $CLUSTER_APPS_IP"
 
 if [[ "$ENABLE_MINIO" == "true" ]]; then
@@ -54,7 +53,7 @@ if [[ "$DB_MODE" == "dual" ]]; then
 
   cat > "$ENV_FILE" <<EOF
 DB_MODE=${DB_MODE}
-CLUSTER_AUTH_IP=${CLUSTER_AUTH_IP}
+CLUSTER_AUTH_IP=${CLUSTER_DBS_A_IP}
 CLUSTER_DBS_A_IP=${CLUSTER_DBS_A_IP}
 CLUSTER_DBS_B_IP=${CLUSTER_DBS_B_IP}
 CLUSTER_DBS_IP=${CLUSTER_DBS_A_IP}
@@ -65,7 +64,9 @@ $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_IP=${CLUSTER_MINI
 $(if [[ "$ENABLE_MINIO" == "true" ]]; then echo "CLUSTER_MINIO_CONTEXT=kind-cluster-minio"; fi)
 EOF
 else
+  CLUSTER_AUTH_IP=$(get_node_ip cluster-auth)
   CLUSTER_DBS_IP=$(get_node_ip cluster-dbs)
+  echo "cluster-auth: $CLUSTER_AUTH_IP"
   echo "cluster-dbs:  $CLUSTER_DBS_IP"
 
   cat > "$ENV_FILE" <<EOF

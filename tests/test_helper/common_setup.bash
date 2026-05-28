@@ -146,7 +146,7 @@ _wait_for_ns_deleted() {
 # ---------------------------------------------------------------------------
 deploy_mariadb() {
   local namespace="$1"
-  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
 
   _wait_for_ns_deleted "$namespace" "$ctx"
   kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
@@ -267,20 +267,16 @@ deploy_mongodb_dual() {
   deploy_mongodb "$namespace" "$ctx_a"
   deploy_mongodb "$namespace" "$ctx_b"
 
-  # Deploy nginx-proxy for peer-db-proxy connectivity
   echo "Deploying nginx-proxy for cross-cluster connectivity..."
 
-  # Deploy to cluster-a with cluster-b as peer
   PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
     | kubectl --context "$ctx_a" apply -f -
   kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
 
-  # Deploy to cluster-b with cluster-a as peer
   PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
     | kubectl --context "$ctx_b" apply -f -
   kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
 
-  # Wait for nginx-proxy to be ready
   echo "Waiting for nginx-proxy on both clusters..."
   kubectl --context "$ctx_a" -n db-ops wait pod \
     -l app=nginx-proxy --for=condition=Ready --timeout=60s || true
@@ -359,20 +355,16 @@ for doc in docs:
     fi
   done
 
-  # Deploy nginx-proxy for peer-db-proxy connectivity
   echo "Deploying nginx-proxy for cross-cluster connectivity..."
 
-  # Deploy to cluster-a with cluster-b as peer
   PEER_DBS_IP="$CLUSTER_DBS_B_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
     | kubectl --context "$ctx_a" apply -f -
   kubectl --context "$ctx_a" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
 
-  # Deploy to cluster-b with cluster-a as peer
   PEER_DBS_IP="$CLUSTER_DBS_A_IP" envsubst < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
     | kubectl --context "$ctx_b" apply -f -
   kubectl --context "$ctx_b" apply -f "${ROOT_DIR}/k8s/nginx-proxy/deployment.yaml"
 
-  # Wait for nginx-proxy to be ready
   echo "Waiting for nginx-proxy on both clusters..."
   kubectl --context "$ctx_a" -n db-ops wait pod \
     -l app=nginx-proxy --for=condition=Ready --timeout=60s || true

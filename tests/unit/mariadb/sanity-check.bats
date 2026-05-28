@@ -183,3 +183,25 @@ EOF
   [ "$result_status" = "ERROR" ]
   [ "$reason_code" = "CR_NOT_FOUND" ]
 }
+
+@test "native StatefulSet mode can run SQL checks without operator CR" {
+  run "${SCRIPT}" \
+    --context kind-cluster-dbs \
+    --namespace mariadb-1 \
+    --resource mariadb \
+    --mdb mariadb \
+    --skip-operator \
+    --skip-service \
+    --skip-replication \
+    --skip-semi-sync \
+    --json
+
+  [ "$status" -eq 0 ]
+  result_status=$(printf '%s' "$output" | jq -r '.status')
+  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
+  inferred_primary=$(printf '%s' "$output" | jq -r '.checks[] | select(.reason_code == "CURRENT_PRIMARY_INFERRED") | .pod')
+
+  [ "$result_status" = "PASS" ]
+  [ "$reason_code" = "SANITY_PASS" ]
+  [ "$inferred_primary" = "mariadb-0" ]
+}

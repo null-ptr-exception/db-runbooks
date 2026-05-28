@@ -260,6 +260,10 @@ if [[ -z "$CURRENT_PRIMARY" && -n "$CURRENT_PRIMARY_INDEX" ]]; then
   CURRENT_PRIMARY=$(mariadb_pod_name "$CURRENT_PRIMARY_INDEX")
 fi
 mapfile -t PODS < <(mariadb_list_pods "$REPLICAS")
+if [[ -z "$CURRENT_PRIMARY" ]] && ! bool_enabled "$CHECK_OPERATOR" && [[ "${#PODS[@]}" -gt 0 ]]; then
+  CURRENT_PRIMARY="${PODS[0]}"
+  emit_check current_primary PASS CURRENT_PRIMARY_INFERRED "operator check disabled; using ${CURRENT_PRIMARY} as SQL target" "$CURRENT_PRIMARY"
+fi
 
 if bool_enabled "$CHECK_PODS"; then
   [[ "$JSON_ONLY" -ne 1 ]] && echo "=== Pods ==="
@@ -507,7 +511,13 @@ else
 fi
 
 case "$RESULT_STATUS" in
-  PASS) SUMMARY="MariaDB operator, service, SQL, replication, and semi-sync sanity checks passed" ;;
+  PASS)
+    if bool_enabled "$CHECK_OPERATOR"; then
+      SUMMARY="MariaDB operator, service, SQL, replication, and semi-sync sanity checks passed"
+    else
+      SUMMARY="MariaDB pod and SQL sanity checks passed"
+    fi
+    ;;
   WARN) SUMMARY="MariaDB sanity checks passed with non-blocking warnings" ;;
   BLOCK) SUMMARY="MariaDB sanity checks found blocking issues; stop the automated step" ;;
   *) SUMMARY="MariaDB sanity check could not complete cleanly" ;;

@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-
 DB_MODE="${DB_MODE:-single}"
 
 # Teardown clusters on exit (success or failure) — registered early so
@@ -21,11 +20,13 @@ if [[ "$DB_MODE" == "dual" ]]; then
   bats --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
+    "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
     "${ROOT_DIR}/tests/mongodb"
 else
   bats --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
+    "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
     "${ROOT_DIR}/tests/mongodb/restart.bats" \
     "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
 fi

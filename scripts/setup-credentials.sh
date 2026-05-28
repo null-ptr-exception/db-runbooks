@@ -43,7 +43,9 @@ if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
 fi
 
 # Remove any previously written issuer/cert entries from .env (idempotency)
-sed -i '/^ISSUER_DBS/d;/^ISSUER_APPS=/d;/^ISSUER_MINIO=/d' "$ENV_FILE"
+ENV_TMP=$(mktemp)
+sed '/^ISSUER_DBS/d;/^ISSUER_APPS=/d;/^ISSUER_MINIO=/d' "$ENV_FILE" > "$ENV_TMP"
+mv "$ENV_TMP" "$ENV_FILE"
 
 if [[ "$DB_MODE" == "dual" ]]; then
   ISSUER_DBS_A=$(get_issuer cluster-dbs-a)

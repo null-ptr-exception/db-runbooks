@@ -64,7 +64,7 @@ mariadb_list_pods() {
   if [[ -n "$replicas" ]] && [[ "$replicas" != "0" ]]; then
     local index
     for index in $(seq 0 $((replicas - 1))); do
-      mariadb_pod_name "$index"
+      printf '%s\n' "$(mariadb_pod_name "$index")"
     done
     return 0
   fi

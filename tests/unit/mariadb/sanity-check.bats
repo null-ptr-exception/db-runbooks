@@ -105,7 +105,7 @@ if [[ "$cmd" == "get" ]]; then
   fi
 
   if [[ "$resource" == "statefulset" && "$name" == "mariadb" ]]; then
-    printf '1'
+    printf '%s' "${KUBECTL_STS_REPLICAS:-1}"
     exit 0
   fi
 fi
@@ -185,12 +185,15 @@ EOF
 }
 
 @test "native StatefulSet mode can run SQL checks without operator CR" {
+  export KUBECTL_STS_REPLICAS=3
+
   run "${SCRIPT}" \
     --context kind-cluster-dbs \
     --namespace mariadb-1 \
     --resource mariadb \
     --mdb mariadb \
     --skip-operator \
+    --skip-pods \
     --skip-service \
     --skip-replication \
     --skip-semi-sync \

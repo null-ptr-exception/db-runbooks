@@ -18,6 +18,18 @@ if [[ "$ENABLE_MINIO" == "true" ]]; then
   CLUSTERS+=("cluster-minio")
 fi
 
+preload_kind_image() {
+  local image="$1"
+
+  echo "=== Preloading ${image} into Kind clusters ==="
+  docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
+
+  for cluster in "${CLUSTERS[@]}"; do
+    echo "Loading ${image} into ${cluster}..."
+    kind load docker-image "$image" --name "$cluster"
+  done
+}
+
 echo "=== Creating Kind clusters (DB_MODE=${DB_MODE}) ==="
 
 for cluster in "${CLUSTERS[@]}"; do
@@ -28,6 +40,10 @@ for cluster in "${CLUSTERS[@]}"; do
     kind create cluster --name "$cluster" --wait 60s
   fi
 done
+
+if [[ "$DB_MODE" == "dual" ]] || [[ "$ENABLE_MINIO" == "true" ]]; then
+  preload_kind_image "nginx:alpine"
+fi
 
 echo "=== Extracting Docker IPs ==="
 

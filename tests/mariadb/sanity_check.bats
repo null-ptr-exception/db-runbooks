@@ -34,6 +34,7 @@ _mariadb_sanity_payload() {
       resource: "mariadb",
       mdb: "mariadb",
       check_operator: "false",
+      check_pods: "false",
       check_service: "false",
       check_replication: "false",
       check_semi_sync: "false"
@@ -66,6 +67,11 @@ _assert_mariadb_sanity_ok() {
   case "$result_status" in
     PASS|WARN) ;;
     *)
+      echo "$TASK_RESPONSE" | jq -r '
+        ((.result.data as $data | (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))) | .checks[]? |
+        "check=" + .name + " status=" + .status + " reason=" + .reason_code + " detail=" + .detail
+        )
+      ' >&2
       echo "expected ${label} sanity status PASS or WARN, got ${result_status}" >&2
       return 1
       ;;

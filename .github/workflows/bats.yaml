@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   integration:
-    runs-on: [self-hosted, kata-rophy]
+    runs-on: [self-hosted, aws-runner]
     timeout-minutes: 60
     strategy:
       fail-fast: false

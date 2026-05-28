@@ -35,6 +35,38 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install CLI tools
+        run: |
+          set -euo pipefail
+
+          # kind
+          if ! command -v kind &>/dev/null; then
+            curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
+            chmod +x /usr/local/bin/kind
+          fi
+
+          # kubectl
+          if ! command -v kubectl &>/dev/null; then
+            curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl"
+            chmod +x /usr/local/bin/kubectl
+          fi
+
+          # helm
+          if ! command -v helm &>/dev/null; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          fi
+
+          # skaffold
+          if ! command -v skaffold &>/dev/null; then
+            curl -fsSL -o /usr/local/bin/skaffold https://storage.googleapis.com/skaffold/releases/v2.16.0/skaffold-linux-amd64
+            chmod +x /usr/local/bin/skaffold
+          fi
+
+          # bats
+          if ! command -v bats &>/dev/null; then
+            apt-get update && apt-get install -y bats
+          fi
+
       - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
         run: ./scripts/test.sh
 

@@ -33,6 +33,42 @@ tasks:
         required: false
         type: string
         default: app.kubernetes.io/name=mariadb
+  status:
+    script: mariadb/status.sh
+    description: "Read-only MariaDB status summary for operator and native StatefulSet targets"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: include_sql
+        env: INCLUDE_SQL
+        required: false
+        type: string
+        default: "true"
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"

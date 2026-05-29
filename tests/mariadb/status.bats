@@ -22,19 +22,11 @@ teardown_file() {
 }
 
 _mariadb_status_payload() {
-  if [[ "${USE_MARIADB_OPERATOR:-true}" == "true" ]]; then
-    jq -nc '{
-      namespace: "mariadb-3",
-      resource: "mariadb",
-      mdb: "mariadb"
-    }'
-  else
-    jq -nc '{
-      namespace: "mariadb-3",
-      resource: "mariadb",
-      mdb: "mariadb"
-    }'
-  fi
+  jq -nc '{
+    namespace: "mariadb-3",
+    resource: "mariadb",
+    mdb: "mariadb"
+  }'
 }
 
 _assert_mariadb_status_ok() {

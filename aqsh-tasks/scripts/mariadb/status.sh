@@ -102,10 +102,11 @@ fi
 
 if ! k8s_check >/dev/null; then
   RESULT_JSON=$(jq -nc \
+    --arg context "${CONTEXT:-}" \
     --arg namespace "$NAMESPACE" \
     --arg resource "$RESOURCE" \
     --arg mdb "$MDB" \
-    '{status:"CRITICAL", reason_code:"KUBECTL_UNAVAILABLE", summary:"Kubernetes API is not reachable", target:{namespace:$namespace, resource:$resource, mdb:$mdb}}')
+    '{status:"CRITICAL", reason_code:"KUBECTL_UNAVAILABLE", summary:"Kubernetes API is not reachable", target:{context:$context, namespace:$namespace, resource:$resource, mdb:$mdb}}')
   [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$RESULT_JSON" > "$RESULT_FILE"
   printf '%s\n' "$RESULT_JSON"
   exit 0

@@ -1,0 +1,134 @@
+repositories:
+  - name: cilium
+    url: https://helm.cilium.io
+  - name: istio
+    url: https://istio-release.storage.googleapis.com/charts
+
+helmDefaults:
+  skipSchemaValidation: true
+
+releases:
+  # --- Cilium CNI ---
+  - name: cilium
+    namespace: kube-system
+    chart: cilium/cilium
+    version: 1.16.7
+    kubeContext: kind-cluster-a
+    values:
+      - ipam:
+          mode: kubernetes
+        image:
+          pullPolicy: IfNotPresent
+        hubble:
+          enabled: false
+
+  - name: cilium
+    namespace: kube-system
+    chart: cilium/cilium
+    version: 1.16.7
+    kubeContext: kind-cluster-b
+    values:
+      - ipam:
+          mode: kubernetes
+        image:
+          pullPolicy: IfNotPresent
+        hubble:
+          enabled: false
+
+  # --- Istio base (cluster-a) ---
+  - name: istio-base
+    namespace: istio-system
+    chart: istio/base
+    version: 1.24.3
+    kubeContext: kind-cluster-a
+    createNamespace: true
+
+  - name: istiod
+    namespace: istio-system
+    chart: istio/istiod
+    version: 1.24.3
+    kubeContext: kind-cluster-a
+    needs:
+      - istio-system/istio-base
+    values:
+      - pilot:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+  - name: istio-ingressgateway
+    namespace: istio-ingress
+    chart: istio/gateway
+    version: 1.24.3
+    kubeContext: kind-cluster-a
+    createNamespace: true
+    needs:
+      - istio-system/istiod
+    values:
+      - service:
+          type: NodePort
+          ports:
+            - name: status-port
+              port: 15021
+              protocol: TCP
+              targetPort: 15021
+            - name: http2
+              port: 80
+              protocol: TCP
+              targetPort: 80
+              nodePort: 30080
+            - name: https
+              port: 443
+              protocol: TCP
+              targetPort: 443
+              nodePort: 30443
+
+  # --- Istio base (cluster-b) ---
+  - name: istio-base
+    namespace: istio-system
+    chart: istio/base
+    version: 1.24.3
+    kubeContext: kind-cluster-b
+    createNamespace: true
+
+  - name: istiod
+    namespace: istio-system
+    chart: istio/istiod
+    version: 1.24.3
+    kubeContext: kind-cluster-b
+    needs:
+      - istio-system/istio-base
+    values:
+      - pilot:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+
+  - name: istio-ingressgateway
+    namespace: istio-ingress
+    chart: istio/gateway
+    version: 1.24.3
+    kubeContext: kind-cluster-b
+    createNamespace: true
+    needs:
+      - istio-system/istiod
+    values:
+      - service:
+          type: NodePort
+          ports:
+            - name: status-port
+              port: 15021
+              protocol: TCP
+              targetPort: 15021
+            - name: http2
+              port: 80
+              protocol: TCP
+              targetPort: 80
+              nodePort: 30080
+            - name: https
+              port: 443
+              protocol: TCP
+              targetPort: 443
+              nodePort: 30443

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-federated-auth
+  namespace: db-ops
+spec:
+  type: ClusterIP
+  selector:
+    app: kube-federated-auth
+  ports:
+    - port: 8080
+      targetPort: 8080

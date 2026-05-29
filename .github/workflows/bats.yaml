@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        suite: [aqsh, mongodb]
+        suite: [aqsh, mongodb, mariadb-operator, mariadb-native]
     env:
       TEARDOWN: "true"
     steps:

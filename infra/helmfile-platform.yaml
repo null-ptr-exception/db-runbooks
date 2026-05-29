@@ -6,8 +6,6 @@ repositories:
 
 helmDefaults:
   skipSchemaValidation: true
-  args:
-    - "--server-side=false"
 
 releases:
   # --- Cilium CNI ---

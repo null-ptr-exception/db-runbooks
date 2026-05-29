@@ -51,11 +51,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kind
-          if ! command -v kind &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
-            sudo chmod +x /usr/local/bin/kind
-          fi
+          # kind (always install to ensure correct version)
+          sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+          sudo chmod +x /usr/local/bin/kind
 
           # kubectl
           if ! command -v kubectl &>/dev/null; then
@@ -115,11 +113,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kind (needed by ctlptl inside Docker)
-          if ! command -v kind &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
-            sudo chmod +x /usr/local/bin/kind
-          fi
+          # kind (always install to ensure correct version)
+          sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+          sudo chmod +x /usr/local/bin/kind
 
           # kubectl
           if ! command -v kubectl &>/dev/null; then

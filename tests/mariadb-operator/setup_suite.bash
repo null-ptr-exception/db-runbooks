@@ -4,6 +4,7 @@ setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   local K8S_DIR="${ROOT_DIR}/k8s"
   local CTX_A="kind-cluster-a"
+  local CTX_B="kind-cluster-b"
 
   # Reuse aqsh suite setup (Layers 1-3: clusters, platform, aqsh infra)
   source "${ROOT_DIR}/tests/aqsh/setup_suite.bash"
@@ -53,6 +54,45 @@ EOF
     kubectl --context "$CTX_A" -n mariadb-1 get pods
     return 1
   fi
+
+  # Layer 3d: MinIO on cluster-b (backup target)
+  kubectl --context "$CTX_B" apply -f "${K8S_DIR}/cluster-b/minio/minio.yaml"
+
+  kubectl --context "$CTX_B" -n istio-ingress apply -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: minio-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "minio.kind-b.test"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: minio
+spec:
+  hosts:
+    - "minio.kind-b.test"
+  gateways:
+    - minio-gateway
+  http:
+    - route:
+        - destination:
+            host: minio.minio.svc.cluster.local
+            port:
+              number: 9000
+EOF
+
+  echo "Waiting for MinIO on cluster-b..."
+  kubectl --context "$CTX_B" -n minio rollout status deployment/minio --timeout=120s
 }
 
 teardown_suite() {
@@ -66,4 +106,7 @@ teardown_suite() {
   kubectl --context "$CTX_A" delete clusterrole aqsh-mariadb-manager --ignore-not-found
   helm uninstall mariadb-operator --kube-context "$CTX_A" --namespace db-ops 2>/dev/null || true
   helm uninstall mariadb-operator-crds --kube-context "$CTX_A" 2>/dev/null || true
+  kubectl --context kind-cluster-b -n istio-ingress delete gateway minio-gateway --ignore-not-found
+  kubectl --context kind-cluster-b -n istio-ingress delete virtualservice minio --ignore-not-found
+  kubectl --context kind-cluster-b delete ns minio --ignore-not-found
 }

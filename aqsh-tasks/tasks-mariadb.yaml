@@ -131,6 +131,11 @@ tasks:
         required: false
         type: string
         default: db-backups
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: false
+        type: string
+        default: "http://minio.minio.svc.cluster.local:9000"
       - name: backup_databases
         env: BACKUP_DATABASES
         required: false

@@ -130,6 +130,45 @@ EOF
   kubectl --context "$CTX_A" -n mariadb-1 rollout status statefulset/mariadb --timeout=120s
   echo "Waiting for MariaDB on cluster-b..."
   kubectl --context "$CTX_B" -n mariadb-2 rollout status statefulset/mariadb --timeout=120s
+
+  # Layer 3e: MinIO on cluster-b (backup target)
+  kubectl --context "$CTX_B" apply -f "${K8S_DIR}/cluster-b/minio/minio.yaml"
+
+  kubectl --context "$CTX_B" -n istio-ingress apply -f - <<'EOF'
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: minio-gateway
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "minio.kind-b.test"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: minio
+spec:
+  hosts:
+    - "minio.kind-b.test"
+  gateways:
+    - minio-gateway
+  http:
+    - route:
+        - destination:
+            host: minio.minio.svc.cluster.local
+            port:
+              number: 9000
+EOF
+
+  echo "Waiting for MinIO on cluster-b..."
+  kubectl --context "$CTX_B" -n minio rollout status deployment/minio --timeout=120s
 }
 
 teardown_suite() {
@@ -148,4 +187,7 @@ teardown_suite() {
   kubectl --context "$CTX_B" delete ns mariadb-2 --ignore-not-found
   kubectl --context "$CTX_A" delete clusterrole aqsh-mariadb-manager --ignore-not-found
   kubectl --context "$CTX_B" delete clusterrole aqsh-mariadb-manager --ignore-not-found
+  kubectl --context "$CTX_B" -n istio-ingress delete gateway minio-gateway --ignore-not-found
+  kubectl --context "$CTX_B" -n istio-ingress delete virtualservice minio --ignore-not-found
+  kubectl --context "$CTX_B" delete ns minio --ignore-not-found
 }

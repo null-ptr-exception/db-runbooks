@@ -12,6 +12,7 @@ export CTX_B="kind-cluster-b"
 
 export MONGODB_AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
 export FEDAUTH_URL="http://fedauth.kind-a.test:30080"
+export MINIO_ENDPOINT="http://minio.kind-b.test:30080"
 
 mongodb_suite_setup() {
   kubectl --context "$CTX_B" -n app-a wait pod \

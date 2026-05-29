@@ -9,7 +9,7 @@ setup_suite() {
   for img in nginx:alpine curlimages/curl:latest; do
     local name="${img%%:*}"
     name="${name##*/}"
-    docker pull "$img" 2>/dev/null || true
+    docker pull --platform linux/amd64 "$img" 2>/dev/null || true
     docker tag "$img" "${REGISTRY}/${name}:latest"
     docker push "${REGISTRY}/${name}:latest"
   done

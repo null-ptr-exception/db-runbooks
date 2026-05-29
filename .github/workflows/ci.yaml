@@ -21,13 +21,19 @@ jobs:
       - name: Install lint tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y shellcheck python3-pip bats
+          sudo apt-get install -y shellcheck python3-pip bats jq
           python3 -m pip install yamllint
 
       - name: Run ShellCheck
         run: |
           find . -type f -name '*.sh' -print0 \
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
+
+      - name: Run Bats unit tests
+        run: |
+          if [ -d tests/unit ]; then
+            bats --recursive tests/unit
+          fi
 
       - name: Run Hadolint
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
@@ -53,4 +59,3 @@ jobs:
 
       - name: Build aqsh-mongodb image
         run: docker build --build-arg TASKS_YAML=tasks-mongodb.yaml -t aqsh-mongodb:ci ./aqsh-tasks
-

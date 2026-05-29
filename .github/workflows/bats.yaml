@@ -68,6 +68,17 @@ jobs:
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
           fi
 
+          # helmfile
+          if ! command -v helmfile &>/dev/null; then
+            cd /tmp && curl -fsSL https://github.com/helmfile/helmfile/releases/download/v1.5.2/helmfile_1.5.2_linux_amd64.tar.gz | sudo tar xz -C /usr/local/bin helmfile
+            sudo chmod +x /usr/local/bin/helmfile
+          fi
+
+          # helm-diff plugin
+          if ! helm plugin list | grep -q diff; then
+            helm plugin install https://github.com/databus23/helm-diff
+          fi
+
           # skaffold
           if ! command -v skaffold &>/dev/null; then
             sudo curl -fsSL -o /usr/local/bin/skaffold https://storage.googleapis.com/skaffold/releases/v2.16.0/skaffold-linux-amd64
@@ -85,3 +96,67 @@ jobs:
       - name: Tear down clusters
         if: always()
         run: ./scripts/teardown.sh
+
+  infra:
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
+      - name: Install CLI tools
+        run: |
+          set -euo pipefail
+
+          # kind (needed by ctlptl inside Docker)
+          if ! command -v kind &>/dev/null; then
+            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
+            sudo chmod +x /usr/local/bin/kind
+          fi
+
+          # kubectl
+          if ! command -v kubectl &>/dev/null; then
+            sudo curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl"
+            sudo chmod +x /usr/local/bin/kubectl
+          fi
+
+          # helm
+          if ! command -v helm &>/dev/null; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
+          fi
+
+          # helmfile
+          if ! command -v helmfile &>/dev/null; then
+            cd /tmp && curl -fsSL https://github.com/helmfile/helmfile/releases/download/v1.5.2/helmfile_1.5.2_linux_amd64.tar.gz | sudo tar xz -C /usr/local/bin helmfile
+            sudo chmod +x /usr/local/bin/helmfile
+          fi
+
+          # helm-diff plugin
+          if ! helm plugin list | grep -q diff; then
+            helm plugin install https://github.com/databus23/helm-diff
+          fi
+
+          # bats
+          if ! command -v bats &>/dev/null; then
+            sudo apt-get update && sudo apt-get install -y bats
+          fi
+
+      - name: Install BATS helpers
+        run: ./scripts/install-bats-libs.sh
+
+      - name: Run infra e2e tests
+        run: bats tests/infra/
+
+      - name: Tear down clusters
+        if: always()
+        run: |
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true

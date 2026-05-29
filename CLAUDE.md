@@ -6,20 +6,19 @@ Multi-cluster sandbox for database operations automation with aqsh, kube-auth-pr
 
 | Context | Cluster | Purpose |
 |---------|---------|---------|
-| kind-cluster-auth | cluster-auth | kube-federated-auth server |
-| kind-cluster-dbs | cluster-dbs | mariadb-operator + aqsh-mariadb + aqsh-mongodb + kube-auth-proxy + Redis + nginx HTTP gateway |
-| kind-cluster-apps | cluster-apps | test-client workloads |
-| kind-cluster-minio | cluster-minio | MinIO object storage (optional, ENABLE_MINIO=true) |
+| kind-cluster-a | cluster-a | Server-side: kube-federated-auth, aqsh, Redis, databases, operators |
+| kind-cluster-b | cluster-b | Client-side: test-client workloads |
 
 ## Namespaces
 
 | Namespace | Clusters | Purpose |
 |-----------|----------|---------|
-| db-ops | cluster-auth, cluster-dbs, cluster-apps, cluster-minio | Control plane (federated auth, aqsh, credentials) |
-| db-1 (10.6), db-2 (10.11), db-3 (11.4) | cluster-dbs | MariaDB instances |
-| mongo-1, mongo-2, mongo-3 | cluster-dbs | MongoDB instances |
-| minio | cluster-minio | MinIO deployment (optional) |
-| app-a, app-b | cluster-apps | Per-application client workloads |
+| db-ops | cluster-a, cluster-b | Control plane (federated auth, aqsh, credentials) |
+| istio-system | cluster-a, cluster-b | Istio control plane |
+| istio-ingress | cluster-a, cluster-b | Istio ingress gateway |
+| app-a | cluster-b | Test-client workloads |
+| db-1, db-2, db-3 | cluster-a | MariaDB instances (mariadb suite) |
+| mongo-1, mongo-2, mongo-3 | cluster-a | MongoDB instances (mongodb suite) |
 
 Always specify `--context` when running kubectl commands.
 
@@ -36,21 +35,15 @@ Task scripts live in `aqsh-tasks/scripts/` and are baked into the `aqsh-tasks` D
 ## Quick Start
 
 ```bash
-scripts/setup.sh    # Create clusters, deploy, test
-scripts/teardown.sh # Clean up everything
-```
+# Run aqsh test suite (creates clusters + infra automatically)
+bats tests/aqsh/
 
-### With MinIO enabled
+# Run with teardown
+TEARDOWN=true bats tests/aqsh/
 
-```bash
-ENABLE_MINIO=true scripts/setup.sh
-```
-
-Or step by step:
-```bash
-ENABLE_MINIO=true scripts/setup-clusters.sh
-ENABLE_MINIO=true scripts/deploy-infra.sh
-ENABLE_MINIO=true scripts/deploy.sh
+# Clean up everything
+kind delete cluster --name cluster-a
+kind delete cluster --name cluster-b
 ```
 
 ## Environment Variables

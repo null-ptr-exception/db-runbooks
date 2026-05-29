@@ -85,6 +85,16 @@ releases:
               protocol: TCP
               targetPort: 443
               nodePort: 30443
+            - name: mongo
+              port: 27017
+              protocol: TCP
+              targetPort: 27017
+              nodePort: 30090
+            - name: mysql
+              port: 3306
+              protocol: TCP
+              targetPort: 3306
+              nodePort: 30091
 
   # --- Istio base (cluster-b) ---
   - name: istio-base
@@ -134,3 +144,13 @@ releases:
               protocol: TCP
               targetPort: 443
               nodePort: 30443
+            - name: mongo
+              port: 27017
+              protocol: TCP
+              targetPort: 27017
+              nodePort: 30090
+            - name: mysql
+              port: 3306
+              protocol: TCP
+              targetPort: 3306
+              nodePort: 30091

@@ -1,27 +1,30 @@
 # db-runbooks
 
-Multi-cluster sandbox for database operations automation with aqsh, kube-auth-proxy, kube-federated-auth, and mariadb-operator across 3-4 Kind clusters.
+Multi-cluster sandbox for database operations automation with aqsh, kube-auth-proxy, kube-federated-auth across 2 Kind clusters.
 
 ## kubectl Contexts
 
 | Context | Cluster | Purpose |
 |---------|---------|---------|
-| kind-cluster-auth | cluster-auth | kube-federated-auth server |
-| kind-cluster-dbs | cluster-dbs | mariadb-operator + aqsh-mariadb + aqsh-mongodb + kube-auth-proxy + Redis + nginx HTTP gateway |
-| kind-cluster-apps | cluster-apps | test-client workloads |
-| kind-cluster-minio | cluster-minio | MinIO object storage (optional, ENABLE_MINIO=true) |
+| kind-cluster-a | cluster-a | Server-side: kube-federated-auth, aqsh, Redis, databases, operators |
+| kind-cluster-b | cluster-b | Client-side: test-client workloads, MinIO backup target |
+
+Always specify `--context` when running kubectl commands.
 
 ## Namespaces
 
-| Namespace | Clusters | Purpose |
-|-----------|----------|---------|
-| db-ops | cluster-auth, cluster-dbs, cluster-apps, cluster-minio | Control plane (federated auth, aqsh, credentials) |
-| db-1 (10.6), db-2 (10.11), db-3 (11.4) | cluster-dbs | MariaDB instances |
-| mongo-1, mongo-2, mongo-3 | cluster-dbs | MongoDB instances |
-| minio | cluster-minio | MinIO deployment (optional) |
-| app-a, app-b | cluster-apps | Per-application client workloads |
-
-Always specify `--context` when running kubectl commands.
+| Namespace | Cluster | Purpose |
+|-----------|---------|---------|
+| db-ops | cluster-a | Control plane (federated auth, aqsh, Redis) |
+| db-ops | cluster-b | Federated auth RBAC |
+| istio-system | both | Istio control plane |
+| istio-ingress | both | Istio ingress gateway |
+| app-a | cluster-b | Test-client workloads |
+| mariadb-1 | cluster-a | MariaDB instance (mariadb suites) |
+| mariadb-2 | cluster-b | MariaDB instance (mariadb-native replication) |
+| mongo-1 | cluster-a | MongoDB instance (mongodb suite) |
+| mongo-2 | cluster-b | MongoDB instance (mongodb replication) |
+| minio | cluster-b | MinIO backup target (mariadb/mongodb suites) |
 
 ## Container Images
 
@@ -31,70 +34,50 @@ Always specify `--context` when running kubectl commands.
 
 ## aqsh Tasks
 
-Task scripts live in `aqsh-tasks/scripts/` and are baked into the `aqsh-tasks` Docker image via `aqsh-tasks/Dockerfile`. Skaffold manages the build lifecycle.
+Task scripts live in `aqsh-tasks/scripts/` and are baked into the `aqsh-tasks` Docker image via `aqsh-tasks/Dockerfile`. Skaffold manages the build lifecycle. Task configs: `aqsh-tasks/tasks-mariadb.yaml`, `aqsh-tasks/tasks-mongodb.yaml`.
 
 ## Quick Start
 
 ```bash
-scripts/setup.sh    # Create clusters, deploy, test
-scripts/teardown.sh # Clean up everything
+# Run aqsh test suite (creates clusters + infra automatically)
+bats tests/aqsh/
+
+# Run specific suite
+bats tests/mongodb/
+bats tests/mariadb-native/
+bats tests/mariadb-operator/
+
+# Run with teardown
+TEARDOWN=true bats tests/aqsh/
+
+# Clean up everything
+kind delete cluster --name cluster-a
+kind delete cluster --name cluster-b
 ```
 
-### With MinIO enabled
+## Test Suites
 
-```bash
-ENABLE_MINIO=true scripts/setup.sh
-```
+| Suite | Description | Infra |
+|-------|-------------|-------|
+| aqsh | Framework, auth, hello tasks | clusters + platform + aqsh |
+| mongodb | MongoDB restart, sanity, replication, backup | + MongoDB on both clusters + MinIO |
+| mariadb-native | MariaDB (StatefulSet) restart, sanity, replication, backup | + MariaDB on both clusters + MinIO |
+| mariadb-operator | MariaDB (operator CRD) restart, sanity, backup | + mariadb-operator + MariaDB CR + MinIO |
 
-Or step by step:
-```bash
-ENABLE_MINIO=true scripts/setup-clusters.sh
-ENABLE_MINIO=true scripts/deploy-infra.sh
-ENABLE_MINIO=true scripts/deploy.sh
-```
+Each suite sources the aqsh `setup_suite.bash` for shared infra (Layers 1-3), then adds its own database and MinIO setup.
 
-## Environment Variables
+## Networking
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DB_MODE` | `single` | Cluster topology: `single` or `dual` |
-| `USE_MARIADB_OPERATOR` | `true` | Use mariadb-operator (`true`) or native StatefulSet (`false`) |
-| `ENABLE_MINIO` | `false` | Deploy optional MinIO cluster for backups |
-
-## Optional Components
-
-### MinIO Cluster (ENABLE_MINIO=true)
-
-When enabled, creates an independent `cluster-minio` for object storage:
-- **Access**: Via nginx HTTP gateway at `http://{cluster-dbs-ip}:30083/minio/*`
-- **Direct API**: NodePort 30092 on cluster-minio
-- **Console**: NodePort 30093 on cluster-minio
-- **Federated Auth**: Integrated with kube-federated-auth (cluster-minio tokens trusted by cluster-auth)
-- **Storage**: 5Gi PersistentVolumeClaim
-- **Use Cases**: Database backups via aqsh tasks, manual backup storage
-
-**Architecture**:
-```
-test-client (cluster-apps)
-    │ Bearer Token
-    ▼
-nginx HTTP gateway (cluster-dbs:30083)
-    ├─ /mariadb/*  → aqsh-mariadb:4180
-    ├─ /mongodb/*  → aqsh-mongodb:4180
-    └─ /minio/*    → MinIO API (cluster-minio:30092)
-```
+- **DNS**: CoreDNS `template` plugin resolves `*.kind-a.test` → cluster-a Docker IP, `*.kind-b.test` → cluster-b Docker IP
+- **HTTP ingress**: Istio Gateway on port 80 (NodePort 30080) with `*.kind-a.test` hosts
+- **TCP ingress**: Istio TCP Gateways for MongoDB (27017/30090) and MariaDB (3306/30091)
+- **MinIO**: Via Istio HTTP Gateway on cluster-b (minio.kind-b.test:30080)
 
 ## Port Allocation
 
-| Service | Cluster | Port | Mode | Notes |
-|---------|---------|------|------|-------|
-| kube-federated-auth | cluster-auth | 30080 | All | Auth server |
-| aqsh-mariadb | cluster-dbs | 30081 | All | MariaDB task API |
-| aqsh-mongodb | cluster-dbs | 30082 | All | MongoDB task API |
-| **nginx HTTP gateway** | **cluster-dbs** | **30083** | **ENABLE_MINIO=true** | **HTTP proxy for aqsh + MinIO** |
-| MongoDB peer (NodePort) | cluster-dbs-a/b | 30090 | dual | Replication target |
-| MariaDB peer (NodePort) | cluster-dbs-a/b | 30091 | dual | Replication target |
-| **MinIO API** | **cluster-minio** | **30092** | **ENABLE_MINIO=true** | **S3-compatible API** |
-| **MinIO Console** | **cluster-minio** | **30093** | **ENABLE_MINIO=true** | **Web UI** |
-
-**No port conflicts**: MinIO uses 30092-30093 on cluster-minio; dual-mode DB NodePorts use 30090-30091 on cluster-dbs-a/b.
+| Service | Cluster | NodePort | Notes |
+|---------|---------|----------|-------|
+| Istio HTTP Gateway | cluster-a | 30080 | aqsh, fedauth VirtualServices |
+| MongoDB TCP Gateway | both | 30090 | Cross-cluster replication |
+| MariaDB TCP Gateway | both | 30091 | Cross-cluster replication |
+| MinIO (via Istio) | cluster-b | 30080 | S3-compatible backup target (minio.kind-b.test) |

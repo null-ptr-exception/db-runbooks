@@ -35,6 +35,11 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
       - name: Install CLI tools
         run: |
           set -euo pipefail

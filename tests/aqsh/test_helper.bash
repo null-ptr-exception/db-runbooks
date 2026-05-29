@@ -10,9 +10,9 @@ export ROOT_DIR
 export CTX_A="kind-cluster-a"
 export CTX_B="kind-cluster-b"
 
-export MARIADB_AQSH_URL="http://aqsh-mariadb.kind-a.localhost:38001"
-export MONGODB_AQSH_URL="http://aqsh-mongodb.kind-a.localhost:38001"
-export FEDAUTH_URL="http://fedauth.kind-a.localhost:38001"
+export MARIADB_AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
+export MONGODB_AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
+export FEDAUTH_URL="http://fedauth.kind-a.test:30080"
 
 aqsh_suite_setup() {
   kubectl --context "$CTX_B" -n app-a wait pod \

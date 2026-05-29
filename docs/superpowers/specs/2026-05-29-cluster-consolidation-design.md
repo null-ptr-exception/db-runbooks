@@ -20,7 +20,7 @@ Both clusters run:
 
 Kind configs declare `extraPortMappings` mapping NodePort 30080/30443 to the host ports above. Istio ingress gateway is configured as `NodePort` on 30080 (HTTP) and 30443 (HTTPS).
 
-Wildcard domains `*.kind-a.localhost` and `*.kind-b.localhost` resolve to 127.0.0.1 (RFC 6761) and route through the respective Istio gateways.
+Wildcard domains `*.kind-a.test` and `*.kind-b.test` are used for routing through the respective Istio gateways. On the host, `extraPortMappings` map host ports (38001/38443) to NodePort 30080/30443. Inside pods, CoreDNS is patched with a `template` plugin to resolve `*.kind-a.test` to cluster-a's Docker container IP and `*.kind-b.test` to cluster-b's, so pods connect directly to NodePort 30080. The `.test` TLD is used instead of `.localhost` because curl 8.x treats all `*.localhost` as 127.0.0.1 per RFC 6761, bypassing DNS.
 
 ## Infrastructure Layers
 
@@ -44,7 +44,7 @@ Contents:
 - Istio base 1.24.3 on both clusters
 - istiod 1.24.3 on both clusters
 - Istio ingress gateway 1.24.3 on both clusters (NodePort, ports 30080/30443)
-- Gateway resource with `*.kind-a.localhost` / `*.kind-b.localhost`
+- Gateway resource with `*.kind-a.test` / `*.kind-b.test`
 
 Requires `helmDefaults.skipSchemaValidation: true` due to Istio chart schema incompatibility with Helm v4.
 
@@ -72,7 +72,7 @@ Components on cluster-a (`db-ops` namespace):
 Components on cluster-b:
 - test-client (curl pod) in `app-a` namespace
 
-Connection flow: test-client → `aqsh.kind-a.localhost:38001` → Istio Gateway → VirtualService → aqsh service
+Connection flow: test-client → `aqsh-mariadb.kind-a.test:30080` → (CoreDNS → cluster-a container IP) → Istio Gateway → VirtualService → aqsh service
 
 No database operators needed. Lightest suite.
 
@@ -160,5 +160,5 @@ Hands-on testing confirmed (2026-05-29):
 - Kind clusters with `disableDefaultCNI: true` + Cilium 1.16 via helmfile: works
 - Istio 1.24 (base + istiod + gateway) via helmfile: works with `skipSchemaValidation: true`
 - Istio Gateway with NodePort 30080/30443 + Kind extraPortMappings: works
-- Wildcard domain `*.kind-a.localhost` routing through Istio Gateway: works (200 for matching hosts, 404 for non-matching)
+- Wildcard domain `*.kind-a.test` routing through Istio Gateway: works (200 for matching hosts, 404 for non-matching)
 - helmfile multi-cluster deployment with `kubeContext` per release and `needs` ordering: works

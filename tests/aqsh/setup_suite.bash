@@ -59,7 +59,7 @@ setup_suite() {
   echo "Waiting for aqsh-mongodb..."
   kubectl --context "$CTX_A" -n db-ops rollout status deployment/aqsh-mongodb --timeout=120s
 
-  # 3f. Istio VirtualServices for routing
+  # 3f. Istio Gateway + VirtualServices for routing
   kubectl --context "$CTX_A" -n istio-ingress apply -f - <<'VSEOF'
 apiVersion: networking.istio.io/v1
 kind: Gateway
@@ -74,7 +74,7 @@ spec:
         name: http
         protocol: HTTP
       hosts:
-        - "*.kind-a.localhost"
+        - "*.kind-a.test"
 ---
 apiVersion: networking.istio.io/v1
 kind: VirtualService
@@ -82,7 +82,7 @@ metadata:
   name: aqsh-mariadb
 spec:
   hosts:
-    - "aqsh-mariadb.kind-a.localhost"
+    - "aqsh-mariadb.kind-a.test"
   gateways:
     - aqsh-gateway
   http:
@@ -98,7 +98,7 @@ metadata:
   name: aqsh-mongodb
 spec:
   hosts:
-    - "aqsh-mongodb.kind-a.localhost"
+    - "aqsh-mongodb.kind-a.test"
   gateways:
     - aqsh-gateway
   http:
@@ -114,7 +114,7 @@ metadata:
   name: fedauth
 spec:
   hosts:
-    - "fedauth.kind-a.localhost"
+    - "fedauth.kind-a.test"
   gateways:
     - aqsh-gateway
   http:
@@ -125,7 +125,54 @@ spec:
               number: 8080
 VSEOF
 
-  # 3g. Test client on cluster-b
+  # 3g. Patch CoreDNS on both clusters to resolve *.kind-a.test / *.kind-b.test
+  # curl treats *.localhost as 127.0.0.1 (RFC 6761), so we use .test TLD instead.
+  # Pods resolve *.kind-a.test to cluster-a's Docker container IP directly.
+  local CLUSTER_A_IP CLUSTER_B_IP_DOCKER
+  CLUSTER_A_IP=$(docker inspect cluster-a-control-plane -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+  CLUSTER_B_IP_DOCKER=$(docker inspect cluster-b-control-plane -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+
+  for ctx in "$CTX_A" "$CTX_B"; do
+    kubectl --context "$ctx" -n kube-system create configmap coredns \
+      --from-literal=Corefile="
+kind-a.test:53 {
+    template IN A kind-a.test {
+        answer \"{{ .Name }} 60 IN A ${CLUSTER_A_IP}\"
+    }
+}
+kind-b.test:53 {
+    template IN A kind-b.test {
+        answer \"{{ .Name }} 60 IN A ${CLUSTER_B_IP_DOCKER}\"
+    }
+}
+.:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30
+    loop
+    reload
+    loadbalance
+}
+" --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
+    kubectl --context "$ctx" -n kube-system rollout restart deployment coredns
+  done
+
+  kubectl --context "$CTX_A" -n kube-system rollout status deployment coredns --timeout=30s
+  kubectl --context "$CTX_B" -n kube-system rollout status deployment coredns --timeout=30s
+
+  # 3h. Test client on cluster-b
   kubectl --context "$CTX_B" apply -f "${K8S_DIR}/cluster-b/test-client.yaml"
   echo "Waiting for test-client..."
   kubectl --context "$CTX_B" -n app-a rollout status deployment/test-client --timeout=60s

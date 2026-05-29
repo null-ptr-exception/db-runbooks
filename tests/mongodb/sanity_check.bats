@@ -1,15 +1,10 @@
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  deploy_mongodb "mongo-1"
+  load 'test_helper'
+  mongodb_suite_setup --create-token
 }
 
 setup() {
-  load '../test_helper/common_setup'
-}
-
-teardown_file() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
+  load 'test_helper'
 }
 
 @test "sanity-check completes without critical issues" {

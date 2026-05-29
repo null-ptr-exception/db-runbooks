@@ -1,15 +1,10 @@
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  deploy_mongodb "mongo-1"
+  load 'test_helper'
+  mongodb_suite_setup --create-token
 }
 
 setup() {
-  load '../test_helper/common_setup'
-}
-
-teardown_file() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
+  load 'test_helper'
 }
 
 @test "restart task completes successfully" {
@@ -23,7 +18,7 @@ teardown_file() {
 
 @test "restart advances StatefulSet generation and all replicas ready" {
   local before_generation
-  before_generation=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+  before_generation=$(kubectl --context kind-cluster-a -n mongo-1 \
     get statefulset mongodb -o jsonpath='{.status.observedGeneration}')
 
   http_post "${MONGODB_AQSH_URL}/tasks/restart" '{"namespace": "mongo-1"}'
@@ -33,17 +28,16 @@ teardown_file() {
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
   wait_for_task "$MONGODB_AQSH_URL" "$task_id"
 
-  # Wait for pods to be ready after restart
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 wait pod \
+  kubectl --context kind-cluster-a -n mongo-1 wait pod \
     -l app=mongodb \
     --for=condition=Ready --timeout=120s >/dev/null 2>&1
 
   local after_generation ready replicas
-  after_generation=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+  after_generation=$(kubectl --context kind-cluster-a -n mongo-1 \
     get statefulset mongodb -o jsonpath='{.status.observedGeneration}')
-  ready=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+  ready=$(kubectl --context kind-cluster-a -n mongo-1 \
     get statefulset mongodb -o jsonpath='{.status.readyReplicas}')
-  replicas=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+  replicas=$(kubectl --context kind-cluster-a -n mongo-1 \
     get statefulset mongodb -o jsonpath='{.status.replicas}')
 
   echo "generation: ${before_generation} → ${after_generation}, ready: ${ready}/${replicas}"

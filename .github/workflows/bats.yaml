@@ -51,9 +51,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kind (always install to ensure correct version)
-          sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
-          sudo chmod +x /usr/local/bin/kind
+          # kind
+          if ! command -v kind &>/dev/null; then
+            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
+            sudo chmod +x /usr/local/bin/kind
+          fi
 
           # kubectl
           if ! command -v kubectl &>/dev/null; then
@@ -64,17 +66,6 @@ jobs:
           # helm
           if ! command -v helm &>/dev/null; then
             curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
-          fi
-
-          # helmfile
-          if ! command -v helmfile &>/dev/null; then
-            cd /tmp && curl -fsSL https://github.com/helmfile/helmfile/releases/download/v1.5.2/helmfile_1.5.2_linux_amd64.tar.gz | sudo tar xz -C /usr/local/bin helmfile
-            sudo chmod +x /usr/local/bin/helmfile
-          fi
-
-          # helm-diff plugin
-          if ! helm plugin list | grep -q diff; then
-            helm plugin install https://github.com/databus23/helm-diff
           fi
 
           # skaffold
@@ -113,9 +104,11 @@ jobs:
         run: |
           set -euo pipefail
 
-          # kind (always install to ensure correct version)
-          sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
-          sudo chmod +x /usr/local/bin/kind
+          # kind
+          if ! command -v kind &>/dev/null; then
+            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
+            sudo chmod +x /usr/local/bin/kind
+          fi
 
           # kubectl
           if ! command -v kubectl &>/dev/null; then

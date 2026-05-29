@@ -12,7 +12,8 @@ export CTX_B="kind-cluster-b"
 export REGISTRY="localhost:5005"
 
 setup_infra() {
-  local INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local INFRA_DIR
+  INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
   # Layer 1: clusters + registry
   docker run --rm --network host \

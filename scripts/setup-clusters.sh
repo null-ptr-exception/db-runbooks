@@ -26,7 +26,9 @@ preload_kind_image() {
 
   for cluster in "${CLUSTERS[@]}"; do
     echo "Loading ${image} into ${cluster}..."
-    kind load docker-image "$image" --name "$cluster"
+    if ! kind load docker-image "$image" --name "$cluster"; then
+      echo "WARNING: failed to preload ${image} into ${cluster}; Kubernetes will pull it if needed" >&2
+    fi
   done
 }
 

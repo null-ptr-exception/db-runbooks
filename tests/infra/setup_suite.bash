@@ -9,8 +9,17 @@ setup_suite() {
   for img in nginx:alpine curlimages/curl:latest; do
     local name="${img%%:*}"
     name="${name##*/}"
-    docker pull --platform linux/amd64 "$img" 2>/dev/null || true
-    docker tag "$img" "${REGISTRY}/${name}:latest"
+    # Use ECR pull-through cache on CI to avoid Docker Hub rate limits
+    if [[ -n "${ECR_REGISTRY:-}" ]]; then
+      local ecr_img="${ECR_REGISTRY}/docker-hub/${img%%:*}:${img##*:}"
+      # Official images need library/ prefix
+      [[ "$img" != */* ]] && ecr_img="${ECR_REGISTRY}/docker-hub/library/${img}"
+      docker pull --platform linux/amd64 "$ecr_img"
+      docker tag "$ecr_img" "${REGISTRY}/${name}:latest"
+    else
+      docker pull --platform linux/amd64 "$img"
+      docker tag "$img" "${REGISTRY}/${name}:latest"
+    fi
     docker push "${REGISTRY}/${name}:latest"
   done
 

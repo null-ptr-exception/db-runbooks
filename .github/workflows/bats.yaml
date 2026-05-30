@@ -64,11 +64,19 @@ jobs:
   infra:
     runs-on: [self-hosted, aws-runner]
     timeout-minutes: 30
+    env:
+      ECR_REGISTRY: ${{ vars.ECR_REGISTRY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
+
+      - name: Login to ECR (pull-through cache for Docker Hub)
+        run: |
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
       - name: Tune kernel limits for Kind
         run: |

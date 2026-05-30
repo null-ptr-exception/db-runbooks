@@ -18,28 +18,6 @@ if [[ "$ENABLE_MINIO" == "true" ]]; then
   CLUSTERS+=("cluster-minio")
 fi
 
-ECR_REGISTRY="${ECR_REGISTRY:-}"
-
-configure_ecr_mirror() {
-  local node="$1"
-  local ecr_password
-  ecr_password="$(aws ecr get-login-password --region "${AWS_REGION:-ap-southeast-1}")"
-  local auth
-  auth="$(echo -n "AWS:${ecr_password}" | base64 -w0)"
-
-  docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
-  # docker-hub.vpc.internal is a VPC-internal proxy (available on aws-runner)
-  # that rewrites paths for ECR pull-through cache (adds docker-hub/ prefix).
-  docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml > /dev/null <<EOF
-server = "https://registry-1.docker.io"
-
-[host."http://docker-hub.vpc.internal"]
-  capabilities = ["pull", "resolve"]
-  [host."http://docker-hub.vpc.internal".header]
-    Authorization = ["Basic ${auth}"]
-EOF
-}
-
 echo "=== Creating Kind clusters (DB_MODE=${DB_MODE}) ==="
 
 for cluster in "${CLUSTERS[@]}"; do
@@ -50,13 +28,6 @@ for cluster in "${CLUSTERS[@]}"; do
     kind create cluster --name "$cluster" --wait 60s
   fi
 done
-
-if [[ -n "$ECR_REGISTRY" ]]; then
-  echo "=== Configuring ECR pull-through cache mirror ==="
-  for cluster in "${CLUSTERS[@]}"; do
-    configure_ecr_mirror "${cluster}-control-plane"
-  done
-fi
 
 echo "=== Extracting Docker IPs ==="
 

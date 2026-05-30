@@ -16,11 +16,7 @@ setup_infra() {
   INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
   # Layer 1: clusters + registry
-  docker run --rm --network host \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v "${INFRA_DIR}/ctlptl-infra.yaml":/ctlptl-infra.yaml:ro \
-    -v "${HOME}/.kube":/root/.kube \
-    tiltdev/ctlptl:v0.9.3 ctlptl apply -f /ctlptl-infra.yaml
+  ctlptl apply -f "${INFRA_DIR}/ctlptl-infra.yaml"
 
   # Layer 2: Cilium + Istio
   helmfile apply -f "${INFRA_DIR}/helmfile-infra.yaml"

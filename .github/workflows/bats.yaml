@@ -47,37 +47,11 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install CLI tools
+      - name: Activate mise
         run: |
-          set -euo pipefail
-
-          # kind
-          if ! command -v kind &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
-            sudo chmod +x /usr/local/bin/kind
-          fi
-
-          # kubectl
-          if ! command -v kubectl &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl"
-            sudo chmod +x /usr/local/bin/kubectl
-          fi
-
-          # helm
-          if ! command -v helm &>/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
-          fi
-
-          # skaffold
-          if ! command -v skaffold &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/skaffold https://storage.googleapis.com/skaffold/releases/v2.16.0/skaffold-linux-amd64
-            sudo chmod +x /usr/local/bin/skaffold
-          fi
-
-          # bats
-          if ! command -v bats &>/dev/null; then
-            sudo apt-get update && sudo apt-get install -y bats
-          fi
+          mise trust
+          mise install
+          echo "$(mise bin-paths)" >> "$GITHUB_PATH"
 
       - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
         run: ./scripts/test.sh
@@ -100,42 +74,11 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install CLI tools
+      - name: Activate mise
         run: |
-          set -euo pipefail
-
-          # kind
-          if ! command -v kind &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kind https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-amd64
-            sudo chmod +x /usr/local/bin/kind
-          fi
-
-          # kubectl
-          if ! command -v kubectl &>/dev/null; then
-            sudo curl -fsSL -o /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.33.1/bin/linux/amd64/kubectl"
-            sudo chmod +x /usr/local/bin/kubectl
-          fi
-
-          # helm
-          if ! command -v helm &>/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | sudo bash
-          fi
-
-          # helmfile
-          if ! command -v helmfile &>/dev/null; then
-            cd /tmp && curl -fsSL https://github.com/helmfile/helmfile/releases/download/v1.5.2/helmfile_1.5.2_linux_amd64.tar.gz | sudo tar xz -C /usr/local/bin helmfile
-            sudo chmod +x /usr/local/bin/helmfile
-          fi
-
-          # helm-diff plugin
-          if ! helm plugin list | grep -q diff; then
-            helm plugin install https://github.com/databus23/helm-diff
-          fi
-
-          # bats
-          if ! command -v bats &>/dev/null; then
-            sudo apt-get update && sudo apt-get install -y bats
-          fi
+          mise trust
+          mise install
+          echo "$(mise bin-paths)" >> "$GITHUB_PATH"
 
       - name: Install BATS helpers
         run: ./scripts/install-bats-libs.sh

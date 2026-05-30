@@ -82,10 +82,8 @@ jobs:
           mise install
           echo "$(mise bin-paths)" >> "$GITHUB_PATH"
 
-      - name: Register helm-diff plugin
-        run: |
-          mkdir -p "$(helm env HELM_PLUGINS)"
-          ln -sf "$(~/.local/bin/mise where helm-diff)/diff" "$(helm env HELM_PLUGINS)/helm-diff"
+      - name: Install helm-diff plugin
+        run: helm plugin install https://github.com/databus23/helm-diff --version v3.15.7 || true
 
       - name: Install BATS helpers
         run: ./scripts/install-bats-libs.sh

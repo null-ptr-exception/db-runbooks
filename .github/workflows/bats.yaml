@@ -49,6 +49,7 @@ jobs:
 
       - name: Activate mise
         run: |
+          eval "$(~/.local/bin/mise activate bash)"
           mise trust
           mise install
           echo "$(mise bin-paths)" >> "$GITHUB_PATH"
@@ -76,6 +77,7 @@ jobs:
 
       - name: Activate mise
         run: |
+          eval "$(~/.local/bin/mise activate bash)"
           mise trust
           mise install
           echo "$(mise bin-paths)" >> "$GITHUB_PATH"

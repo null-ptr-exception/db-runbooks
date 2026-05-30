@@ -282,7 +282,7 @@ wait_for_log_message "kind-cluster-auth" "db-ops" "app=kube-federated-auth" "sta
 
 echo "=== Step 5: Build aqsh images ==="
 
-skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest --quiet
+skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest
 
 echo "=== Step 6: Deploy DB cluster(s) ==="
 

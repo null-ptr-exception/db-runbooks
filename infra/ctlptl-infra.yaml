@@ -1,0 +1,28 @@
+apiVersion: ctlptl.dev/v1alpha1
+kind: Registry
+name: registry
+port: 5005
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+registry: registry
+kindV1Alpha4Cluster:
+  name: cluster-a
+  networking:
+    disableDefaultCNI: true
+  nodes:
+    - role: control-plane
+      image: kindest/node:v1.31.6
+---
+apiVersion: ctlptl.dev/v1alpha1
+kind: Cluster
+product: kind
+registry: registry
+kindV1Alpha4Cluster:
+  name: cluster-b
+  networking:
+    disableDefaultCNI: true
+  nodes:
+    - role: control-plane
+      image: kindest/node:v1.31.6

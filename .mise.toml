@@ -1,0 +1,7 @@
+[tools]
+kind = "0.31.0"
+kubectl = "1.33.1"
+helm = "3.21.0"
+skaffold = "2.16.0"
+helmfile = "1.5.2"
+ctlptl = "0.9.3"

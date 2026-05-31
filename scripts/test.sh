@@ -5,6 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 DB_MODE="${DB_MODE:-single}"
 
+# Ensure all prerequisites are installed
+"${SCRIPT_DIR}/preflight.sh"
+
 # Teardown clusters on exit (success or failure) — registered early so
 # clusters are cleaned up even if setup or deploy fails.
 trap '"${SCRIPT_DIR}/teardown.sh"' EXIT

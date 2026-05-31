@@ -372,10 +372,16 @@ ENABLE_MINIO=true ./scripts/test.sh
 
 ## 📦 Prerequisites
 
-- **Docker** (required, install manually)
-- kind, kubectl, helm, skaffold, jq, curl, python3, envsubst
+- **Docker**
+- **[Kind](https://kind.sigs.k8s.io/)** (v0.31.0+)
+- **[BATS](https://bats-core.readthedocs.io/)** (test runner)
+- **[mise](https://mise.jdx.dev/)** (runtime version manager)
 
-> **Auto-install**: Run `./scripts/preflight.sh` or `./scripts/setup.sh` (includes preflight as Phase 0). Everything except Docker is installed automatically.
+Run `./scripts/preflight.sh` to install all tools, or manually: `mise trust && mise install`.
+
+### CI
+
+CI runs on [self-hosted aws-runners](https://github.com/null-ptr-exception/aws-runners) with all prerequisites pre-installed.
 
 ---
 

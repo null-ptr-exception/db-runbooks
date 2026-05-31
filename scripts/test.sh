@@ -9,9 +9,6 @@ DB_MODE="${DB_MODE:-single}"
 # clusters are cleaned up even if setup or deploy fails.
 trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 
-# Install helper libs if not present
-"${SCRIPT_DIR}/install-bats-libs.sh"
-
 # Global setup: create clusters and deploy shared infrastructure
 "${SCRIPT_DIR}/setup-clusters.sh"
 "${SCRIPT_DIR}/deploy-infra.sh"

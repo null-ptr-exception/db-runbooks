@@ -1,0 +1,4 @@
+[tools]
+kubectl = "1.33.1"
+helm = "3.21.0"
+skaffold = "2.16.0"

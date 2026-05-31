@@ -377,7 +377,7 @@ ENABLE_MINIO=true ./scripts/test.sh
 - **[BATS](https://bats-core.readthedocs.io/)** (test runner)
 - **[mise](https://mise.jdx.dev/)** (runtime version manager)
 
-Run `./scripts/preflight.sh` to install all tools, or manually: `mise trust && mise install`.
+Run `./scripts/preflight.sh` to install all tools. If prerequisites are already installed, `mise trust && mise install` refreshes tool versions only.
 
 ### CI
 

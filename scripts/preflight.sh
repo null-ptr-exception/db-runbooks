@@ -19,6 +19,14 @@ _arch() {
   esac
 }
 
+_os() {
+  case "$(uname -s)" in
+    Linux)  echo "linux" ;;
+    Darwin) echo "darwin" ;;
+    *)      _err "unsupported OS: $(uname -s)"; exit 1 ;;
+  esac
+}
+
 _ensure_local_bin() {
   mkdir -p "$LOCAL_BIN"
   if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
@@ -30,6 +38,14 @@ _ensure_local_bin() {
 echo "======================================="
 echo " Preflight: checking required tools"
 echo "======================================="
+
+# 0. Required system tools
+for tool in curl git; do
+  if ! command -v "$tool" &>/dev/null; then
+    _err "$tool not found — please install it first"
+    exit 1
+  fi
+done
 
 # 1. Docker — check only
 echo ""
@@ -50,7 +66,7 @@ if command -v kind &>/dev/null; then
 else
   _ensure_local_bin
   _fix "Installing kind v0.31.0 to $LOCAL_BIN..."
-  curl -fsSL -o "$LOCAL_BIN/kind" "https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-$(_arch)"
+  curl -fsSL -o "$LOCAL_BIN/kind" "https://kind.sigs.k8s.io/dl/v0.31.0/kind-$(_os)-$(_arch)"
   chmod +x "$LOCAL_BIN/kind"
   _ok "$(kind --version)"
 fi

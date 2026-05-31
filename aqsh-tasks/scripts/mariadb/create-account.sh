@@ -45,6 +45,7 @@ Target options:
 Password options:
   --password-secret-name <name>    Secret used for generated or provided password.
   --password-secret-key <key>      Secret key holding the password. Default: password
+  --password-secret-prefix <text>  Required Secret name prefix. Default: mariadb-account-
   --generate-password <bool>       Generate password for new accounts. Default: true
 
 Safety options:
@@ -62,7 +63,7 @@ Environment equivalents:
   DB_NAMESPACE, K8S_CONTEXT, MARIADB_RESOURCE, MARIADB_NAME,
   MARIADB_CONTAINER, ACCOUNT_DATABASE, ACCOUNT_USERNAME, ACCOUNT_HOST,
   ACCOUNT_PRIVILEGES, ACCOUNT_PASSWORD_SECRET_NAME, ACCOUNT_PASSWORD_SECRET_KEY,
-  GENERATE_PASSWORD, DRY_RUN, CONFIRM, ALLOW_GLOBAL,
+  ACCOUNT_PASSWORD_SECRET_PREFIX, GENERATE_PASSWORD, DRY_RUN, CONFIRM, ALLOW_GLOBAL,
   ALLOW_ADMIN_PRIVILEGES, AQSH_RESULT_FILE.
 EOF
 }
@@ -96,6 +97,7 @@ ACCOUNT_HOST_VALUE="${ACCOUNT_HOST:-%}"
 PRIVILEGES_RAW="${ACCOUNT_PRIVILEGES:-}"
 PASSWORD_SECRET_NAME="${ACCOUNT_PASSWORD_SECRET_NAME:-}"
 PASSWORD_SECRET_KEY="${ACCOUNT_PASSWORD_SECRET_KEY:-password}"
+PASSWORD_SECRET_PREFIX="${ACCOUNT_PASSWORD_SECRET_PREFIX:-mariadb-account-}"
 GENERATE_PASSWORD="${GENERATE_PASSWORD:-true}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
@@ -118,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --privileges) require_value "$1" "${2:-}"; PRIVILEGES_RAW="$2"; shift 2 ;;
     --password-secret-name) require_value "$1" "${2:-}"; PASSWORD_SECRET_NAME="$2"; shift 2 ;;
     --password-secret-key) require_value "$1" "${2:-}"; PASSWORD_SECRET_KEY="$2"; shift 2 ;;
+    --password-secret-prefix) require_value "$1" "${2:-}"; PASSWORD_SECRET_PREFIX="$2"; shift 2 ;;
     --generate-password) require_value "$1" "${2:-}"; GENERATE_PASSWORD="$2"; shift 2 ;;
     --dry-run) require_value "$1" "${2:-}"; DRY_RUN="$2"; shift 2 ;;
     --confirm) require_value "$1" "${2:-}"; CONFIRM="$2"; shift 2 ;;
@@ -211,6 +214,9 @@ validate_inputs() {
 
   if [[ -n "$PASSWORD_SECRET_NAME" && ! "$PASSWORD_SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
     add_error "password_secret_name must be a valid Kubernetes Secret name"
+  fi
+  if [[ -n "$PASSWORD_SECRET_NAME" && -n "$PASSWORD_SECRET_PREFIX" && "$PASSWORD_SECRET_NAME" != "$PASSWORD_SECRET_PREFIX"* ]]; then
+    add_error "password_secret_name must start with ${PASSWORD_SECRET_PREFIX}"
   fi
   if [[ -n "$PASSWORD_SECRET_KEY" && ! "$PASSWORD_SECRET_KEY" =~ ^[A-Za-z0-9._-]+$ ]]; then
     add_error "password_secret_key contains unsupported characters"
@@ -410,8 +416,17 @@ fi
 
 USER_LITERAL="$(sql_string_literal "$USERNAME")"
 HOST_LITERAL="$(sql_string_literal "$ACCOUNT_HOST_VALUE")"
-ACCOUNT_COUNT="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SELECT COUNT(*) FROM mysql.user WHERE User=${USER_LITERAL} AND Host=${HOST_LITERAL}" || true)"
-if [[ "$ACCOUNT_COUNT" =~ ^[0-9]+$ && "$ACCOUNT_COUNT" -gt 0 ]]; then
+if ! ACCOUNT_COUNT="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SELECT COUNT(*) FROM mysql.user WHERE User=${USER_LITERAL} AND Host=${HOST_LITERAL}")"; then
+  SUMMARY="Failed to check whether MariaDB account already exists"
+  RESULT_JSON="$(result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+  emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+fi
+if [[ ! "$ACCOUNT_COUNT" =~ ^[0-9]+$ ]]; then
+  SUMMARY="MariaDB account existence check returned an unexpected result"
+  RESULT_JSON="$(result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+  emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+fi
+if [[ "$ACCOUNT_COUNT" -gt 0 ]]; then
   ACCOUNT_EXISTS=true
 else
   ACCOUNT_EXISTS=false

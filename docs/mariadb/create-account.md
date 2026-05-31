@@ -19,10 +19,14 @@ missing password Secret, because it cannot know the pre-existing account's
 password.
 
 When `generate_password=true`, the task writes the generated password Secret
-before running `CREATE USER` so a successfully created account always has a
-recoverable password. If the later SQL step fails, the Secret may temporarily
-exist without a matching account; retrying the task regenerates and overwrites
-that Secret.
+before running `CREATE USER`, so the password can be recovered if the task fails
+before the account is created. If `CREATE USER` succeeds but a later step such
+as `GRANT` or `SHOW GRANTS` verification fails, the next run sees
+`ACCOUNT_EXISTS=true` and will not regenerate or overwrite the Secret.
+
+By default, `password_secret_name` must start with `mariadb-account-`. This keeps
+the task from reading or patching unrelated Secrets even though Kubernetes RBAC
+grants namespace-scoped Secret access for account password management.
 
 ## Endpoint
 
@@ -43,7 +47,7 @@ Served by **aqsh-mariadb** on NodePort `30081`.
   "username": "app_user",
   "host": "%",
   "privileges": "SELECT,INSERT",
-  "password_secret_name": "app-user-password",
+  "password_secret_name": "mariadb-account-app-user-password",
   "password_secret_key": "password",
   "generate_password": "true",
   "dry_run": "true",
@@ -68,6 +72,7 @@ Served by **aqsh-mariadb** on NodePort `30081`.
 | `privileges` | `ACCOUNT_PRIVILEGES` | yes | - | Comma-separated privileges |
 | `password_secret_name` | `ACCOUNT_PASSWORD_SECRET_NAME` | required for new account | - | Secret that stores or provides the account password |
 | `password_secret_key` | `ACCOUNT_PASSWORD_SECRET_KEY` | no | `password` | Secret data key |
+| `password_secret_prefix` | `ACCOUNT_PASSWORD_SECRET_PREFIX` | no | `mariadb-account-` | Required prefix for managed password Secrets |
 | `generate_password` | `GENERATE_PASSWORD` | no | `true` | Generate and write password Secret |
 | `dry_run` | `DRY_RUN` | no | `true` | Return redacted SQL plan only |
 | `confirm` | `CONFIRM` | no | `false` | Required for real execution |
@@ -121,8 +126,15 @@ Real execution returns one of:
 | `UNCHANGED` | `ACCOUNT_EXISTS` | Account already existed; grants were applied |
 | `BLOCKED` | `CONFIRM_REQUIRED` | `dry_run=false` without `confirm=true` |
 | `BLOCKED` | `PASSWORD_SECRET_REQUIRED` | New account requested without a password Secret |
+| `BLOCKED` | `PASSWORD_SECRET_UNAVAILABLE` | Requested new account but password Secret is missing or unreadable |
+| `BLOCKED` | `PASSWORD_SECRET_INVALID` | Password Secret value contains unsupported characters |
 | `ERROR` | `INVALID_INPUT` | Validation failed |
+| `ERROR` | `KUBECTL_UNAVAILABLE` | `kubectl` or the target cluster API is unavailable |
+| `ERROR` | `CURRENT_PRIMARY_EMPTY` | No primary MariaDB pod was found during operation |
+| `ERROR` | `ROOT_PASSWORD_UNAVAILABLE` | Root password is not available from target pods |
+| `ERROR` | `PASSWORD_SECRET_WRITE_FAILED` | Failed to write password Secret |
 | `ERROR` | `SQL_FAILED` | SQL execution failed |
+| `ERROR` | `SQL_VERIFY_FAILED` | Post-change SQL verification failed |
 
 ## Permissions
 
@@ -133,7 +145,7 @@ namespaced Secret access in the target database namespace:
 |----------|-------|---------|
 | `pods`, `pods/exec` | `get`, `list`, `watch`, `create` | Resolve primary and execute SQL |
 | `statefulsets`, `mariadbs.k8s.mariadb.com` | `get`, `list`, `watch` | Resolve target topology |
-| `secrets` | `get`, `create`, `patch` | Read or store account password Secret |
+| `secrets` | `get`, `create`, `patch` | Read or store namespace-scoped account password Secrets whose names pass the configured prefix check |
 
 ## CLI Example
 
@@ -145,7 +157,7 @@ LIB_DIR="$PWD/aqsh-tasks/lib" \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \
-  --password-secret-name app-user-password \
+  --password-secret-name mariadb-account-app-user-password \
   --dry-run true \
   --json | jq .
 ```
@@ -160,7 +172,7 @@ LIB_DIR="$PWD/aqsh-tasks/lib" \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \
-  --password-secret-name app-user-password \
+  --password-secret-name mariadb-account-app-user-password \
   --dry-run false \
   --confirm true \
   --json | jq .

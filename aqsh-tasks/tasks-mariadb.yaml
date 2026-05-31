@@ -173,6 +173,11 @@ tasks:
         required: false
         type: string
         default: password
+      - name: password_secret_prefix
+        env: ACCOUNT_PASSWORD_SECRET_PREFIX
+        required: false
+        type: string
+        default: mariadb-account-
       - name: generate_password
         env: GENERATE_PASSWORD
         required: false

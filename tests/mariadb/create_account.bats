@@ -35,7 +35,7 @@ _create_account_payload() {
       username: "app_user",
       host: "%",
       privileges: "SELECT",
-      password_secret_name: "app-user-password",
+      password_secret_name: "mariadb-account-app-user-password",
       password_secret_key: "password",
       generate_password: "true",
       dry_run: $dry_run,
@@ -104,7 +104,7 @@ _submit_create_account() {
 
 _generated_password() {
   local ctx="${1:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
-  kubectl --context "$ctx" -n mariadb-2 get secret app-user-password -o jsonpath='{.data.password}' | base64 -d
+  kubectl --context "$ctx" -n mariadb-2 get secret mariadb-account-app-user-password -o jsonpath='{.data.password}' | base64 -d
 }
 
 _assert_user_can_select_but_not_create() {
@@ -139,7 +139,7 @@ _assert_user_can_select_but_not_create() {
   [ "$result_status" = "READY" ]
   [ "$reason_code" = "DRY_RUN_READY" ]
   [ "$account_count" = "0" ]
-  [ "$(echo "$result" | jq -r '.password_secret.name')" = "app-user-password" ]
+  [ "$(echo "$result" | jq -r '.password_secret.name')" = "mariadb-account-app-user-password" ]
 }
 
 @test "create-account creates an account, stores password in Secret, and enforces scoped grants" {
@@ -156,7 +156,7 @@ _assert_user_can_select_but_not_create() {
 
   [ "$result_status" = "CREATED" ]
   [ "$reason_code" != "unknown" ]
-  [ "$secret_name" = "app-user-password" ]
+  [ "$secret_name" = "mariadb-account-app-user-password" ]
   ! echo "$result" | grep -Fq "$(_generated_password "$ctx")"
 
   _assert_user_can_select_but_not_create "$ctx"

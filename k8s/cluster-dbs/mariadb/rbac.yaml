@@ -19,6 +19,8 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Bound into each database namespace. create-account.sh also validates the
+  # password Secret name prefix before reading or patching account Secrets.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "create", "patch"]

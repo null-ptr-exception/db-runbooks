@@ -69,7 +69,7 @@ if [[ "$cmd" == "get" ]]; then
     exit 0
   fi
 
-  if [[ "$resource" == "secret" && "$name" == "provided-password" ]]; then
+  if [[ "$resource" == "secret" && "$name" == "mariadb-account-provided-password" ]]; then
     printf 'UHJvdmlkZWRQYXNzMTIz'
     exit 0
   fi
@@ -102,7 +102,11 @@ if [[ "$cmd" == "exec" ]]; then
 
   case "$query" in
     SELECT\ COUNT\(\*\)\ FROM\ mysql.user*)
-      printf '%s\n' "${CREATE_ACCOUNT_EXISTS:-0}"
+      if [[ "${SQL_FAIL_ACCOUNT_COUNT:-0}" == "1" ]]; then
+        echo "simulated account count failure" >&2
+        exit 1
+      fi
+      printf '%s\n' "${CREATE_ACCOUNT_COUNT:-${CREATE_ACCOUNT_EXISTS:-0}}"
       ;;
     CREATE\ USER*)
       if [[ "${SQL_FAIL_CREATE:-0}" == "1" ]]; then
@@ -140,7 +144,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT,INSERT \
-    --password-secret-name app-user-password \
+    --password-secret-name mariadb-account-app-user-password \
     --json
 
   [ "$status" -eq 0 ]
@@ -161,7 +165,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --password-secret-name app-user-password \
+    --password-secret-name mariadb-account-app-user-password \
     --dry-run false \
     --json
 
@@ -239,6 +243,23 @@ EOF
   [ "$reason_code" = "INVALID_INPUT" ]
 }
 
+@test "password Secret name outside the managed prefix is rejected" {
+  run "${SCRIPT}" \
+    --namespace mariadb-2 \
+    --database app_db \
+    --username app_user \
+    --privileges SELECT \
+    --password-secret-name unrelated-secret \
+    --json
+
+  [ "$status" -eq 0 ]
+  result_status=$(printf '%s' "$output" | jq -r '.status')
+  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
+
+  [ "$result_status" = "ERROR" ]
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
 @test "actual run creates a password Secret and does not print the password" {
   run "${SCRIPT}" \
     --context kind-cluster-dbs \
@@ -246,7 +267,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT,INSERT \
-    --password-secret-name app-user-password \
+    --password-secret-name mariadb-account-app-user-password \
     --dry-run false \
     --confirm true \
     --json
@@ -290,7 +311,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --password-secret-name missing-password \
+    --password-secret-name mariadb-account-missing-password \
     --generate-password false \
     --dry-run false \
     --confirm true \
@@ -313,7 +334,51 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --password-secret-name app-user-password \
+    --password-secret-name mariadb-account-app-user-password \
+    --dry-run false \
+    --confirm true \
+    --json
+
+  [ "$status" -eq 0 ]
+  result_status=$(printf '%s' "$output" | jq -r '.status')
+  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
+
+  [ "$result_status" = "ERROR" ]
+  [ "$reason_code" = "SQL_FAILED" ]
+}
+
+@test "SQL account lookup failure returns SQL_FAILED" {
+  export SQL_FAIL_ACCOUNT_COUNT=1
+
+  run "${SCRIPT}" \
+    --context kind-cluster-dbs \
+    --namespace mariadb-2 \
+    --database app_db \
+    --username app_user \
+    --privileges SELECT \
+    --password-secret-name mariadb-account-app-user-password \
+    --dry-run false \
+    --confirm true \
+    --json
+
+  [ "$status" -eq 0 ]
+  result_status=$(printf '%s' "$output" | jq -r '.status')
+  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
+
+  [ "$result_status" = "ERROR" ]
+  [ "$reason_code" = "SQL_FAILED" ]
+}
+
+@test "SQL grant failure returns SQL_FAILED" {
+  export SQL_FAIL_GRANT=1
+
+  run "${SCRIPT}" \
+    --context kind-cluster-dbs \
+    --namespace mariadb-2 \
+    --database app_db \
+    --username app_user \
+    --privileges SELECT \
+    --password-secret-name mariadb-account-app-user-password \
     --dry-run false \
     --confirm true \
     --json
@@ -335,7 +400,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --password-secret-name app-user-password \
+    --password-secret-name mariadb-account-app-user-password \
     --dry-run false \
     --confirm true \
     --json
@@ -358,7 +423,7 @@ EOF
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --password-secret-name provided-password \
+    --password-secret-name mariadb-account-provided-password \
     --generate-password false \
     --dry-run false \
     --confirm true \

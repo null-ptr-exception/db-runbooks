@@ -1,0 +1,45 @@
+{
+  "name": "bats-mock",
+  "description": "Mocking/stubbing library for BATS (Bash Automated Testing System)",
+  "version": "1.2.5",
+  "author": "Sam Stephenson <sstephenson@gmail.com> (http://sstephenson.us/)",
+  "bugs": {
+    "url": "https://github.com/jasonkarns/bats-mock/issues"
+  },
+  "contributors": [
+    "Mislav Marohnić <mislav.marohnic@gmail.com> (http://mislav.net)",
+    "Jason Karns <jason@karns.name> (http://jason.karns.name/)"
+  ],
+  "devDependencies": {
+    "fixpack": "^4.0.0"
+  },
+  "files": [
+    "binstub",
+    "stub.bash"
+  ],
+  "homepage": "https://github.com/jasonkarns/bats-mock#readme",
+  "keywords": [
+    "bash",
+    "bats",
+    "mock",
+    "shell",
+    "stub",
+    "test",
+    "unit"
+  ],
+  "license": "MIT",
+  "main": "stub.bash",
+  "peerDependencies": {
+    "bats": "^0.4.2 || ^1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasonkarns/bats-mock.git"
+  },
+  "scripts": {
+    "lint": "fixpack",
+    "posttest": "npm run lint",
+    "postversion": "git push --follow-tags",
+    "test": "echo todo"
+  }
+}

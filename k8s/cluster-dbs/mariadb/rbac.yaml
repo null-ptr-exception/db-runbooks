@@ -12,7 +12,8 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    # delete: role-aware restart recreates pods one by one via `kubectl delete pod`
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

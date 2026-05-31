@@ -14,7 +14,7 @@ tasks:
         type: string
   restart:
     script: mariadb/restart.sh
-    description: "Rolling restart of a MariaDB StatefulSet"
+    description: "Role-aware restart of a MariaDB cluster: replicas first, primary protected, dry-run by default"
     timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -23,16 +23,56 @@ tasks:
         required: true
         type: string
         pattern: '^mariadb-[0-9]+$'
-      - name: sts_name
-        env: MARIADB_STS_NAME
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
         required: false
         type: string
         default: mariadb
-      - name: pod_selector
-        env: MARIADB_POD_SELECTOR
+      - name: mdb
+        env: MARIADB_NAME
         required: false
         type: string
-        default: app.kubernetes.io/name=mariadb
+        default: mariadb
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+      - name: include_primary
+        env: INCLUDE_PRIMARY
+        required: false
+        type: string
+        default: "false"
+      - name: allow_role_change
+        env: ALLOW_ROLE_CHANGE
+        required: false
+        type: string
+        default: "false"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "300"
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   status:
     script: mariadb/status.sh
     description: "Read-only MariaDB status summary for operator and native StatefulSet targets"

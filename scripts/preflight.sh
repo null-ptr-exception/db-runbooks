@@ -90,7 +90,7 @@ mise trust "$ROOT_DIR" 2>/dev/null || true
 mise install
 mise ls --current kubectl helm skaffold bats
 
-# 5. bats helpers (bats-support, bats-assert)
+# 5. bats helpers (bats-support, bats-assert, bats-mock)
 echo ""
 echo "=== bats helpers ==="
 HELPER_DIR="${ROOT_DIR}/tests/test_helper"
@@ -100,7 +100,11 @@ for lib in bats-support bats-assert; do
     git clone --depth 1 "https://github.com/bats-core/${lib}.git" "${HELPER_DIR}/${lib}"
   fi
 done
-_ok "bats-support + bats-assert installed"
+if [ ! -d "${HELPER_DIR}/bats-mock" ]; then
+  _fix "Cloning bats-mock..."
+  git clone --depth 1 --branch v1 "https://github.com/jasonkarns/bats-mock.git" "${HELPER_DIR}/bats-mock"
+fi
+_ok "bats-support + bats-assert + bats-mock installed"
 
 # Done
 echo ""

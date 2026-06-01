@@ -144,6 +144,35 @@ mariadb_operator_build_pods_json() {
   printf '%s' "$pods_json"
 }
 
+# shellcheck disable=SC2034  # Populates restart task globals consumed by the entrypoint and result helper.
+mariadb_operator_load_restart_state() {
+  local resource="${1:?resource is required}"
+  local name="${2:?name is required}"
+  local container="${3:?container is required}"
+  local pod
+
+  UPDATE_STRATEGY=$(mariadb_jsonpath "$resource" "$name" '{.spec.updateStrategy.type}' 2>/dev/null || true)
+  [[ -z "$UPDATE_STRATEGY" ]] && UPDATE_STRATEGY="ReplicasFirstPrimaryLast"
+
+  REPLICAS=$(mariadb_cr_replicas 2>/dev/null || true)
+  mapfile -t PODS < <(mariadb_list_pods "$REPLICAS")
+
+  ROOT_PASSWORD=""
+  if [[ "${#PODS[@]}" -gt 0 ]]; then
+    ROOT_PASSWORD=$(mariadb_read_root_password "" "${PODS[@]}" 2>/dev/null || true)
+  fi
+
+  PRIMARY_BEFORE=$(mariadb_operator_resolve_primary "$resource" "$name" "$ROOT_PASSWORD" "${PODS[@]}")
+
+  for pod in "${PODS[@]}"; do
+    POD_UID_BEFORE["$pod"]=$(mariadb_pod_jsonpath "$pod" '{.metadata.uid}' 2>/dev/null || true)
+    POD_RESTARTED["$pod"]=false
+    POD_READY_AFTER["$pod"]=null
+  done
+
+  PODS_JSON=$(mariadb_operator_build_pods_json "$container" "$PRIMARY_BEFORE" "$ROOT_PASSWORD" "${PODS[@]}")
+}
+
 mariadb_operator_wait_for_restart() {
   local container="${1:?container is required}"
   local timeout="${2:?timeout is required}"

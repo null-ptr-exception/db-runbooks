@@ -111,7 +111,6 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=raw,value=latest
 
       - name: Build and push aqsh-mariadb
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -131,7 +130,6 @@ jobs:
           tags: |
             type=ref,event=tag
             type=semver,pattern={{version}}
-            type=raw,value=latest
 
       - name: Build and push aqsh-mongodb
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -151,18 +149,22 @@ jobs:
           MONGODB_IMAGE_REF: ${{ env.IMAGE_MONGODB }}:${{ github.ref_name }}
           MONGODB_DIGEST: ${{ steps.push-mongodb.outputs.digest }}
         run: |
-          NOTES=$(cat <<EOF
+          NOTES=$(cat <<'EOF'
           ## Container Images
 
           ```bash
-          docker pull ${MARIADB_IMAGE_REF}
-          docker pull ${MONGODB_IMAGE_REF}
+          docker pull __MARIADB_IMAGE_REF__
+          docker pull __MONGODB_IMAGE_REF__
           ```
 
           Digests:
 
-          - \`${MARIADB_IMAGE_REF}@${MARIADB_DIGEST}\`
-          - \`${MONGODB_IMAGE_REF}@${MONGODB_DIGEST}\`
+          - `__MARIADB_IMAGE_REF__@__MARIADB_DIGEST__`
+          - `__MONGODB_IMAGE_REF__@__MONGODB_DIGEST__`
           EOF
           )
+          NOTES="${NOTES//__MARIADB_IMAGE_REF__/${MARIADB_IMAGE_REF}}"
+          NOTES="${NOTES//__MONGODB_IMAGE_REF__/${MONGODB_IMAGE_REF}}"
+          NOTES="${NOTES//__MARIADB_DIGEST__/${MARIADB_DIGEST}}"
+          NOTES="${NOTES//__MONGODB_DIGEST__/${MONGODB_DIGEST}}"
           gh release create "${GITHUB_REF_NAME}" --generate-notes --notes "$NOTES"

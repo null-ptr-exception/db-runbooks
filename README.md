@@ -392,8 +392,8 @@ CI runs on [self-hosted aws-runners](https://github.com/null-ptr-exception/aws-r
 | kube-federated-auth | 3.2.0 | ghcr.io/rophy/kube-federated-auth |
 | kube-auth-proxy | 0.4.1 | ghcr.io/rophy/kube-auth-proxy |
 | aqsh (base) | 0.4.0 | ghcr.io/null-ptr-exception/aqsh |
-| aqsh-mariadb | local | Built via Skaffold (TASKS_YAML=tasks-mariadb.yaml) |
-| aqsh-mongodb | local | Built via Skaffold (TASKS_YAML=tasks-mongodb.yaml) |
+| aqsh-mariadb | local / release tag | Built via Skaffold for Kind; release tags publish `ghcr.io/null-ptr-exception/db-runbooks/aqsh-mariadb` |
+| aqsh-mongodb | local / release tag | Built via Skaffold for Kind; release tags publish `ghcr.io/null-ptr-exception/db-runbooks/aqsh-mongodb` |
 | mariadb-operator | latest | Deployed via Helm |
 | mariadb | 10.6, 10.11, 11.4 | Official MariaDB images |
 | mongodb | 7.0 | Official MongoDB image |

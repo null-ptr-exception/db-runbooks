@@ -9,6 +9,9 @@ name: CI
 permissions:
   contents: read
 
+env:
+  IMAGE_DB_RUNBOOKS: ghcr.io/${{ github.repository }}
+
 jobs:
   lint:
     runs-on: [self-hosted, aws-runner]
@@ -48,11 +51,8 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build aqsh-mariadb image
-        run: docker build --build-arg TASKS_YAML=tasks-mariadb.yaml -t aqsh-mariadb:ci ./aqsh-tasks
-
-      - name: Build aqsh-mongodb image
-        run: docker build --build-arg TASKS_YAML=tasks-mongodb.yaml -t aqsh-mongodb:ci ./aqsh-tasks
+      - name: Build db-runbooks task image
+        run: docker build -t "${IMAGE_DB_RUNBOOKS}:ci" ./aqsh-tasks
 
   integration:
     runs-on: [self-hosted, aws-runner]
@@ -90,6 +90,40 @@ jobs:
       - name: Tear down clusters
         if: always()
         run: ./scripts/teardown.sh
+
+  publish-image:
+    needs: [lint, build-image, integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Generate image tag
+        id: image-tag
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          image_tag="$(date -u +%Y%m%d)-${short_sha}"
+          echo "image_tag=${image_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push db-runbooks task image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ./aqsh-tasks
+          push: true
+          tags: ${{ env.IMAGE_DB_RUNBOOKS }}:${{ steps.image-tag.outputs.image_tag }}
 
   infra:
     runs-on: [self-hosted, aws-runner]

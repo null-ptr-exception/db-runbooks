@@ -16,7 +16,7 @@ spec:
       serviceAccountName: kube-auth-proxy
       containers:
         - name: aqsh
-          image: aqsh-mariadb
+          image: ghcr.io/null-ptr-exception/db-runbooks
           imagePullPolicy: Never
           env:
             - name: AQSH_MODE
@@ -26,7 +26,7 @@ spec:
             - name: AQSH_REDIS_ADDR
               value: "redis:6379"
             - name: AQSH_TASKS_CONFIG
-              value: /etc/aqsh/tasks.yaml
+              value: /etc/aqsh/tasks-mariadb.yaml
             - name: AQSH_TASKS_DIR
               value: /tasks
             - name: AQSH_REQUIRE_IDENTITY

@@ -1,7 +1,6 @@
 FROM ghcr.io/null-ptr-exception/aqsh:0.4.0
 
 ARG KUBECTL_VERSION=v1.30.0
-ARG TASKS_YAML=tasks-mariadb.yaml
 
 # Install base tools + mongosh + mariadb-client
 RUN apt-get update \
@@ -26,6 +25,6 @@ RUN apt-get update \
     && curl -fsSLo /usr/local/bin/mc "https://dl.min.io/client/mc/release/linux-$(dpkg --print-architecture)/mc" \
     && chmod +x /usr/local/bin/mc
 
-COPY ${TASKS_YAML} /etc/aqsh/tasks.yaml
+COPY tasks-*.yaml /etc/aqsh/
 COPY --chmod=0755 lib/ /tasks/lib/
 COPY --chmod=0755 scripts/ /tasks/

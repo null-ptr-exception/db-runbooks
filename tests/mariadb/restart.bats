@@ -47,72 +47,67 @@ _submit_restart() {
   wait_for_task "$MARIADB_AQSH_URL" "$task_id"
 }
 
-@test "dry-run with include_primary plans every pod with the primary last and changes nothing" {
+@test "dry-run reports operator-controlled restart plan and changes nothing" {
   local before_generation pod_count
   before_generation=$(_sts_generation)
   pod_count=$(_mariadb_pod_count)
 
-  # dry_run defaults to true; include_primary brings the whole cluster in scope.
-  _submit_restart '{"namespace": "mariadb-1", "include_primary": "true"}'
+  # dry_run defaults to true; restart order is delegated to mariadb-operator.
+  _submit_restart '{"namespace": "mariadb-1"}'
 
-  local result result_status reason_code changed order_len order_last primary_before
+  local result result_status reason_code changed operator_controlled order_len primary_before
   result=$(_result_json)
   result_status=$(echo "$result" | jq -r '.status')
   reason_code=$(echo "$result" | jq -r '.reason_code')
   changed=$(echo "$result" | jq -r '.changed')
+  operator_controlled=$(echo "$result" | jq -r '.operator_controlled')
   order_len=$(echo "$result" | jq -r '.restart_order | length')
-  order_last=$(echo "$result" | jq -r '.restart_order[-1]')
   primary_before=$(echo "$result" | jq -r '.primary_before')
 
   echo "plan: status=${result_status} reason=${reason_code} order_len=${order_len} primary=${primary_before} pod_count=${pod_count}"
-  assert_equal "$result_status" "READY"
-  assert_equal "$reason_code" "RESTART_DRY_RUN"
-  assert_equal "$changed" "false"
-  # Every pod is planned, and the primary is scheduled last (replicas first).
-  assert_equal "$order_len" "$pod_count"
-  assert_equal "$order_last" "$primary_before"
+  if [[ "${USE_MARIADB_OPERATOR:-true}" != "true" ]]; then
+    assert_equal "$result_status" "BLOCKED"
+    assert_equal "$reason_code" "MARIADB_OPERATOR_REQUIRED"
+  else
+    assert_equal "$result_status" "READY"
+    assert_equal "$reason_code" "RESTART_DRY_RUN"
+    assert_equal "$changed" "false"
+    assert_equal "$operator_controlled" "true"
+    assert_equal "$order_len" "0"
+  fi
 
   # Dry-run must not touch the StatefulSet.
   assert_equal "$(_sts_generation)" "$before_generation"
 }
 
-@test "confirmed replica-only restart cycles replicas and preserves the primary (no-ops on a single node)" {
+@test "confirmed restart patches the MariaDB CR and lets the operator control rollout" {
   local pod_count
   pod_count=$(_mariadb_pod_count)
 
-  # Default include_primary=false → replicas only, primary protected.
   _submit_restart '{"namespace": "mariadb-1", "dry_run": "false", "confirm": "true"}'
 
-  # Let pods settle after the restart.
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 wait pod \
-    -l app.kubernetes.io/name=mariadb \
-    --for=condition=Ready --timeout=240s >/dev/null 2>&1
-
-  local result result_status reason_code primary_before primary_after
+  local result result_status reason_code primary_before primary_after changed
   result=$(_result_json)
   result_status=$(echo "$result" | jq -r '.status')
   reason_code=$(echo "$result" | jq -r '.reason_code')
   primary_before=$(echo "$result" | jq -r '.primary_before')
   primary_after=$(echo "$result" | jq -r '.primary_after')
+  changed=$(echo "$result" | jq -r '.changed')
 
-  echo "replica-restart: pods=${pod_count} status=${result_status} reason=${reason_code} primary=${primary_before}->${primary_after}"
+  echo "operator-restart: pods=${pod_count} status=${result_status} reason=${reason_code} primary=${primary_before}->${primary_after}"
 
-  if [ "$pod_count" -le 1 ]; then
-    # Single-node cluster: the only pod is the primary, excluded by default.
+  if [[ "${USE_MARIADB_OPERATOR:-true}" != "true" ]]; then
     assert_equal "$result_status" "BLOCKED"
-    assert_equal "$reason_code" "NO_RESTART_TARGETS"
+    assert_equal "$reason_code" "MARIADB_OPERATOR_REQUIRED"
   else
     assert_equal "$result_status" "RESTARTED"
     assert_equal "$reason_code" "RESTART_COMPLETED"
-    # Primary must not move when only replicas are restarted.
-    assert_equal "$primary_after" "$primary_before"
+    assert_equal "$changed" "true"
 
-    # Exactly the non-primary pods were restarted, and all came back Ready.
-    local restarted expected not_ready
+    local restarted not_ready
     restarted=$(echo "$result" | jq -rc '[.pods[] | select(.restarted == true) | .name] | sort')
-    expected=$(echo "$result" | jq -rc --arg p "$primary_before" '[.pods[].name | select(. != $p)] | sort')
     not_ready=$(echo "$result" | jq -r '[.pods[] | select(.restarted == true) | select(.ready_after != true)] | length')
-    assert_equal "$restarted" "$expected"
+    assert_equal "$restarted" "$(echo "$result" | jq -rc '[.pods[].name] | sort')"
     assert_equal "$not_ready" "0"
 
     local ready replicas
@@ -124,22 +119,15 @@ _submit_restart() {
   fi
 }
 
-@test "the current primary is protected from an accidental restart" {
-  # Discover the primary via a dry-run plan (works in operator and native modes).
-  _submit_restart '{"namespace": "mariadb-1", "include_primary": "true"}'
-  local primary
-  primary=$(_result_json | jq -r '.primary_before')
-  [ -n "$primary" ] && [ "$primary" != "null" ]
-
-  # Targeting the primary without include_primary must be refused, not silently run.
-  _submit_restart "$(jq -nc --arg p "$primary" '{namespace: "mariadb-1", target_pod: $p}')"
+@test "target_pod is refused because operator-driven restart is resource-scoped" {
+  _submit_restart '{"namespace": "mariadb-1", "target_pod": "mariadb-0"}'
 
   local result result_status reason_code
   result=$(_result_json)
   result_status=$(echo "$result" | jq -r '.status')
   reason_code=$(echo "$result" | jq -r '.reason_code')
 
-  echo "protect: primary=${primary} status=${result_status} reason=${reason_code}"
+  echo "target-pod: status=${result_status} reason=${reason_code}"
   assert_equal "$result_status" "BLOCKED"
-  assert_equal "$reason_code" "PRIMARY_RESTART_NOT_ALLOWED"
+  assert_equal "$reason_code" "TARGET_POD_UNSUPPORTED"
 }

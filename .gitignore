@@ -1,3 +1,4 @@
 .env
 tests/test_helper/bats-support/
 tests/test_helper/bats-assert/
+tests/test_helper/bats-mock/

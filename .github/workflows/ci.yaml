@@ -29,10 +29,16 @@ jobs:
           find . -type f -name '*.sh' -print0 \
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
 
+      - name: Install bats helpers
+        run: |
+          for lib in bats-support bats-assert; do
+            [ -d "tests/test_helper/${lib}" ] || git clone --depth 1 "https://github.com/bats-core/${lib}.git" "tests/test_helper/${lib}"
+          done
+          [ -d "tests/test_helper/bats-mock" ] || git clone --depth 1 --branch v1 "https://github.com/jasonkarns/bats-mock.git" "tests/test_helper/bats-mock"
+
       - name: Run Bats unit tests
         run: |
           if [ -d tests/unit ]; then
-            ./scripts/install-bats-libs.sh
             bats --recursive tests/unit
           fi
 

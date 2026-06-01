@@ -82,9 +82,10 @@ Valid namespaces: `mariadb-1`, `mariadb-2`, `mariadb-3`
 | `BLOCKED` | `TARGET_POD_NOT_FOUND` | `target_pod` is not part of the cluster |
 | `BLOCKED` | `PRIMARY_RESTART_NOT_ALLOWED` | `target_pod` is the primary and `include_primary=false` |
 | `BLOCKED` | `NO_RESTART_TARGETS` | Only the primary exists and it is excluded |
-| `BLOCKED` | `PRIMARY_UNKNOWN` | `include_primary=true` but primary cannot be identified |
+| `BLOCKED` | `PRIMARY_UNKNOWN` | Primary cannot be identified, so role-aware restart order cannot be built |
 | `BLOCKED` | `PEER_POD_NOT_READY` | A pod outside the restart set is not Ready (cluster degraded) |
 | `ERROR` | `ROLE_CHANGED` | Primary moved unexpectedly (`allow_role_change=false`) |
+| `ERROR` | `RESTART_DELETE_FAILED` | `kubectl delete pod` failed before the pod could be restarted |
 | `ERROR` | `RESTART_POD_NOT_READY` | A pod did not become Ready within `wait_timeout` |
 | `ERROR` | `KUBECTL_UNAVAILABLE` | Kubernetes API not reachable |
 
@@ -137,5 +138,6 @@ curl -s -X POST "$MARIADB_AQSH_URL/tasks/restart" \
 | Restart requested without confirm | `status=BLOCKED`, `reason_code=RESTART_CONFIRM_REQUIRED` |
 | Primary targeted without `include_primary` | `status=BLOCKED`, `reason_code=PRIMARY_RESTART_NOT_ALLOWED` |
 | Peer pod already down | `status=BLOCKED`, `reason_code=PEER_POD_NOT_READY` |
+| Pod delete denied or failed | `status=ERROR`, `reason_code=RESTART_DELETE_FAILED` |
 | Pod never becomes Ready | `status=ERROR`, `reason_code=RESTART_POD_NOT_READY` |
 | Primary moves unexpectedly | `status=ERROR`, `reason_code=ROLE_CHANGED` |

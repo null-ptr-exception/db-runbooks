@@ -14,6 +14,7 @@ setup() {
   export ROLE_CHANGE_SIM=0         # 1 => a pod delete promotes mariadb-1
   export NO_ROOT_PASSWORD=0        # 1 => printenv returns no root password
   export NOT_READY_POD=""          # a pod name that never reports Ready
+  export DELETE_FAIL=0             # 1 => kubectl delete pod fails before changes
   mkdir -p "${TEST_TMPDIR}/bin"
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'
@@ -136,6 +137,10 @@ if [[ "$cmd" == "exec" ]]; then
 fi
 
 if [[ "$cmd" == "delete" ]]; then
+  if [[ "${DELETE_FAIL:-0}" == "1" ]]; then
+    echo "delete forbidden" >&2
+    exit 1
+  fi
   target="${args[2]:-}"
   if [[ -n "$target" ]]; then touch "${TEST_TMPDIR}/deleted-${target}"; fi
   if [[ "${ROLE_CHANGE_SIM:-0}" == "1" ]]; then touch "${TEST_TMPDIR}/role_changed"; fi
@@ -336,4 +341,21 @@ EOF
   [ "$result_status" = "ERROR" ]
   [ "$reason_code" = "RESTART_POD_NOT_READY" ]
   [ "$changed" = "true" ]
+}
+
+@test "delete failure reports RESTART_DELETE_FAILED before marking pod restarted" {
+  export DELETE_FAIL=1
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 \
+    --target-pod mariadb-1 --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  result_status=$(printf '%s' "$output" | jq -r '.status')
+  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
+  changed=$(printf '%s' "$output" | jq -r '.changed')
+  restarted=$(printf '%s' "$output" | jq -rc '[.pods[] | select(.restarted)] | map(.name)')
+
+  [ "$result_status" = "ERROR" ]
+  [ "$reason_code" = "RESTART_DELETE_FAILED" ]
+  [ "$changed" = "false" ]
+  [ "$restarted" = '[]' ]
 }

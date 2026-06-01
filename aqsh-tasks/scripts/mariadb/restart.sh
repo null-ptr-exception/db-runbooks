@@ -110,6 +110,9 @@ JSON_ONLY=0
 PRIMARY_BEFORE=""
 PRIMARY_AFTER=""
 UPDATE_STRATEGY=""
+RESTART_ERROR_REASON=""
+RESTART_ERROR_SUMMARY=""
+RESTART_POD_DELETED=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -229,7 +232,10 @@ pod_ready() {
 # Restart one pod by deleting it and waiting for the controller to recreate it
 # and report Ready again, up to WAIT_TIMEOUT seconds.
 restart_pod_and_wait() {
-  local pod="$1" start now old_uid new_uid
+  local pod="$1" start now old_uid new_uid delete_out
+  RESTART_ERROR_REASON=""
+  RESTART_ERROR_SUMMARY=""
+  RESTART_POD_DELETED=false
   # Record the pod UID first so we can confirm the pod was actually recreated,
   # not just observed Ready on the old (still-terminating) object whose
   # containerStatus may briefly report ready=true.
@@ -238,9 +244,12 @@ restart_pod_and_wait() {
   # pod is gone, so the readiness poll below sees the freshly recreated pod.
   # Do NOT switch this to a non-blocking delete (--wait=false) — the UID guard
   # would then race the still-present old pod.
-  if ! _kubectl delete pod "$pod" --timeout="${WAIT_TIMEOUT}s" >/dev/null 2>&1; then
+  if ! delete_out=$(_kubectl delete pod "$pod" --timeout="${WAIT_TIMEOUT}s" 2>&1); then
+    RESTART_ERROR_REASON="RESTART_DELETE_FAILED"
+    RESTART_ERROR_SUMMARY="Failed to delete pod ${pod}: ${delete_out:-kubectl delete failed}"
     return 1
   fi
+  RESTART_POD_DELETED=true
   start=$(date +%s)
   while true; do
     new_uid=$(mariadb_pod_jsonpath "$pod" '{.metadata.uid}' 2>/dev/null || true)
@@ -250,6 +259,8 @@ restart_pod_and_wait() {
     fi
     now=$(date +%s)
     if (( now - start >= WAIT_TIMEOUT )); then
+      RESTART_ERROR_REASON="RESTART_POD_NOT_READY"
+      RESTART_ERROR_SUMMARY="Pod ${pod} did not become Ready within ${WAIT_TIMEOUT}s; restart halted"
       return 1
     fi
     sleep 5
@@ -394,6 +405,7 @@ fi
 
 # --- Execute: restart pods one by one, waiting for Ready between each ---------
 RESTART_FAILED=""
+ANY_RESTARTED=false
 for pod in "${RESTART_ORDER[@]}"; do
   if [[ "$JSON_ONLY" -ne 1 ]]; then
     log_info "mariadb-restart" "Restarting pod ${pod}"
@@ -402,10 +414,12 @@ for pod in "${RESTART_ORDER[@]}"; do
   if restart_pod_and_wait "$pod"; then
     ready_after=true
   fi
+  [[ "$RESTART_POD_DELETED" == "true" ]] && ANY_RESTARTED=true
   PODS_JSON=$(jq -c \
     --arg name "$pod" \
+    --argjson restarted "$(json_bool "$RESTART_POD_DELETED")" \
     --argjson ready_after "$(json_bool "$ready_after")" \
-    'map(if .name == $name then (.restarted = true | .ready_after = $ready_after) else . end)' \
+    'map(if .name == $name then (.restarted = $restarted | .ready_after = $ready_after) else . end)' \
     <<<"$PODS_JSON")
   if [[ "$ready_after" != "true" ]]; then
     RESTART_FAILED="$pod"
@@ -415,8 +429,8 @@ done
 
 if [[ -n "$RESTART_FAILED" ]]; then
   PRIMARY_AFTER=$(resolve_primary)
-  emit_result "ERROR" "RESTART_POD_NOT_READY" \
-    "Pod ${RESTART_FAILED} did not become Ready within ${WAIT_TIMEOUT}s; restart halted" true \
+  emit_result "ERROR" "${RESTART_ERROR_REASON:-RESTART_POD_NOT_READY}" \
+    "${RESTART_ERROR_SUMMARY:-Pod ${RESTART_FAILED} did not become Ready within ${WAIT_TIMEOUT}s; restart halted}" "$ANY_RESTARTED" \
     "$ORDER_JSON" "$PODS_JSON"
   exit 0
 fi

@@ -444,6 +444,7 @@ if bool_enabled "$GENERATE_PASSWORD"; then
   if create_password_secret "$PASSWORD_VALUE" 2>/dev/null; then
     SECRET_MANAGED=true
   else
+    # A concurrent run may have created the Secret first; reuse it instead of overwriting it.
     if ! PASSWORD_VALUE="$(read_secret_password)"; then
       SUMMARY="Failed to create password Secret"
       RESULT_JSON="$(result_json ERROR PASSWORD_SECRET_WRITE_FAILED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"

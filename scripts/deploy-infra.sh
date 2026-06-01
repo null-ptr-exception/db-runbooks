@@ -169,13 +169,13 @@ deploy_dbs_cluster() {
 
     helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
       --kube-context "$ctx" \
-      "${helm_version_args[@]}" \
+      ${helm_version_args[@]+"${helm_version_args[@]}"} \
       --wait
 
     helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
       --kube-context "$ctx" \
       --namespace db-ops \
-      "${helm_version_args[@]}" \
+      ${helm_version_args[@]+"${helm_version_args[@]}"} \
       --wait
   fi
 

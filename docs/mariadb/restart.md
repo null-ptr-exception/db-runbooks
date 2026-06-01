@@ -31,8 +31,8 @@ The task remains conservative:
   An unexpected primary move is reported as `ROLE_CHANGED` unless
   `allow_role_change=true`.
 
-This task does **not** promote replicas or patch operator/Service state. Use
-[`promote-replica`](./promote-replica.md) for an explicit role change.
+This task does **not** promote replicas or patch operator/Service state. Use a
+separate, explicit promote-replica procedure for role changes.
 
 ## Input
 

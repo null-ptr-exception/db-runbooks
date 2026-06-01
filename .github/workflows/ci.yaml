@@ -32,6 +32,7 @@ jobs:
       - name: Run Bats unit tests
         run: |
           if [ -d tests/unit ]; then
+            ./scripts/install-bats-libs.sh
             bats --recursive tests/unit
           fi
 

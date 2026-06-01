@@ -103,7 +103,7 @@ ENABLE_MINIO=true ./scripts/setup-clusters.sh
 | Component | Cluster | Role | Port |
 |-----------|---------|------|------|
 | **kube-federated-auth** | cluster-auth | Cross-cluster token validator (JWKS + TokenReview forwarding) | 30080 |
-| **aqsh-mariadb** | cluster-dbs | Async task queue for MariaDB (restart, backup*) | 30081 |
+| **aqsh-mariadb** | cluster-dbs | Async task queue for MariaDB (restart, sanity-check, create-account, backup*) | 30081 |
 | **aqsh-mongodb** | cluster-dbs | Async task queue for MongoDB (restart, sanity-check, backup*) | 30082 |
 | **nginx HTTP gateway** | cluster-dbs | HTTP reverse proxy (aqsh + MinIO routes) | 30083* |
 | **kube-auth-proxy** | cluster-dbs | Auth sidecar (injects identity headers) | 4180 |
@@ -171,6 +171,7 @@ Submit tasks via `POST /tasks/<name>` with Bearer token + JSON body.
 | `restart` | `:30081` (MariaDB) | Rolling restart StatefulSet | `namespace` (e.g., `mariadb-1`) | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
 | `status` | `:30081` (MariaDB) | Read-only operator/StatefulSet/pod/SQL status summary | `namespace`, optional `context`, `resource`, `mdb`, `container`, `include_sql` | [docs/mariadb/status.md](docs/mariadb/status.md) |
 | `sanity-check` | `:30081` (MariaDB) | Read-only health check (operator + service + SQL + replication + semi-sync) | `namespace`, optional `context`, `resource`, `mdb`, thresholds | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
+| `create-account` | `:30081` (MariaDB) | Create a new user and grant scoped database privileges | `namespace`, `database`, `username`, `privileges`, `password_secret_name` when creating a new account | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
 | `restart` | `:30082` (MongoDB) | Rolling restart StatefulSet | `namespace` (e.g., `mongo-1`) | [docs/mongodb/restart.md](docs/mongodb/restart.md) |
 | `sanity-check` | `:30082` (MongoDB) | 3-layer health check | `namespace` | [docs/mongodb/sanity-check.md](docs/mongodb/sanity-check.md) |
 | `backup`* | `:30081` or `:30082` | Backup to MinIO | `namespace`, `bucket` (optional) | — |
@@ -238,6 +239,7 @@ aqsh-tasks/
     ├── mariadb/
     │   ├── restart.sh
     │   ├── sanity-check.sh
+    │   ├── create-account.sh
     │   └── operator-sanity-check.sh
     ├── mongodb/
     │   ├── restart.sh

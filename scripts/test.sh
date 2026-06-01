@@ -22,6 +22,7 @@ if [[ "$DB_MODE" == "dual" ]]; then
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
+    "${ROOT_DIR}/tests/mariadb/create_account.bats" \
     "${ROOT_DIR}/tests/mongodb"
 else
   bats --recursive \
@@ -29,6 +30,7 @@ else
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
+    "${ROOT_DIR}/tests/mariadb/create_account.bats" \
     "${ROOT_DIR}/tests/mongodb/restart.bats" \
     "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
 fi

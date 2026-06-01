@@ -227,8 +227,11 @@ declare -A POD_RESTARTED
 declare -A POD_READY_AFTER
 
 for pod in "${PODS[@]}"; do
+  # shellcheck disable=SC2034  # Read and updated by mariadb-operator.sh helpers.
   POD_UID_BEFORE["$pod"]=$(mariadb_pod_jsonpath "$pod" '{.metadata.uid}' 2>/dev/null || true)
+  # shellcheck disable=SC2034  # Read and updated by mariadb-operator.sh helpers.
   POD_RESTARTED["$pod"]=false
+  # shellcheck disable=SC2034  # Read and updated by mariadb-operator.sh helpers.
   POD_READY_AFTER["$pod"]=null
 done
 

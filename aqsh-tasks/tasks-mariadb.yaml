@@ -117,7 +117,7 @@ tasks:
   mariadb_sanity_check: *mariadb_sanity_check_task
   create-account:
     script: mariadb/create-account.sh
-    description: "Create a MariaDB account and grant scoped database privileges"
+    description: "Create a new MariaDB account and grant scoped database privileges"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:

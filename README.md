@@ -170,7 +170,7 @@ Submit tasks via `POST /tasks/<name>` with Bearer token + JSON body.
 | `common/hello` | `:30081` or `:30082` | Smoke test (greeting) | `name` (string) | — |
 | `restart` | `:30081` (MariaDB) | Rolling restart StatefulSet | `namespace` (e.g., `mariadb-1`) | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
 | `sanity-check` | `:30081` (MariaDB) | Read-only health check (operator + service + SQL + replication + semi-sync) | `namespace`, optional `context`, `resource`, `mdb`, thresholds | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
-| `create-account` | `:30081` (MariaDB) | Create user and grant scoped database privileges | `namespace`, `database`, `username`, `privileges`, `password_secret_name` when creating a new account | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
+| `create-account` | `:30081` (MariaDB) | Create a new user and grant scoped database privileges | `namespace`, `database`, `username`, `privileges`, `password_secret_name` when creating a new account | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
 | `restart` | `:30082` (MongoDB) | Rolling restart StatefulSet | `namespace` (e.g., `mongo-1`) | [docs/mongodb/restart.md](docs/mongodb/restart.md) |
 | `sanity-check` | `:30082` (MongoDB) | 3-layer health check | `namespace` | [docs/mongodb/sanity-check.md](docs/mongodb/sanity-check.md) |
 | `backup`* | `:30081` or `:30082` | Backup to MinIO | `namespace`, `bucket` (optional) | — |

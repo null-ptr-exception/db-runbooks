@@ -351,17 +351,10 @@ print(secrets.token_urlsafe(32))
 PY
 }
 
-apply_password_secret() {
+create_password_secret() {
   local password="$1"
-  _kubectl apply -f - >/dev/null <<EOF
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ${PASSWORD_SECRET_NAME}
-type: Opaque
-stringData:
-  ${PASSWORD_SECRET_KEY}: "${password}"
-EOF
+  _kubectl create secret generic "$PASSWORD_SECRET_NAME" \
+    "--from-literal=${PASSWORD_SECRET_KEY}=${password}" >/dev/null
 }
 
 validate_inputs
@@ -432,45 +425,51 @@ else
   ACCOUNT_EXISTS=false
 fi
 
+if [[ "$ACCOUNT_EXISTS" == "true" ]]; then
+  SUMMARY="MariaDB account already exists; no password Secret or grants were changed"
+  RESULT_JSON="$(result_json UNCHANGED ACCOUNT_EXISTS "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON" "[]" false)"
+  emit_result "$RESULT_JSON" UNCHANGED "$SUMMARY"
+fi
+
 PASSWORD_VALUE=""
 SECRET_MANAGED=false
-if [[ "$ACCOUNT_EXISTS" == "false" ]]; then
-  if [[ -z "$PASSWORD_SECRET_NAME" ]]; then
-    SUMMARY="password_secret_name is required when creating a new account"
-    RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_REQUIRED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
-    emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
-  fi
+if [[ -z "$PASSWORD_SECRET_NAME" ]]; then
+  SUMMARY="password_secret_name is required when creating a new account"
+  RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_REQUIRED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+  emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
+fi
 
-  if bool_enabled "$GENERATE_PASSWORD"; then
-    PASSWORD_VALUE="$(generate_password)"
-    if ! apply_password_secret "$PASSWORD_VALUE"; then
-      SUMMARY="Failed to create or update password Secret"
-      RESULT_JSON="$(result_json ERROR PASSWORD_SECRET_WRITE_FAILED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
-      emit_result "$RESULT_JSON" ERROR "$SUMMARY"
-    fi
+if bool_enabled "$GENERATE_PASSWORD"; then
+  PASSWORD_VALUE="$(generate_password)"
+  if create_password_secret "$PASSWORD_VALUE" 2>/dev/null; then
     SECRET_MANAGED=true
   else
     if ! PASSWORD_VALUE="$(read_secret_password)"; then
-      SUMMARY="Failed to read password Secret"
-      RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_UNAVAILABLE "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
-      emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
+      SUMMARY="Failed to create password Secret"
+      RESULT_JSON="$(result_json ERROR PASSWORD_SECRET_WRITE_FAILED "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+      emit_result "$RESULT_JSON" ERROR "$SUMMARY"
     fi
-    if contains_unsafe_literal_chars "$PASSWORD_VALUE"; then
-      SUMMARY="Password Secret value contains unsupported characters"
-      RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_INVALID "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
-      emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
-    fi
+    SECRET_MANAGED=false
   fi
 fi
-
-CREATE_SQL=""
-if [[ "$ACCOUNT_EXISTS" == "false" ]]; then
-  PASSWORD_LITERAL="$(sql_string_literal "$PASSWORD_VALUE")"
-  CREATE_SQL="CREATE USER IF NOT EXISTS ${USER_LITERAL}@${HOST_LITERAL} IDENTIFIED BY ${PASSWORD_LITERAL};"
+if ! bool_enabled "$GENERATE_PASSWORD"; then
+  if ! PASSWORD_VALUE="$(read_secret_password)"; then
+    SUMMARY="Failed to read password Secret"
+    RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_UNAVAILABLE "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+    emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
+  fi
 fi
+if contains_unsafe_literal_chars "$PASSWORD_VALUE"; then
+  SUMMARY="Password Secret value contains unsupported characters"
+  RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_INVALID "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+  emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
+fi
+
+PASSWORD_LITERAL="$(sql_string_literal "$PASSWORD_VALUE")"
+CREATE_SQL="CREATE USER IF NOT EXISTS ${USER_LITERAL}@${HOST_LITERAL} IDENTIFIED BY ${PASSWORD_LITERAL};"
 GRANT_SQL="GRANT ${PRIVILEGES_SQL} ON ${GRANT_SCOPE} TO ${USER_LITERAL}@${HOST_LITERAL}; FLUSH PRIVILEGES;"
 
-if [[ -n "$CREATE_SQL" ]] && ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$CREATE_SQL" >/dev/null; then
+if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$CREATE_SQL" >/dev/null; then
   SUMMARY="Failed to create MariaDB account"
   RESULT_JSON="$(result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" "[]" "$SECRET_MANAGED")"
   emit_result "$RESULT_JSON" ERROR "$SUMMARY"
@@ -484,12 +483,6 @@ if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SHOW GRANTS FOR ${USER_LIT
   SUMMARY="Account was changed but SHOW GRANTS verification failed"
   RESULT_JSON="$(result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" "[]" "$SECRET_MANAGED")"
   emit_result "$RESULT_JSON" ERROR "$SUMMARY"
-fi
-
-if [[ "$ACCOUNT_EXISTS" == "true" ]]; then
-  SUMMARY="MariaDB account already existed; grants were applied idempotently"
-  RESULT_JSON="$(result_json UNCHANGED ACCOUNT_EXISTS "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON" "[]" "$SECRET_MANAGED")"
-  emit_result "$RESULT_JSON" UNCHANGED "$SUMMARY"
 fi
 
 SUMMARY="MariaDB account created and grants verified"

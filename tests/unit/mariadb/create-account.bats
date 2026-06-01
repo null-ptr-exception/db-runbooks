@@ -1,6 +1,9 @@
 #!/usr/bin/env bats
 
 setup() {
+  load '../../test_helper/bats-support/load.bash'
+  load '../../test_helper/bats-assert/load.bash'
+
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
@@ -31,16 +34,20 @@ done
 cmd="${args[0]:-}"
 
 if [[ "$cmd" == "cluster-info" ]]; then
+  if [[ "${KUBECTL_UNAVAILABLE:-0}" == "1" ]]; then
+    echo "connection refused" >&2
+    exit 1
+  fi
   echo "Kubernetes control plane is running"
   exit 0
 fi
 
-if [[ "$cmd" == "apply" ]]; then
-  if [[ "${KUBECTL_APPLY_FAIL:-0}" == "1" ]]; then
-    echo "simulated apply failure" >&2
+if [[ "$cmd" == "create" && "${args[1]:-}" == "secret" ]]; then
+  if [[ "${KUBECTL_CREATE_FAIL:-0}" == "1" ]]; then
+    echo "simulated create failure" >&2
     exit 1
   fi
-  cat > "${TEST_TMPDIR}/applied-secret.yaml"
+  printf '%s\n' "${args[*]}" > "${TEST_TMPDIR}/created-secret.args"
   exit 0
 fi
 
@@ -52,10 +59,10 @@ if [[ "$cmd" == "get" ]]; then
   if [[ "$resource" == "mariadb" && "$name" == "mariadb" ]]; then
     case "$output" in
       *'.status.currentPrimary'*)
-        printf 'mariadb-0'
+        if [[ "${CURRENT_PRIMARY_EMPTY:-0}" == "1" ]]; then printf ''; else printf 'mariadb-0'; fi
         ;;
       *'.spec.replicas'*)
-        printf '1'
+        printf '%s' "${MOCK_REPLICAS:-1}"
         ;;
       *)
         printf '{}'
@@ -65,12 +72,27 @@ if [[ "$cmd" == "get" ]]; then
   fi
 
   if [[ "$resource" == "statefulset" && "$name" == "mariadb" ]]; then
-    printf '1'
+    printf '%s' "${MOCK_REPLICAS:-1}"
+    exit 0
+  fi
+
+  if [[ "$resource" == "pods" ]]; then
+    printf ''
     exit 0
   fi
 
   if [[ "$resource" == "secret" && "$name" == "mariadb-account-provided-password" ]]; then
     printf 'UHJvdmlkZWRQYXNzMTIz'
+    exit 0
+  fi
+
+  if [[ "$resource" == "secret" && "$name" == "mariadb-account-invalid-password" ]]; then
+    printf 'YmFkJ3Bhc3N3b3Jk'
+    exit 0
+  fi
+
+  if [[ "$resource" == "secret" && "$name" == "mariadb-account-app-user-password" && "${KUBECTL_CREATE_FAIL:-0}" == "1" && "${SECRET_ALREADY_EXISTS:-0}" == "1" ]]; then
+    printf 'RXhpc3RpbmdQYXNzMTIz'
     exit 0
   fi
 
@@ -92,6 +114,10 @@ if [[ "$cmd" == "exec" ]]; then
   command=("${args[@]:$shift_index}")
 
   if [[ "$pod" == "mariadb-0" && "${command[*]}" == "printenv MARIADB_ROOT_PASSWORD" ]]; then
+    if [[ "${ROOT_PASSWORD_UNAVAILABLE:-0}" == "1" ]]; then
+      echo "root password unavailable" >&2
+      exit 1
+    fi
     printf 'root-pass'
     exit 0
   fi
@@ -123,6 +149,10 @@ if [[ "$cmd" == "exec" ]]; then
       printf 'ok\n'
       ;;
     SHOW\ GRANTS*)
+      if [[ "${SQL_FAIL_VERIFY:-0}" == "1" ]]; then
+        echo "simulated verify failure" >&2
+        exit 1
+      fi
       printf 'ok\n'
       ;;
     *)
@@ -136,6 +166,24 @@ echo "unexpected kubectl invocation: ${args[*]}" >&2
 exit 1
 EOF
   chmod +x "${TEST_TMPDIR}/bin/kubectl"
+}
+
+common_args() {
+  echo "--context kind-cluster-dbs \
+    --namespace mariadb-2 \
+    --database app_db \
+    --username app_user \
+    --privileges SELECT \
+    --password-secret-name mariadb-account-app-user-password \
+    --dry-run false \
+    --confirm true \
+    --json"
+}
+
+assert_json() {
+  local field="$1" expected="$2" actual
+  actual="$(printf '%s' "$output" | jq -r "$field")"
+  assert_equal "$actual" "$expected"
 }
 
 @test "dry-run returns READY with a redacted SQL plan" {
@@ -175,7 +223,7 @@ EOF
 
   [ "$result_status" = "BLOCKED" ]
   [ "$reason_code" = "CONFIRM_REQUIRED" ]
-  [ ! -f "${TEST_TMPDIR}/applied-secret.yaml" ]
+  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
 }
 
 @test "invalid username is rejected" {
@@ -280,7 +328,7 @@ EOF
   [ "$result_status" = "CREATED" ]
   [ "$reason_code" = "ACCOUNT_CREATED" ]
   [ "$managed" = "true" ]
-  [ -f "${TEST_TMPDIR}/applied-secret.yaml" ]
+  [ -f "${TEST_TMPDIR}/created-secret.args" ]
   ! printf '%s' "$output" | grep -q 'stringData'
   ! printf '%s' "$output" | grep -q 'root-pass'
 }
@@ -391,6 +439,87 @@ EOF
   [ "$reason_code" = "SQL_FAILED" ]
 }
 
+@test "KUBECTL_UNAVAILABLE when cluster-info fails" {
+  export KUBECTL_UNAVAILABLE=1
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'ERROR'
+  assert_json '.reason_code' 'KUBECTL_UNAVAILABLE'
+}
+
+@test "CURRENT_PRIMARY_EMPTY when no primary or pods can be determined" {
+  export CURRENT_PRIMARY_EMPTY=1
+  export MOCK_REPLICAS=0
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'ERROR'
+  assert_json '.reason_code' 'CURRENT_PRIMARY_EMPTY'
+}
+
+@test "ROOT_PASSWORD_UNAVAILABLE when password cannot be read" {
+  export ROOT_PASSWORD_UNAVAILABLE=1
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'ERROR'
+  assert_json '.reason_code' 'ROOT_PASSWORD_UNAVAILABLE'
+}
+
+@test "PASSWORD_SECRET_WRITE_FAILED when generated Secret cannot be created or read" {
+  export KUBECTL_CREATE_FAIL=1
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'ERROR'
+  assert_json '.reason_code' 'PASSWORD_SECRET_WRITE_FAILED'
+}
+
+@test "PASSWORD_SECRET_INVALID when provided Secret contains unsafe password" {
+  run "${SCRIPT}" \
+    --context kind-cluster-dbs \
+    --namespace mariadb-2 \
+    --database app_db \
+    --username app_user \
+    --privileges SELECT \
+    --password-secret-name mariadb-account-invalid-password \
+    --generate-password false \
+    --dry-run false \
+    --confirm true \
+    --json
+
+  assert_success
+  assert_json '.status' 'BLOCKED'
+  assert_json '.reason_code' 'PASSWORD_SECRET_INVALID'
+}
+
+@test "SQL_VERIFY_FAILED when SHOW GRANTS fails after successful create" {
+  export SQL_FAIL_VERIFY=1
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'ERROR'
+  assert_json '.reason_code' 'SQL_VERIFY_FAILED'
+}
+
+@test "existing generated password Secret is reused instead of overwritten" {
+  export KUBECTL_CREATE_FAIL=1
+  export SECRET_ALREADY_EXISTS=1
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_success
+  assert_json '.status' 'CREATED'
+  assert_json '.reason_code' 'ACCOUNT_CREATED'
+  assert_json '.password_secret.managed' 'false'
+}
+
 @test "existing account is idempotent and does not rewrite password Secret" {
   export CREATE_ACCOUNT_EXISTS=1
 
@@ -413,7 +542,8 @@ EOF
   [ "$result_status" = "UNCHANGED" ]
   [ "$reason_code" = "ACCOUNT_EXISTS" ]
   [ "$exists" = "true" ]
-  [ ! -f "${TEST_TMPDIR}/applied-secret.yaml" ]
+  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
+  ! grep -q '^GRANT' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "secret-provided password path is supported" {
@@ -435,5 +565,5 @@ EOF
 
   [ "$result_status" = "CREATED" ]
   [ "$managed" = "false" ]
-  [ ! -f "${TEST_TMPDIR}/applied-secret.yaml" ]
+  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
 }

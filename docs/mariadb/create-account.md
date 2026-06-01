@@ -11,21 +11,23 @@ The task is conservative by default:
 - Passwords are never written to logs or task results.
 - Generated passwords are stored in a Kubernetes Secret.
 - Global grants and admin privileges are blocked unless explicitly allowed.
-- Existing accounts return an idempotent `UNCHANGED` result after grants are applied.
+- Existing accounts return an idempotent `UNCHANGED` result without changing
+  grants or password Secrets.
 
 For new accounts, `password_secret_name` is conditionally required. For existing
-accounts, the task applies grants idempotently and does not create or backfill a
-missing password Secret, because it cannot know the pre-existing account's
-password.
+accounts, the task does not create or backfill a missing password Secret,
+because it cannot know the pre-existing account's password.
 
-When `generate_password=true`, the task writes the generated password Secret
+When `generate_password=true`, the task creates the generated password Secret
 before running `CREATE USER`, so the password can be recovered if the task fails
-before the account is created. If `CREATE USER` succeeds but a later step such
-as `GRANT` or `SHOW GRANTS` verification fails, the next run sees
-`ACCOUNT_EXISTS=true` and will not regenerate or overwrite the Secret.
+before the account is created. Secret creation is create-only: if the Secret
+already exists, the task reads and reuses that password instead of overwriting
+it. If `CREATE USER` succeeds but a later step such as `GRANT` or `SHOW GRANTS`
+verification fails, the next run sees `ACCOUNT_EXISTS=true` and will not
+regenerate or overwrite the Secret.
 
 By default, `password_secret_name` must start with `mariadb-account-`. This keeps
-the task from reading or patching unrelated Secrets even though Kubernetes RBAC
+the task from reading unrelated Secrets even though Kubernetes RBAC
 grants namespace-scoped Secret access for account password management.
 
 ## Endpoint
@@ -123,7 +125,7 @@ Real execution returns one of:
 | Status | Reason | Meaning |
 |--------|--------|---------|
 | `CREATED` | `ACCOUNT_CREATED` | Account was created and grants verified |
-| `UNCHANGED` | `ACCOUNT_EXISTS` | Account already existed; grants were applied |
+| `UNCHANGED` | `ACCOUNT_EXISTS` | Account already existed; grants and password Secret were not changed |
 | `BLOCKED` | `CONFIRM_REQUIRED` | `dry_run=false` without `confirm=true` |
 | `BLOCKED` | `PASSWORD_SECRET_REQUIRED` | New account requested without a password Secret |
 | `BLOCKED` | `PASSWORD_SECRET_UNAVAILABLE` | Requested new account but password Secret is missing or unreadable |
@@ -132,7 +134,7 @@ Real execution returns one of:
 | `ERROR` | `KUBECTL_UNAVAILABLE` | `kubectl` or the target cluster API is unavailable |
 | `ERROR` | `CURRENT_PRIMARY_EMPTY` | No primary MariaDB pod was found during operation |
 | `ERROR` | `ROOT_PASSWORD_UNAVAILABLE` | Root password is not available from target pods |
-| `ERROR` | `PASSWORD_SECRET_WRITE_FAILED` | Failed to write password Secret |
+| `ERROR` | `PASSWORD_SECRET_WRITE_FAILED` | Failed to create password Secret and no existing password Secret could be read |
 | `ERROR` | `SQL_FAILED` | SQL execution failed |
 | `ERROR` | `SQL_VERIFY_FAILED` | Post-change SQL verification failed |
 
@@ -145,7 +147,7 @@ namespaced Secret access in the target database namespace:
 |----------|-------|---------|
 | `pods`, `pods/exec` | `get`, `list`, `watch`, `create` | Resolve primary and execute SQL |
 | `statefulsets`, `mariadbs.k8s.mariadb.com` | `get`, `list`, `watch` | Resolve target topology |
-| `secrets` | `get`, `create`, `patch` | Read or store namespace-scoped account password Secrets whose names pass the configured prefix check |
+| `secrets` | `get`, `create` | Read or create namespace-scoped account password Secrets whose names pass the configured prefix check |
 
 ## CLI Example
 

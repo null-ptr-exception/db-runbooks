@@ -59,6 +59,7 @@ mariadb_restart_set_defaults() {
   PATCH_OUT=""
 }
 
+# shellcheck disable=SC2034  # Parsed task globals are consumed by restart.sh and result helpers.
 mariadb_restart_parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in

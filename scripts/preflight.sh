@@ -40,21 +40,22 @@ echo " Preflight: checking required tools"
 echo "======================================="
 
 # 0. Required system tools
-for tool in curl git; do
-  if ! command -v "$tool" &>/dev/null; then
-    _err "$tool not found — please install it first"
-    exit 1
+echo ""
+echo "=== system tools ==="
+MISSING=0
+for tool in curl git jq openssl python3 envsubst docker; do
+  if command -v "$tool" &>/dev/null; then
+    _ok "$tool"
+  else
+    _err "$tool not found"
+    MISSING=1
   fi
 done
-
-# 1. Docker — check only
-echo ""
-echo "=== docker ==="
-if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
-  _ok "$(docker --version)"
-else
-  _err "docker not found or daemon not running"
-  echo "       Install: https://docs.docker.com/engine/install/"
+if ! docker info &>/dev/null 2>&1; then
+  _err "docker daemon not running"
+  MISSING=1
+fi
+if [ "$MISSING" -eq 1 ]; then
   exit 1
 fi
 
@@ -114,9 +115,12 @@ echo "======================================="
 
 if [ "$NEED_PATH" -eq 1 ]; then
   echo ""
-  echo "NOTE: ~/.local/bin is not in your PATH."
+  echo "ERROR: ~/.local/bin is not in your PATH."
   echo "Add it by running:"
   echo ""
   echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc"
   echo "  source ~/.bashrc"
+  echo ""
+  echo "Then re-run this script."
+  exit 1
 fi

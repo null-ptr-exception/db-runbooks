@@ -64,13 +64,8 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Activate mise
-        run: mise trust && mise install
-
-      - name: Install bats helpers (pinned versions)
-        run: |
-          [ -d "tests/test_helper/bats-support" ] || git clone --depth 1 --branch v0.3.0 "https://github.com/bats-core/bats-support.git" "tests/test_helper/bats-support"
-          [ -d "tests/test_helper/bats-assert" ]  || git clone --depth 1 --branch v2.1.0 "https://github.com/bats-core/bats-assert.git" "tests/test_helper/bats-assert"
+      - name: Install prerequisites
+        run: ./scripts/preflight.sh
 
       - name: Run infra e2e tests
         run: bats tests/infra/

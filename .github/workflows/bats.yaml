@@ -49,3 +49,36 @@ jobs:
       - name: Tear down clusters
         if: always()
         run: ./scripts/teardown.sh
+
+  infra:
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
+      - name: Activate mise
+        run: mise trust && mise install
+
+      - name: Install bats helpers
+        run: |
+          for lib in bats-support bats-assert; do
+            [ -d "tests/test_helper/${lib}" ] || git clone --depth 1 "https://github.com/bats-core/${lib}.git" "tests/test_helper/${lib}"
+          done
+
+      - name: Run infra e2e tests
+        run: bats tests/infra/
+
+      - name: Tear down infra clusters
+        if: always()
+        run: |
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true

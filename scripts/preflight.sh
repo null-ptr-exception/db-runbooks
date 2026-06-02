@@ -95,16 +95,17 @@ mise ls --current kubectl helm skaffold bats
 echo ""
 echo "=== bats helpers ==="
 HELPER_DIR="${ROOT_DIR}/tests/test_helper"
-for lib in bats-support bats-assert; do
+BATS_SUPPORT_REF="v0.3.0"  # 64e7436962affbe15974d181173c37e1fac70063
+BATS_ASSERT_REF="v2.1.0"   # 22612dc4c4332dac0e40491f1dc2ec93c59773f7
+BATS_MOCK_REF="v1"         # 24f995f9618b493d0a2db148bea272b3c9133826
+
+for lib_ref in "bats-support:bats-core:${BATS_SUPPORT_REF}" "bats-assert:bats-core:${BATS_ASSERT_REF}" "bats-mock:jasonkarns:${BATS_MOCK_REF}"; do
+  IFS=: read -r lib org ref <<< "$lib_ref"
   if [ ! -d "${HELPER_DIR}/${lib}" ]; then
-    _fix "Cloning ${lib}..."
-    git clone --depth 1 "https://github.com/bats-core/${lib}.git" "${HELPER_DIR}/${lib}"
+    _fix "Cloning ${lib} (${ref})..."
+    git clone --depth 1 --branch "$ref" "https://github.com/${org}/${lib}.git" "${HELPER_DIR}/${lib}"
   fi
 done
-if [ ! -d "${HELPER_DIR}/bats-mock" ]; then
-  _fix "Cloning bats-mock..."
-  git clone --depth 1 --branch v1 "https://github.com/jasonkarns/bats-mock.git" "${HELPER_DIR}/bats-mock"
-fi
 _ok "bats-support + bats-assert + bats-mock installed"
 
 # Done

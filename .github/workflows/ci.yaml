@@ -2,7 +2,7 @@ name: CI
 
 'on':
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -11,30 +11,21 @@ permissions:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           persist-credentials: false
 
-      - name: Install lint tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck python3-pip bats jq
-          python3 -m pip install yamllint
+      - name: Install prerequisites
+        run: ./scripts/preflight.sh
 
       - name: Run ShellCheck
         run: |
           find . -type f -name '*.sh' -print0 \
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
-
-      - name: Install bats helpers
-        run: |
-          for lib in bats-support bats-assert; do
-            [ -d "tests/test_helper/${lib}" ] || git clone --depth 1 "https://github.com/bats-core/${lib}.git" "tests/test_helper/${lib}"
-          done
-          [ -d "tests/test_helper/bats-mock" ] || git clone --depth 1 --branch v1 "https://github.com/jasonkarns/bats-mock.git" "tests/test_helper/bats-mock"
 
       - name: Run Bats unit tests
         run: |
@@ -48,13 +39,9 @@ jobs:
           dockerfile: aqsh-tasks/Dockerfile
           ignore: DL3008,DL4006
 
-      - name: Run yamllint
-        run: |
-          find k8s -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.yaml.tpl' -o -name '*.yml.tpl' \) -print0 \
-            | xargs -0 --no-run-if-empty yamllint -c .yamllint.yaml
-
   build-image:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 10
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -66,3 +53,67 @@ jobs:
 
       - name: Build aqsh-mongodb image
         run: docker build --build-arg TASKS_YAML=tasks-mongodb.yaml -t aqsh-mongodb:ci ./aqsh-tasks
+
+  integration:
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - db_mode: single
+            use_mariadb_operator: "true"
+          - db_mode: single
+            use_mariadb_operator: "false"
+          - db_mode: dual
+            use_mariadb_operator: "true"
+          - db_mode: dual
+            use_mariadb_operator: "false"
+    env:
+      DB_MODE: ${{ matrix.db_mode }}
+      USE_MARIADB_OPERATOR: ${{ matrix.use_mariadb_operator }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
+      - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
+        run: ./scripts/test.sh
+
+      - name: Tear down clusters
+        if: always()
+        run: ./scripts/teardown.sh
+
+  infra:
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
+      - name: Install prerequisites
+        run: ./scripts/preflight.sh
+
+      - name: Run infra e2e tests
+        run: bats tests/infra/
+
+      - name: Tear down infra clusters
+        if: always()
+        run: |
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true

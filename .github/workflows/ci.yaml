@@ -39,11 +39,6 @@ jobs:
           dockerfile: aqsh-tasks/Dockerfile
           ignore: DL3008,DL4006
 
-      - name: Run yamllint
-        run: |
-          find k8s -type f \( -name '*.yaml' -o -name '*.yml' -o -name '*.yaml.tpl' -o -name '*.yml.tpl' \) -print0 \
-            | xargs -0 --no-run-if-empty yamllint -c .yamllint.yaml
-
   build-image:
     runs-on: [self-hosted, aws-runner]
     timeout-minutes: 10

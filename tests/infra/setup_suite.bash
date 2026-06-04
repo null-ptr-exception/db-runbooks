@@ -5,15 +5,6 @@ setup_suite() {
   source "${ROOT_DIR}/infra/deploy.sh"
   setup_infra
 
-  # Push nginx + curl images to local registry
-  for img in nginx:alpine curlimages/curl:latest; do
-    local name="${img%%:*}"
-    name="${name##*/}"
-    docker pull --platform linux/amd64 "$img"
-    docker tag "$img" "${REGISTRY}/${name}:latest"
-    docker push "${REGISTRY}/${name}:latest"
-  done
-
   # Deploy nginx + Istio Gateway/VirtualService on both clusters
   for cluster_ctx in "$CTX_A:kind-a:infra-a" "$CTX_B:kind-b:infra-b"; do
     IFS=: read -r ctx domain ns <<< "$cluster_ctx"
@@ -36,7 +27,7 @@ spec:
     spec:
       containers:
         - name: nginx
-          image: ${REGISTRY}/nginx:latest
+          image: nginx:alpine
           ports:
             - containerPort: 80
 ---
@@ -108,7 +99,7 @@ spec:
     spec:
       containers:
         - name: curl
-          image: ${REGISTRY}/curl:latest
+          image: curlimages/curl:latest
           command: ["sleep", "infinity"]
 EOF
     kubectl --context "$ctx" -n "$ns" rollout status deployment/curl --timeout=60s

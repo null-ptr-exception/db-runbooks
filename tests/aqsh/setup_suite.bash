@@ -20,7 +20,6 @@ setup_suite() {
 
   local CTX_A="kind-cluster-a"
   local CTX_B="kind-cluster-b"
-  local REGISTRY="localhost:5005"
   local NS="aqsh-test"
 
   # --- Namespaces ---
@@ -184,7 +183,7 @@ spec:
       serviceAccountName: kube-federated-auth
       containers:
         - name: kube-federated-auth
-          image: ${REGISTRY}/kube-federated-auth:latest
+          image: ghcr.io/rophy/kube-federated-auth:3.2.0
           env:
             - name: CONFIG_PATH
               value: /etc/kube-federated-auth/config/clusters.yaml
@@ -243,7 +242,7 @@ spec:
     spec:
       containers:
         - name: redis
-          image: ${REGISTRY}/redis:latest
+          image: redis:alpine
           ports:
             - containerPort: 6379
 ---
@@ -284,7 +283,8 @@ spec:
       serviceAccountName: kube-auth-proxy
       containers:
         - name: aqsh
-          image: ${REGISTRY}/aqsh-mariadb:latest
+          image: aqsh-mariadb:latest
+          imagePullPolicy: Never
           env:
             - name: AQSH_MODE
               value: both
@@ -309,7 +309,7 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
         - name: kube-auth-proxy
-          image: ${REGISTRY}/kube-auth-proxy:latest
+          image: ghcr.io/rophy/kube-auth-proxy:0.4.1
           env:
             - name: UPSTREAM
               value: "http://localhost:8080"
@@ -413,7 +413,7 @@ spec:
       serviceAccountName: test-client
       containers:
         - name: test-client
-          image: ${REGISTRY}/curl:latest
+          image: curlimages/curl:latest
           command: ["sleep", "infinity"]
           volumeMounts:
             - name: token
@@ -428,20 +428,9 @@ spec:
                   path: token
 EOF
 
-  # --- Push required images to local registry ---
-  for img in ghcr.io/rophy/kube-federated-auth:3.2.0 ghcr.io/rophy/kube-auth-proxy:0.4.1 redis:alpine curlimages/curl:latest; do
-    local name="${img%%:*}"
-    name="${name##*/}"
-    local tag="${img##*:}"
-    docker pull --platform linux/amd64 "$img"
-    docker tag "$img" "${REGISTRY}/${name}:latest"
-    docker push "${REGISTRY}/${name}:latest"
-  done
-
-  # Build and push aqsh image
+  # --- Build aqsh image and load into cluster-a ---
   skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest
-  docker tag aqsh-mariadb:latest "${REGISTRY}/aqsh-mariadb:latest"
-  docker push "${REGISTRY}/aqsh-mariadb:latest"
+  kind load docker-image aqsh-mariadb:latest --name cluster-a
 
   # --- Wait for deployments ---
   echo "Waiting for kube-federated-auth..."

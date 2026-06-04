@@ -27,12 +27,9 @@ mariadb_restart_emit_result() {
     --arg annotation_key "${ANNOTATION_KEY:-}" \
     --arg annotation_value "${PATCH_VALUE:-}" \
     --arg metadata_field "${METADATA_FIELD:-}" \
-    --arg primary_before "${PRIMARY_BEFORE:-}" \
-    --arg primary_after "${PRIMARY_AFTER:-}" \
     --argjson replicas "$(task_json_num_or_null "${REPLICAS:-}")" \
     --argjson dry_run "$(task_json_bool "${DRY_RUN:-}")" \
     --argjson confirm "$(task_json_bool "${CONFIRM:-}")" \
-    --argjson allow_role_change "$(task_json_bool "${ALLOW_ROLE_CHANGE:-}")" \
     --argjson changed "$(task_json_bool "$changed")" \
     --argjson pods "$pods_json" \
     '{
@@ -55,11 +52,7 @@ mariadb_restart_emit_result() {
       },
       dry_run: $dry_run,
       confirm: $confirm,
-      allow_role_change: $allow_role_change,
       changed: $changed,
-      primary_before: ($primary_before | if . == "" then null else . end),
-      primary_after: ($primary_after | if . == "" then null else . end),
-      restart_order: [],
       pods: $pods
     }')
 

@@ -8,6 +8,11 @@ set -euo pipefail
 # AQSH does not delete MariaDB Pods or decide the rollout order. It patches a
 # MariaDB CR Pod-template annotation and lets mariadb-operator reconcile the
 # restart according to spec.updateStrategy (for example ReplicasFirstPrimaryLast).
+#
+# The task's contract is deliberately narrow: patch the restart annotation, then
+# verify that the operator recreated every pod and brought it back Ready. It does
+# not track primary/replica roles or impose a restart order — those belong to the
+# operator.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -83,7 +88,7 @@ declare -A POD_RESTARTED
 # shellcheck disable=SC2034  # Populated and consumed by mariadb-operator.sh helpers.
 declare -A POD_READY_AFTER
 
-mariadb_operator_load_restart_state "$RESOURCE" "$MDB" "$CONTAINER"
+mariadb_operator_load_restart_state "$RESOURCE" "$MDB"
 
 if [[ "${#PODS[@]}" -eq 0 ]]; then
   mariadb_restart_emit_result "BLOCKED" "MARIADB_PODS_NOT_FOUND" "MariaDB CR exists, but no MariaDB pods were found" false "$PODS_JSON"
@@ -128,30 +133,14 @@ if [[ "$UPDATE_STRATEGY" == "OnDelete" || "$UPDATE_STRATEGY" == "Never" ]]; then
 fi
 
 if ! mariadb_operator_wait_for_restart "$CONTAINER" "$WAIT_TIMEOUT" "${PODS[@]}"; then
-  PRIMARY_AFTER=$(mariadb_operator_resolve_primary "$RESOURCE" "$MDB" "$ROOT_PASSWORD" "${PODS[@]}")
-  PODS_JSON=$(mariadb_operator_build_pods_json "$CONTAINER" "$PRIMARY_BEFORE" "$ROOT_PASSWORD" "${PODS[@]}")
+  PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
   mariadb_restart_emit_result "ERROR" "OPERATOR_RESTART_TIMEOUT" \
     "MariaDB CR was patched, but not all pods restarted and became Ready within ${WAIT_TIMEOUT}s" true \
     "$PODS_JSON"
   exit 0
 fi
 
-PRIMARY_AFTER=$(mariadb_operator_resolve_primary "$RESOURCE" "$MDB" "$ROOT_PASSWORD" "${PODS[@]}")
-PODS_JSON=$(mariadb_operator_build_pods_json "$CONTAINER" "$PRIMARY_BEFORE" "$ROOT_PASSWORD" "${PODS[@]}")
-
-if [[ -n "$PRIMARY_BEFORE" && -n "$PRIMARY_AFTER" && "$PRIMARY_BEFORE" != "$PRIMARY_AFTER" ]]; then
-  if task_bool_enabled "$ALLOW_ROLE_CHANGE"; then
-    mariadb_restart_emit_result "WARN" "ROLE_CHANGED" \
-      "Operator restart completed but the primary role moved (${PRIMARY_BEFORE} -> ${PRIMARY_AFTER})" true \
-      "$PODS_JSON"
-  else
-    mariadb_restart_emit_result "ERROR" "ROLE_CHANGED" \
-      "Operator restart completed but the primary role moved unexpectedly (${PRIMARY_BEFORE} -> ${PRIMARY_AFTER})" true \
-      "$PODS_JSON"
-  fi
-  exit 0
-fi
-
+PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
 mariadb_restart_emit_result "RESTARTED" "RESTART_COMPLETED" \
-  "MariaDB restart annotation was patched and mariadb-operator restarted all pods; primary role unchanged" true \
+  "MariaDB restart annotation was patched and mariadb-operator restarted all pods" true \
   "$PODS_JSON"

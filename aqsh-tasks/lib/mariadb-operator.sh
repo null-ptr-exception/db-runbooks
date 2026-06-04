@@ -57,31 +57,6 @@ mariadb_operator_patch_restart_annotation() {
   _kubectl patch "$resource" "$name" --type merge -p "$patch_json" 2>&1
 }
 
-mariadb_operator_resolve_primary() {
-  local resource="${1:?resource is required}"
-  local name="${2:?name is required}"
-  local root_password="${3:-}"
-  shift 3 || true
-  local pods=("$@")
-  local primary index pod read_only
-
-  primary=$(mariadb_jsonpath "$resource" "$name" '{.status.currentPrimary}' 2>/dev/null || true)
-  if [[ -z "$primary" ]]; then
-    index=$(mariadb_jsonpath "$resource" "$name" '{.status.currentPrimaryPodIndex}' 2>/dev/null || true)
-    [[ -n "$index" ]] && primary=$(mariadb_pod_name "$index")
-  fi
-  if [[ -z "$primary" && -n "$root_password" ]]; then
-    for pod in "${pods[@]}"; do
-      read_only=$(mariadb_sql "$pod" "$root_password" 'SELECT @@read_only' 2>/dev/null || true)
-      if [[ "$read_only" == "0" ]]; then
-        primary="$pod"
-        break
-      fi
-    done
-  fi
-  printf '%s' "$primary"
-}
-
 mariadb_operator_pod_ready() {
   local pod="${1:?pod is required}"
   local container="${2:?container is required}"
@@ -92,49 +67,27 @@ mariadb_operator_pod_ready() {
   [[ "$ready" == "true" ]]
 }
 
+# Build the per-pod evidence array for the result JSON. Each entry records the
+# pod's UID before the restart and, once the operator has rolled it, whether it
+# was recreated and became Ready again. No role/SQL inspection — the operator
+# owns the rollout, the task only reports whether it happened.
 mariadb_operator_build_pods_json() {
-  local container="${1:?container is required}"
-  local primary_before="${2:-}"
-  local root_password="${3:-}"
-  shift 3 || true
   local pods=("$@")
-  local pods_json="[]" pod ready role read_only uid restarted ready_after
+  local pods_json="[]" pod uid restarted ready_after
 
   for pod in "${pods[@]}"; do
-    ready=false
-    mariadb_operator_pod_ready "$pod" "$container" && ready=true
-
-    role="unknown"
-    if [[ -n "$pod" && "$pod" == "$primary_before" ]]; then
-      role="primary"
-    elif [[ -n "$root_password" ]]; then
-      read_only=$(mariadb_sql "$pod" "$root_password" 'SELECT @@read_only' 2>/dev/null || true)
-      case "$read_only" in
-        0) role="primary" ;;
-        1) role="replica" ;;
-      esac
-    fi
-
-    uid=$(mariadb_pod_jsonpath "$pod" '{.metadata.uid}' 2>/dev/null || true)
-    restarted=false
-    ready_after=null
-    if [[ -n "${POD_RESTARTED[$pod]:-}" ]]; then
-      restarted="${POD_RESTARTED[$pod]}"
-      ready_after="${POD_READY_AFTER[$pod]:-false}"
-    fi
+    uid="${POD_UID_BEFORE[$pod]:-}"
+    restarted="${POD_RESTARTED[$pod]:-false}"
+    ready_after="${POD_READY_AFTER[$pod]:-null}"
 
     pods_json=$(jq -c \
       --arg name "$pod" \
-      --arg role "$role" \
       --arg uid "$uid" \
-      --argjson ready "$(task_json_bool "$ready")" \
       --argjson restarted "$(task_json_bool "$restarted")" \
       --argjson ready_after "$ready_after" \
       '. + [{
         name: $name,
-        role: $role,
         uid_before: ($uid | if . == "" then null else . end),
-        ready_before: $ready,
         restarted: $restarted,
         ready_after: $ready_after
       }]' \
@@ -148,7 +101,6 @@ mariadb_operator_build_pods_json() {
 mariadb_operator_load_restart_state() {
   local resource="${1:?resource is required}"
   local name="${2:?name is required}"
-  local container="${3:?container is required}"
   local pod
 
   UPDATE_STRATEGY=$(mariadb_jsonpath "$resource" "$name" '{.spec.updateStrategy.type}' 2>/dev/null || true)
@@ -157,20 +109,13 @@ mariadb_operator_load_restart_state() {
   REPLICAS=$(mariadb_cr_replicas 2>/dev/null || true)
   mapfile -t PODS < <(mariadb_list_pods "$REPLICAS")
 
-  ROOT_PASSWORD=""
-  if [[ "${#PODS[@]}" -gt 0 ]]; then
-    ROOT_PASSWORD=$(mariadb_read_root_password "" "${PODS[@]}" 2>/dev/null || true)
-  fi
-
-  PRIMARY_BEFORE=$(mariadb_operator_resolve_primary "$resource" "$name" "$ROOT_PASSWORD" "${PODS[@]}")
-
   for pod in "${PODS[@]}"; do
     POD_UID_BEFORE["$pod"]=$(mariadb_pod_jsonpath "$pod" '{.metadata.uid}' 2>/dev/null || true)
     POD_RESTARTED["$pod"]=false
     POD_READY_AFTER["$pod"]=null
   done
 
-  PODS_JSON=$(mariadb_operator_build_pods_json "$container" "$PRIMARY_BEFORE" "$ROOT_PASSWORD" "${PODS[@]}")
+  PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
 }
 
 mariadb_operator_wait_for_restart() {

@@ -17,7 +17,6 @@ Options:
   --resource <kind>              MariaDB CR kind. Default: mariadb.
   --mdb <name>                   MariaDB CR name. Default: mariadb.
   --container <name>             MariaDB container name. Default: mariadb.
-  --allow-role-change <bool>     Tolerate a primary role move during restart. Default: false.
   --wait-timeout <sec>           Operator restart wait timeout in seconds. Default: 300.
   --dry-run <true|false>         Plan only, change nothing. Default: true.
   --confirm <true|false>         Required with --dry-run false. Default: false.
@@ -41,7 +40,6 @@ mariadb_restart_set_defaults() {
   CONTAINER="${MARIADB_CONTAINER:-mariadb}"
   TARGET_POD="${TARGET_POD:-}"
   INCLUDE_PRIMARY="${INCLUDE_PRIMARY:-false}"
-  ALLOW_ROLE_CHANGE="${ALLOW_ROLE_CHANGE:-false}"
   WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
   DRY_RUN="${DRY_RUN:-true}"
   CONFIRM="${CONFIRM:-false}"
@@ -51,8 +49,6 @@ mariadb_restart_set_defaults() {
   RESULT_FILE="${AQSH_RESULT_FILE:-}"
   JSON_ONLY=0
 
-  PRIMARY_BEFORE=""
-  PRIMARY_AFTER=""
   UPDATE_STRATEGY=""
   REPLICAS=""
   PATCH_VALUE=""
@@ -70,7 +66,6 @@ mariadb_restart_parse_args() {
       --container) task_require_value "$1" "${2:-}"; CONTAINER="$2"; shift 2 ;;
       --target-pod) task_require_value "$1" "${2:-}"; TARGET_POD="$2"; shift 2 ;;
       --include-primary) task_require_value "$1" "${2:-}"; INCLUDE_PRIMARY="$2"; shift 2 ;;
-      --allow-role-change) task_require_value "$1" "${2:-}"; ALLOW_ROLE_CHANGE="$2"; shift 2 ;;
       --wait-timeout) task_require_value "$1" "${2:-}"; WAIT_TIMEOUT="$2"; shift 2 ;;
       --dry-run) task_require_value "$1" "${2:-}"; DRY_RUN="$2"; shift 2 ;;
       --confirm) task_require_value "$1" "${2:-}"; CONFIRM="$2"; shift 2 ;;

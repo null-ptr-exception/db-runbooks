@@ -53,11 +53,6 @@ tasks:
         required: false
         type: string
         default: "false"
-      - name: allow_role_change
-        env: ALLOW_ROLE_CHANGE
-        required: false
-        type: string
-        default: "false"
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false

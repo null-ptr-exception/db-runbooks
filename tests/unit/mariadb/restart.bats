@@ -9,8 +9,6 @@ setup() {
   export MOCK_STRATEGY="ReplicasFirstPrimaryLast"
   export MOCK_REPLICAS=2
   export MOCK_ABSENT=0
-  export ROLE_CHANGE_SIM=0
-  export NO_ROOT_PASSWORD=0
   export NOT_READY_POD=""
   export PATCH_FAIL=0
   export NO_ROLLOUT=0
@@ -39,14 +37,6 @@ done
 
 cmd="${args[0]:-}"
 output="${args[*]}"
-
-current_primary() {
-  if [[ "${ROLE_CHANGE_SIM:-0}" == "1" && -f "${TEST_TMPDIR}/patched" ]]; then
-    printf 'mariadb-1'
-  else
-    printf 'mariadb-0'
-  fi
-}
 
 if [[ "$cmd" == "cluster-info" ]]; then
   echo "Kubernetes control plane is running"
@@ -84,8 +74,6 @@ if [[ "$cmd" == "get" ]]; then
       case "$output" in
         *'metadata.name'*) printf 'mariadb' ;;
         *'updateStrategy.type'*) printf '%s' "${MOCK_STRATEGY}" ;;
-        *'currentPrimaryPodIndex'*) printf '0' ;;
-        *'currentPrimary'*) current_primary ;;
         *'.spec.replicas'*) printf '%s' "${MOCK_REPLICAS:-2}" ;;
         *) printf '{}' ;;
       esac
@@ -112,39 +100,6 @@ if [[ "$cmd" == "get" ]]; then
       exit 0
       ;;
   esac
-fi
-
-if [[ "$cmd" == "exec" ]]; then
-  pod="${args[1]:-}"
-  shift_index=0
-  for i in "${!args[@]}"; do
-    if [[ "${args[$i]}" == "--" ]]; then
-      shift_index=$((i + 1))
-      break
-    fi
-  done
-  command=("${args[@]:$shift_index}")
-
-  if [[ "${command[*]}" == "printenv MARIADB_ROOT_PASSWORD" ]]; then
-    if [[ "${NO_ROOT_PASSWORD:-0}" == "1" ]]; then printf ''; exit 0; fi
-    printf 'root-pass'
-    exit 0
-  fi
-
-  last_index=$((${#command[@]} - 1))
-  query="${command[$last_index]}"
-  case "$query" in
-    'SELECT 1') printf '1\n' ;;
-    'SELECT @@read_only')
-      if [[ "$pod" == "$(current_primary)" ]]; then
-        printf '0\n'
-      else
-        printf '1\n'
-      fi
-      ;;
-    *) printf '' ;;
-  esac
-  exit 0
 fi
 
 if [[ "$cmd" == "patch" ]]; then
@@ -183,7 +138,6 @@ EOF
   reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
   changed=$(printf '%s' "$output" | jq -r '.changed')
   operator_controlled=$(printf '%s' "$output" | jq -r '.operator_controlled')
-  order=$(printf '%s' "$output" | jq -rc '.restart_order')
   annotation_key=$(printf '%s' "$output" | jq -r '.annotation.key')
   metadata_field=$(printf '%s' "$output" | jq -r '.annotation.metadata_field')
 
@@ -191,7 +145,6 @@ EOF
   [ "$reason_code" = "RESTART_DRY_RUN" ]
   [ "$changed" = "false" ]
   [ "$operator_controlled" = "true" ]
-  [ "$order" = '[]' ]
   [ "$metadata_field" = "podMetadata" ]
   [ "$annotation_key" = "aqsh.null-ptr-exception.dev/restarted-at" ]
   [ ! -f "${TEST_TMPDIR}/patched" ]
@@ -218,13 +171,11 @@ EOF
   reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
   changed=$(printf '%s' "$output" | jq -r '.changed')
   restarted=$(printf '%s' "$output" | jq -rc '[.pods[] | select(.restarted)] | map(.name)')
-  primary_after=$(printf '%s' "$output" | jq -r '.primary_after')
 
   [ "$result_status" = "RESTARTED" ]
   [ "$reason_code" = "RESTART_COMPLETED" ]
   [ "$changed" = "true" ]
   [ "$restarted" = '["mariadb-0","mariadb-1"]' ]
-  [ "$primary_after" = "mariadb-0" ]
   [ -f "${TEST_TMPDIR}/patched" ]
   run grep -F "spec" "${TEST_TMPDIR}/patch-args"
   [ "$status" -eq 0 ]
@@ -369,28 +320,3 @@ EOF
   [ "$changed" = "true" ]
 }
 
-@test "primary role move during operator restart is treated as an error" {
-  export ROLE_CHANGE_SIM=1
-  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 \
-    --dry-run false --confirm true --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "ROLE_CHANGED" ]
-}
-
-@test "role move is tolerated when allow-role-change is set" {
-  export ROLE_CHANGE_SIM=1
-  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 \
-    --allow-role-change true --dry-run false --confirm true --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "WARN" ]
-  [ "$reason_code" = "ROLE_CHANGED" ]
-}

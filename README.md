@@ -151,6 +151,7 @@ ENABLE_MINIO=true ./scripts/setup-clusters.sh
 |----------|---------|---------|-------------|
 | `DB_MODE` | `single` | `single`, `dual` | Cluster topology (1 or 2 DB clusters) |
 | `USE_MARIADB_OPERATOR` | `true` | `true`, `false` | Use operator or native StatefulSet |
+| `MARIADB_OPERATOR_CHART_VERSION` | latest | Helm chart version | Pin mariadb-operator and CRD chart versions for compatibility testing |
 | `ENABLE_MINIO` | `false` | `true`, `false` | Deploy optional MinIO cluster |
 
 **Examples**:
@@ -168,7 +169,7 @@ Submit tasks via `POST /tasks/<name>` with Bearer token + JSON body.
 | Task | Endpoint | Description | Input | Docs |
 |------|----------|-------------|-------|------|
 | `common/hello` | `:30081` or `:30082` | Smoke test (greeting) | `name` (string) | — |
-| `restart` | `:30081` (MariaDB) | Rolling restart StatefulSet | `namespace` (e.g., `mariadb-1`) | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
+| `restart` | `:30081` (MariaDB) | Operator-driven restart by patching the MariaDB CR Pod annotation | `namespace`, optional `dry_run`, `confirm`, `annotation_key`, `metadata_field` | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
 | `status` | `:30081` (MariaDB) | Read-only operator/StatefulSet/pod/SQL status summary | `namespace`, optional `context`, `resource`, `mdb`, `container`, `include_sql` | [docs/mariadb/status.md](docs/mariadb/status.md) |
 | `sanity-check` | `:30081` (MariaDB) | Read-only health check (operator + service + SQL + replication + semi-sync) | `namespace`, optional `context`, `resource`, `mdb`, thresholds | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
 | `create-account` | `:30081` (MariaDB) | Create a new user and grant scoped database privileges | `namespace`, `database`, `username`, `privileges`, `password_secret_name` when creating a new account | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |

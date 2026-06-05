@@ -191,11 +191,11 @@ not applicable.
 
 | Resource | Verbs | Purpose |
 |----------|-------|---------|
-| `statefulsets` | `get`, `list`, `watch`, existing `patch` for restart task | Existing MariaDB restart task and optional fallback replica discovery |
+| `statefulsets` | `get`, `list`, `watch` | StatefulSet status and optional fallback replica discovery |
 | `pods` | `get`, `list`, `watch` | Pod readiness and restart count checks |
 | `pods/exec` | `create` | Read `MARIADB_ROOT_PASSWORD` and run SQL checks inside MariaDB containers |
 | `services` | `get`, `list`, `watch` | Primary Service selector check |
-| `mariadbs.k8s.mariadb.com` | `get`, `list`, `watch` | MariaDB CR status checks |
+| `mariadbs.k8s.mariadb.com` / `mariadbs.mariadb.mmontes.io` | `get`, `list`, `watch`, existing `patch` for restart task | MariaDB CR status checks and restart annotation patch |
 
 The sanity-check task itself does not patch, update, delete, start replication,
 stop replication, or write SQL data.

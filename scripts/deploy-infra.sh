@@ -10,6 +10,7 @@ source "$ENV_FILE"
 export CLUSTER_AUTH_IP CLUSTER_DBS_IP CLUSTER_APPS_IP
 export DB_MODE="${DB_MODE:-single}"
 export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
+export MARIADB_OPERATOR_CHART_VERSION="${MARIADB_OPERATOR_CHART_VERSION:-}"
 export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
 SKAFFOLD_RENDER_DIR="${ROOT_DIR}/.skaffold-rendered"
@@ -161,14 +162,20 @@ deploy_dbs_cluster() {
     echo "  Step 2: mariadb-operator (Helm)"
     helm repo add mariadb-operator https://helm.mariadb.com/mariadb-operator 2>/dev/null || true
     helm repo update mariadb-operator
+    helm_version_args=()
+    if [[ -n "$MARIADB_OPERATOR_CHART_VERSION" ]]; then
+      helm_version_args+=(--version "$MARIADB_OPERATOR_CHART_VERSION")
+    fi
 
     helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
       --kube-context "$ctx" \
+      ${helm_version_args[@]+"${helm_version_args[@]}"} \
       --wait
 
     helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
       --kube-context "$ctx" \
       --namespace db-ops \
+      ${helm_version_args[@]+"${helm_version_args[@]}"} \
       --wait
   fi
 

@@ -108,7 +108,6 @@ if [[ "$sel" -ne 0 ]]; then
   exit 0
 fi
 
-declare -A POD_UID_BEFORE POD_RESTARTED POD_READY_AFTER
 mariadb_operator_load_restart_state "$RESOURCE" "$MDB"
 [[ "${#PODS[@]}" -gt 0 ]] \
   || { emit BLOCKED MARIADB_PODS_NOT_FOUND "MariaDB CR exists but no MariaDB pods were found" false "$PODS_JSON"; exit 0; }

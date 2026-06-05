@@ -86,7 +86,7 @@ restart_annotation() {
   after_uids=$(pod_uids)
   echo "pod uids before:"; echo "$before_uids"
   echo "pod uids after:";  echo "$after_uids"
-  refute_equal "$after_uids" "$before_uids"   # at least one pod was recreated
+  assert_not_equal "$after_uids" "$before_uids"   # at least one pod was recreated
 
   ready=$(K get statefulset mariadb -o jsonpath='{.status.readyReplicas}')
   replicas=$(K get statefulset mariadb -o jsonpath='{.status.replicas}')

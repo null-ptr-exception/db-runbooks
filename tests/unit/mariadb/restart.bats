@@ -292,4 +292,3 @@ EOF
   [ "$reason_code" = "OPERATOR_RESTART_TIMEOUT" ]
   [ "$changed" = "true" ]
 }
-

@@ -103,6 +103,10 @@ mariadb_operator_load_restart_state() {
   local name="${2:?name is required}"
   local pod
 
+  declare -gA POD_UID_BEFORE=()
+  declare -gA POD_RESTARTED=()
+  declare -gA POD_READY_AFTER=()
+
   UPDATE_STRATEGY=$(mariadb_jsonpath "$resource" "$name" '{.spec.updateStrategy.type}' 2>/dev/null || true)
   [[ -z "$UPDATE_STRATEGY" ]] && UPDATE_STRATEGY="ReplicasFirstPrimaryLast"
 

@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 DB_MODE="${DB_MODE:-single}"
+RUN_BATS="${SCRIPT_DIR}/run-bats.sh"
 
 # Ensure all prerequisites are installed
 "${SCRIPT_DIR}/preflight.sh"
@@ -17,7 +18,7 @@ trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 "${SCRIPT_DIR}/deploy-infra.sh"
 
 if [[ "$DB_MODE" == "dual" ]]; then
-  bats --recursive \
+  "$RUN_BATS" --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
@@ -25,7 +26,7 @@ if [[ "$DB_MODE" == "dual" ]]; then
     "${ROOT_DIR}/tests/mariadb/create_account.bats" \
     "${ROOT_DIR}/tests/mongodb"
 else
-  bats --recursive \
+  "$RUN_BATS" --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
@@ -37,5 +38,5 @@ fi
 
 if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
   echo "=== Running MinIO tests ==="
-  bats --recursive "${ROOT_DIR}/tests/minio"
+  "$RUN_BATS" --recursive "${ROOT_DIR}/tests/minio"
 fi

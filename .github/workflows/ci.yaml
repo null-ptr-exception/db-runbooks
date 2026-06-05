@@ -33,7 +33,9 @@ jobs:
       - name: Run Bats unit tests
         run: |
           if [ -d tests/unit ]; then
-            ./scripts/run-bats.sh --recursive tests/unit
+            bats_bin="$(mise which bats)"
+            bats_core_dir="${bats_bin%/bin/bats}/libexec/bats-core"
+            PATH="${bats_core_dir}:${PATH}" "$bats_bin" --recursive tests/unit
           fi
 
       - name: Run Hadolint
@@ -143,7 +145,10 @@ jobs:
         run: ./scripts/preflight.sh
 
       - name: Run infra e2e tests
-        run: ./scripts/run-bats.sh tests/infra/
+        run: |
+          bats_bin="$(mise which bats)"
+          bats_core_dir="${bats_bin%/bin/bats}/libexec/bats-core"
+          PATH="${bats_core_dir}:${PATH}" "$bats_bin" tests/infra/
 
       - name: Tear down infra clusters
         if: always()

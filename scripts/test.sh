@@ -4,10 +4,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 DB_MODE="${DB_MODE:-single}"
-RUN_BATS="${SCRIPT_DIR}/run-bats.sh"
+BATS_BIN="bats"
 
 # Ensure all prerequisites are installed
 "${SCRIPT_DIR}/preflight.sh"
+
+if command -v mise >/dev/null 2>&1; then
+  mise_bats_bin="$(mise which bats 2>/dev/null || true)"
+  if [[ -n "$mise_bats_bin" && -x "$mise_bats_bin" ]]; then
+    BATS_BIN="$mise_bats_bin"
+    bats_core_dir="${mise_bats_bin%/bin/bats}/libexec/bats-core"
+    if [[ -d "$bats_core_dir" ]]; then
+      export PATH="$bats_core_dir:$PATH"
+    fi
+  fi
+fi
 
 # Teardown clusters on exit (success or failure) — registered early so
 # clusters are cleaned up even if setup or deploy fails.
@@ -18,7 +29,7 @@ trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 "${SCRIPT_DIR}/deploy-infra.sh"
 
 if [[ "$DB_MODE" == "dual" ]]; then
-  "$RUN_BATS" --recursive \
+  "$BATS_BIN" --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
@@ -26,7 +37,7 @@ if [[ "$DB_MODE" == "dual" ]]; then
     "${ROOT_DIR}/tests/mariadb/create_account.bats" \
     "${ROOT_DIR}/tests/mongodb"
 else
-  "$RUN_BATS" --recursive \
+  "$BATS_BIN" --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
@@ -38,5 +49,5 @@ fi
 
 if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
   echo "=== Running MinIO tests ==="
-  "$RUN_BATS" --recursive "${ROOT_DIR}/tests/minio"
+  "$BATS_BIN" --recursive "${ROOT_DIR}/tests/minio"
 fi

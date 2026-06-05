@@ -97,14 +97,16 @@ mariadb_operator_build_pods_json() {
   printf '%s' "$pods_json"
 }
 
-# shellcheck disable=SC2034  # Populates restart task globals consumed by the entrypoint and result helper.
 mariadb_operator_load_restart_state() {
   local resource="${1:?resource is required}"
   local name="${2:?name is required}"
   local pod
 
+  # shellcheck disable=SC2034  # Globals are consumed by restart result helpers.
   declare -gA POD_UID_BEFORE=()
+  # shellcheck disable=SC2034
   declare -gA POD_RESTARTED=()
+  # shellcheck disable=SC2034
   declare -gA POD_READY_AFTER=()
 
   UPDATE_STRATEGY=$(mariadb_jsonpath "$resource" "$name" '{.spec.updateStrategy.type}' 2>/dev/null || true)
@@ -119,6 +121,7 @@ mariadb_operator_load_restart_state() {
     POD_READY_AFTER["$pod"]=null
   done
 
+  # shellcheck disable=SC2034  # Restart entrypoint uses this global in result payloads.
   PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
 }
 

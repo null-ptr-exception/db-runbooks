@@ -221,8 +221,8 @@ open "http://${CLUSTER_MINIO_IP}:30093"  # Web UI
 ### Project Structure
 
 ```
+Dockerfile                    # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
 aqsh-tasks/
-├── Dockerfile              # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
 ├── tasks-mariadb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── tasks-mongodb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries
@@ -308,16 +308,8 @@ jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
 After editing scripts or `tasks-mariadb.yaml` / `tasks-mongodb.yaml`:
 
 ```bash
-# Rebuild images
-skaffold build --tag=latest
-
-# Load into cluster
-kind load docker-image aqsh-mariadb:latest --name cluster-dbs
-kind load docker-image aqsh-mongodb:latest --name cluster-dbs
-
-# Restart deployments
-kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mariadb
-kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mongodb
+# Rebuild and redeploy aqsh task image
+./scripts/deploy-infra.sh
 ```
 
 ### Writing New Tasks
@@ -392,8 +384,7 @@ CI runs on [self-hosted aws-runners](https://github.com/null-ptr-exception/aws-r
 | kube-federated-auth | 3.2.0 | ghcr.io/rophy/kube-federated-auth |
 | kube-auth-proxy | 0.4.1 | ghcr.io/rophy/kube-auth-proxy |
 | aqsh (base) | 0.4.0 | ghcr.io/null-ptr-exception/aqsh |
-| aqsh-mariadb | local | Built via Skaffold (TASKS_YAML=tasks-mariadb.yaml) |
-| aqsh-mongodb | local | Built via Skaffold (TASKS_YAML=tasks-mongodb.yaml) |
+| db-runbooks | local / main tag | Single task image built via Skaffold for Kind; main publishes `ghcr.io/null-ptr-exception/db-runbooks:yyyymmdd-short_sha` |
 | mariadb-operator | latest | Deployed via Helm |
 | mariadb | 10.6, 10.11, 11.4 | Official MariaDB images |
 | mongodb | 7.0 | Official MongoDB image |

@@ -201,21 +201,31 @@ helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
   --namespace db-ops \
   --wait
 
-echo "=== Step 5: Build and load aqsh images ==="
+echo "=== Step 5: Build aqsh image ==="
 
-skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest --quiet
-kind load docker-image aqsh-mariadb:latest --name cluster-dbs
-kind load docker-image aqsh-mongodb:latest --name cluster-dbs
+mkdir -p "${ROOT_DIR}/.skaffold-rendered"
+skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest \
+  --file-output="${ROOT_DIR}/.skaffold-rendered/build.json"
 
-echo "=== Step 6: Deploy aqsh + Redis ==="
+echo "=== Step 6: Deploy aqsh + Redis with Skaffold ==="
 
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml"
+mkdir -p "${ROOT_DIR}/.skaffold-rendered/cluster-dbs"
+cp "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml" "${ROOT_DIR}/.skaffold-rendered/cluster-dbs/redis.yaml"
+envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" \
+  > "${ROOT_DIR}/.skaffold-rendered/cluster-dbs/aqsh-mariadb-deployment.yaml"
+cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml" \
+  "${ROOT_DIR}/.skaffold-rendered/cluster-dbs/aqsh-mariadb-service.yaml"
+envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" \
+  > "${ROOT_DIR}/.skaffold-rendered/cluster-dbs/aqsh-mongodb-deployment.yaml"
+cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml" \
+  "${ROOT_DIR}/.skaffold-rendered/cluster-dbs/aqsh-mongodb-service.yaml"
 
-envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" | kubectl --context kind-cluster-dbs apply -f -
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml"
-
-envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" | kubectl --context kind-cluster-dbs apply -f -
-kubectl --context kind-cluster-dbs apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml"
+skaffold deploy \
+  --filename="${ROOT_DIR}/skaffold.yaml" \
+  --kube-context kind-cluster-dbs \
+  --build-artifacts="${ROOT_DIR}/.skaffold-rendered/build.json" \
+  --load-images=true \
+  --status-check=false
 
 kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mariadb
 kubectl --context kind-cluster-dbs -n db-ops rollout restart deployment/aqsh-mongodb

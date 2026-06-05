@@ -12,6 +12,9 @@ export DB_MODE="${DB_MODE:-single}"
 export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
 export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
+SKAFFOLD_RENDER_DIR="${ROOT_DIR}/.skaffold-rendered"
+SKAFFOLD_BUILD_OUTPUT="${SKAFFOLD_RENDER_DIR}/build.json"
+
 kubectl_apply_with_retry() {
   local ctx="$1"
   local manifest="$2"
@@ -121,6 +124,21 @@ wait_for_deployment_ready() {
   return 1
 }
 
+render_aqsh_manifests() {
+  local render_dir="${SKAFFOLD_RENDER_DIR}/cluster-dbs"
+
+  rm -rf "$render_dir"
+  mkdir -p "$render_dir"
+
+  cp "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml" "${render_dir}/redis.yaml"
+  envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" \
+    > "${render_dir}/aqsh-mariadb-deployment.yaml"
+  cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml" "${render_dir}/aqsh-mariadb-service.yaml"
+  envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" \
+    > "${render_dir}/aqsh-mongodb-deployment.yaml"
+  cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml" "${render_dir}/aqsh-mongodb-service.yaml"
+}
+
 # ---------------------------------------------------------------------------
 # deploy_dbs_cluster <context> <cluster_name> <peer_dbs_ip_or_empty>
 #
@@ -154,19 +172,16 @@ deploy_dbs_cluster() {
       --wait
   fi
 
-  echo "  Step 3: Load aqsh images"
-  kind load docker-image aqsh-mariadb:latest --name "$cluster_name"
-  kind load docker-image aqsh-mongodb:latest --name "$cluster_name"
+  echo "  Step 3: Render aqsh manifests"
+  render_aqsh_manifests
 
-  echo "  Step 4: Deploy Redis + aqsh"
-  kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml"
-
-  # aqsh deployments use CLUSTER_AUTH_IP — same for all db clusters
-  envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" | kubectl --context "$ctx" apply -f -
-  kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml"
-
-  envsubst < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" | kubectl --context "$ctx" apply -f -
-  kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml"
+  echo "  Step 4: Deploy Redis + aqsh with Skaffold"
+  skaffold deploy \
+    --filename="${ROOT_DIR}/skaffold.yaml" \
+    --kube-context="$ctx" \
+    --build-artifacts="$SKAFFOLD_BUILD_OUTPUT" \
+    --load-images=true \
+    --status-check=false
 
   kubectl --context "$ctx" -n db-ops rollout restart deployment/aqsh-mariadb
   kubectl --context "$ctx" -n db-ops rollout restart deployment/aqsh-mongodb
@@ -282,7 +297,8 @@ wait_for_log_message "kind-cluster-auth" "db-ops" "app=kube-federated-auth" "sta
 
 echo "=== Step 5: Build aqsh images ==="
 
-skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest
+mkdir -p "$SKAFFOLD_RENDER_DIR"
+skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest --file-output="$SKAFFOLD_BUILD_OUTPUT"
 
 echo "=== Step 6: Deploy DB cluster(s) ==="
 

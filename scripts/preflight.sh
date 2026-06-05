@@ -31,7 +31,11 @@ _ensure_local_bin() {
   mkdir -p "$LOCAL_BIN"
   if [[ ":$PATH:" != *":$LOCAL_BIN:"* ]]; then
     export PATH="$LOCAL_BIN:$PATH"
-    NEED_PATH=1
+    if [[ -n "${GITHUB_PATH:-}" ]]; then
+      printf '%s\n' "$LOCAL_BIN" >> "$GITHUB_PATH"
+    else
+      NEED_PATH=1
+    fi
   fi
 }
 
@@ -84,14 +88,31 @@ else
   _ok "$(mise --version)"
 fi
 
-# 4. mise tools (bats, kubectl, helm, skaffold) — from .mise.toml
+# 4. bats — install official wrapper to ~/.local/bin
+echo ""
+echo "=== bats ==="
+_ensure_local_bin
+BATS_VERSION="1.13.0"
+BATS_PATH="$(command -v bats 2>/dev/null || true)"
+if [[ "$BATS_PATH" == "$LOCAL_BIN/bats" ]]; then
+  _ok "$(bats --version)"
+else
+  _fix "Installing bats ${BATS_VERSION} to $LOCAL_BIN..."
+  curl -fsSL "https://github.com/bats-core/bats-core/archive/refs/tags/v${BATS_VERSION}.tar.gz" \
+    | tar -xz -C /tmp
+  /tmp/bats-core-${BATS_VERSION}/install.sh "$LOCAL_BIN/.."
+  rm -rf /tmp/bats-core-${BATS_VERSION}
+  _ok "$(bats --version)"
+fi
+
+# 5. mise tools (kubectl, helm, skaffold, etc.) — from .mise.toml
 echo ""
 echo "=== mise tools ==="
 mise trust "$ROOT_DIR" 2>/dev/null || true
 mise install
-mise ls --current kubectl helm skaffold bats
+mise ls --current
 
-# 5. bats helpers (bats-support, bats-assert, bats-mock)
+# 6. bats helpers (bats-support, bats-assert, bats-mock)
 echo ""
 echo "=== bats helpers ==="
 HELPER_DIR="${ROOT_DIR}/tests/test_helper"

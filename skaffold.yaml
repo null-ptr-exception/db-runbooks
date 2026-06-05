@@ -4,20 +4,15 @@ metadata:
   name: db-runbooks
 build:
   artifacts:
-    - image: aqsh-mariadb
-      context: aqsh-tasks
+    - image: ghcr.io/null-ptr-exception/db-runbooks
+      context: .
       docker:
         dockerfile: Dockerfile
-        buildArgs:
-          TASKS_YAML: tasks-mariadb.yaml
-    - image: aqsh-mongodb
-      context: aqsh-tasks
-      docker:
-        dockerfile: Dockerfile
-        buildArgs:
-          TASKS_YAML: tasks-mongodb.yaml
   local:
     push: false
     useBuildkit: true
+manifests:
+  rawYaml:
+    - .skaffold-rendered/cluster-dbs/*.yaml
 deploy:
   kubectl: {}

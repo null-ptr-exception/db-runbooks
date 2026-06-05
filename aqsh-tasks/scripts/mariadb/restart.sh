@@ -3,16 +3,12 @@ set -euo pipefail
 
 # =============================================================================
 # mariadb/restart.sh
-# Operator-driven restart of a MariaDB cluster.
+# Operator-driven restart: patch the MariaDB CR restart annotation, then check
+# that mariadb-operator recreated every pod and brought it back Ready.
 #
-# AQSH does not delete MariaDB Pods or decide the rollout order. It patches a
-# MariaDB CR Pod-template annotation and lets mariadb-operator reconcile the
-# restart according to spec.updateStrategy (for example ReplicasFirstPrimaryLast).
-#
-# The task's contract is deliberately narrow: patch the restart annotation, then
-# verify that the operator recreated every pod and brought it back Ready. It does
-# not track primary/replica roles or impose a restart order — those belong to the
-# operator.
+# Self-contained on purpose, like the other mariadb tasks. The only task helper
+# kept in a lib is mariadb-operator.sh (kubectl/jq plumbing + the rollout wait
+# loop). The flow is deliberately just: guards -> patch -> check.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -20,127 +16,127 @@ if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
-
 # shellcheck source=../../lib/logging.sh
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../lib/response.sh
 source "${LIB_DIR}/response.sh"
-# shellcheck source=../../lib/task-input.sh
-source "${LIB_DIR}/task-input.sh"
 # shellcheck source=../../lib/k8s.sh
 source "${LIB_DIR}/k8s.sh"
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
 # shellcheck source=../../lib/mariadb-operator.sh
 source "${LIB_DIR}/mariadb-operator.sh"
-# shellcheck source=../../lib/mariadb-restart-input.sh
-source "${LIB_DIR}/mariadb-restart-input.sh"
-# shellcheck source=../../lib/mariadb-restart-result.sh
-source "${LIB_DIR}/mariadb-restart-result.sh"
 
-mariadb_restart_set_defaults
-mariadb_restart_parse_args "$@"
-mariadb_restart_validate_inputs
+bool() { case "${1:-}" in 1 | true | TRUE | yes | YES | on | ON) return 0 ;; *) return 1 ;; esac; }
 
-mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
+# Emit the structured task result (to stdout and $AQSH_RESULT_FILE if set).
+emit() {
+  local status="$1" reason="$2" summary="$3" changed="$4" pods="${5:-[]}" out
+  out=$(jq -nc \
+    --arg status "$status" --arg reason "$reason" --arg summary "$summary" \
+    --arg namespace "$NAMESPACE" --arg mdb "$MDB" \
+    --arg annotation_key "$ANNOTATION_KEY" --arg metadata_field "${METADATA_FIELD:-}" \
+    --argjson dry_run "$(bool "$DRY_RUN" && echo true || echo false)" \
+    --argjson confirm "$(bool "$CONFIRM" && echo true || echo false)" \
+    --argjson changed "$changed" --argjson pods "$pods" \
+    '{
+      status: $status, reason_code: $reason, summary: $summary,
+      namespace: $namespace, mdb: $mdb, operator_controlled: true,
+      annotation: { key: $annotation_key, metadata_field: ($metadata_field | if . == "" then null else . end) },
+      dry_run: $dry_run, confirm: $confirm, changed: $changed, pods: $pods
+    }')
+  [[ -n "${RESULT_FILE:-}" ]] && printf '%s\n' "$out" > "$RESULT_FILE"
+  printf '%s\n' "$out"
+}
 
-if [[ "$JSON_ONLY" -ne 1 ]]; then
-  log_info "mariadb-restart" "Planning operator-driven restart for namespace=${NAMESPACE} mdb=${MDB} (dry_run=${DRY_RUN})"
-fi
+# --- inputs ------------------------------------------------------------------
+CONTEXT="${K8S_CONTEXT:-}"
+NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
+RESOURCE="${MARIADB_RESOURCE:-mariadb}"
+MDB="${MARIADB_NAME:-mariadb}"
+CONTAINER="${MARIADB_CONTAINER:-mariadb}"
+DRY_RUN="${DRY_RUN:-true}"
+CONFIRM="${CONFIRM:-false}"
+ANNOTATION_KEY="${RESTART_ANNOTATION_KEY:-aqsh.null-ptr-exception.dev/restarted-at}"
+RESTART_METADATA_FIELD="${RESTART_METADATA_FIELD:-auto}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
+RESULT_FILE="${AQSH_RESULT_FILE:-}"
+METADATA_FIELD=""
+JSON_ONLY=0
 
-if ! k8s_check >/dev/null; then
-  mariadb_restart_emit_result "ERROR" "KUBECTL_UNAVAILABLE" "Kubernetes API is not reachable" false
-  exit 0
-fi
-
-if [[ -n "$TARGET_POD" ]]; then
-  mariadb_restart_emit_result "BLOCKED" "TARGET_POD_UNSUPPORTED" \
-    "Operator-driven restart is scoped to the MariaDB resource; target_pod is not supported" false
-  exit 0
-fi
-
-if ! mariadb_jsonpath "$RESOURCE" "$MDB" '{.metadata.name}' >/dev/null 2>&1; then
-  mariadb_restart_emit_result "BLOCKED" "MARIADB_OPERATOR_REQUIRED" \
-    "MariaDB CR was not found; operator-driven restart requires a mariadb-operator resource" false
-  exit 0
-fi
-
-select_status=0
-METADATA_FIELD=$(mariadb_operator_select_restart_metadata_field "$RESOURCE" "$RESTART_METADATA_FIELD") || select_status=$?
-if [[ "$select_status" -ne 0 ]]; then
-  case "$select_status" in
-    2)
-      mariadb_restart_emit_result "BLOCKED" "RESTART_METADATA_FIELD_INVALID" \
-        "restart metadata field must be podMetadata, inheritMetadata, or auto" false
-      ;;
-    *)
-      mariadb_restart_emit_result "BLOCKED" "RESTART_METADATA_FIELD_UNSUPPORTED" \
-        "MariaDB CRD does not expose spec.podMetadata or spec.inheritMetadata for operator-driven restart annotation" false
-      ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --context) CONTEXT="$2"; shift 2 ;;
+    --namespace) NAMESPACE="$2"; shift 2 ;;
+    --resource) RESOURCE="$2"; shift 2 ;;
+    --mdb | --name) MDB="$2"; shift 2 ;;
+    --container) CONTAINER="$2"; shift 2 ;;
+    --dry-run) DRY_RUN="$2"; shift 2 ;;
+    --confirm) CONFIRM="$2"; shift 2 ;;
+    --annotation-key) ANNOTATION_KEY="$2"; shift 2 ;;
+    --metadata-field) RESTART_METADATA_FIELD="$2"; shift 2 ;;
+    --wait-timeout) WAIT_TIMEOUT="$2"; shift 2 ;;
+    --result-file) RESULT_FILE="$2"; shift 2 ;;
+    --json) JSON_ONLY=1; shift ;;
+    -h | --help) echo "usage: restart.sh --namespace <ns> [--dry-run false --confirm true] [--metadata-field auto] [--annotation-key KEY] [--wait-timeout 300]" >&2; exit 0 ;;
+    *) echo "error: unknown option: $1" >&2; exit 2 ;;
   esac
-  exit 0
-fi
-
-# shellcheck disable=SC2034  # Populated and consumed by mariadb-operator.sh helpers.
-declare -A POD_UID_BEFORE
-# shellcheck disable=SC2034  # Populated and consumed by mariadb-operator.sh helpers.
-declare -A POD_RESTARTED
-# shellcheck disable=SC2034  # Populated and consumed by mariadb-operator.sh helpers.
-declare -A POD_READY_AFTER
-
-mariadb_operator_load_restart_state "$RESOURCE" "$MDB"
-
-if [[ "${#PODS[@]}" -eq 0 ]]; then
-  mariadb_restart_emit_result "BLOCKED" "MARIADB_PODS_NOT_FOUND" "MariaDB CR exists, but no MariaDB pods were found" false "$PODS_JSON"
-  exit 0
-fi
-
-for pod in "${PODS[@]}"; do
-  if ! mariadb_operator_pod_ready "$pod" "$CONTAINER"; then
-    mariadb_restart_emit_result "BLOCKED" "POD_NOT_READY" \
-      "MariaDB already has a not-Ready pod; refusing to trigger an operator restart" false "$PODS_JSON"
-    exit 0
-  fi
 done
 
-if task_bool_enabled "$DRY_RUN"; then
-  mariadb_restart_emit_result "READY" "RESTART_DRY_RUN" \
-    "Dry-run made no changes; mariadb-operator will decide restart order after the annotation patch" false \
-    "$PODS_JSON"
+[[ -n "$NAMESPACE" ]] || { echo "error: --namespace is required" >&2; exit 2; }
+case "$WAIT_TIMEOUT" in '' | *[!0-9]*) echo "error: --wait-timeout must be an unsigned integer" >&2; exit 2 ;; esac
+
+mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
+[[ "$JSON_ONLY" -eq 1 ]] || log_info "mariadb-restart" "namespace=${NAMESPACE} mdb=${MDB} dry_run=${DRY_RUN}"
+
+# --- guards ------------------------------------------------------------------
+k8s_check >/dev/null || { emit ERROR KUBECTL_UNAVAILABLE "Kubernetes API is not reachable" false; exit 0; }
+
+mariadb_jsonpath "$RESOURCE" "$MDB" '{.metadata.name}' >/dev/null 2>&1 \
+  || { emit BLOCKED MARIADB_OPERATOR_REQUIRED "MariaDB CR not found; operator-driven restart needs a mariadb-operator resource" false; exit 0; }
+
+# Guard 1: the CRD must expose a Pod-template metadata field to carry the
+# annotation (podMetadata on new CRDs, inheritMetadata on older ones).
+sel=0
+METADATA_FIELD=$(mariadb_operator_select_restart_metadata_field "$RESOURCE" "$RESTART_METADATA_FIELD") || sel=$?
+if [[ "$sel" -ne 0 ]]; then
+  if [[ "$sel" -eq 2 ]]; then
+    emit BLOCKED RESTART_METADATA_FIELD_INVALID "metadata field must be podMetadata, inheritMetadata, or auto" false
+  else
+    emit BLOCKED RESTART_METADATA_FIELD_UNSUPPORTED "MariaDB CRD exposes neither spec.podMetadata nor spec.inheritMetadata" false
+  fi
   exit 0
 fi
 
-if ! task_bool_enabled "$CONFIRM"; then
-  mariadb_restart_emit_result "BLOCKED" "RESTART_CONFIRM_REQUIRED" \
-    "Set confirm=true with dry_run=false to patch the MariaDB restart annotation" false \
-    "$PODS_JSON"
+declare -A POD_UID_BEFORE POD_RESTARTED POD_READY_AFTER
+mariadb_operator_load_restart_state "$RESOURCE" "$MDB"
+[[ "${#PODS[@]}" -gt 0 ]] \
+  || { emit BLOCKED MARIADB_PODS_NOT_FOUND "MariaDB CR exists but no MariaDB pods were found" false "$PODS_JSON"; exit 0; }
+
+# Guard 2: refuse to restart a cluster that already has a not-Ready pod.
+for pod in "${PODS[@]}"; do
+  mariadb_operator_pod_ready "$pod" "$CONTAINER" \
+    || { emit BLOCKED POD_NOT_READY "MariaDB already has a not-Ready pod; refusing to trigger a restart" false "$PODS_JSON"; exit 0; }
+done
+
+# --- dry-run / confirm gates -------------------------------------------------
+if bool "$DRY_RUN"; then
+  emit READY RESTART_DRY_RUN "Dry-run made no changes; the operator decides restart order after the patch" false "$PODS_JSON"
   exit 0
 fi
+bool "$CONFIRM" \
+  || { emit BLOCKED RESTART_CONFIRM_REQUIRED "Set confirm=true with dry_run=false to patch the restart annotation" false "$PODS_JSON"; exit 0; }
 
+# --- 1) PATCH the restart annotation on the CR -------------------------------
 PATCH_VALUE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-if ! PATCH_OUT=$(mariadb_operator_patch_restart_annotation "$RESOURCE" "$MDB" "$METADATA_FIELD" "$ANNOTATION_KEY" "$PATCH_VALUE"); then
-  mariadb_restart_emit_result "ERROR" "RESTART_PATCH_FAILED" \
-    "Failed to patch MariaDB restart annotation: ${PATCH_OUT:-kubectl patch failed}" false \
-    "$PODS_JSON"
-  exit 0
-fi
+mariadb_operator_patch_restart_annotation "$RESOURCE" "$MDB" "$METADATA_FIELD" "$ANNOTATION_KEY" "$PATCH_VALUE" >/dev/null 2>&1 \
+  || { emit ERROR RESTART_PATCH_FAILED "kubectl patch mariadb failed" false "$PODS_JSON"; exit 0; }
 
-if [[ "$UPDATE_STRATEGY" == "OnDelete" || "$UPDATE_STRATEGY" == "Never" ]]; then
-  mariadb_restart_emit_result "PATCHED" "OPERATOR_UPDATE_PENDING" \
-    "MariaDB CR was patched; updateStrategy=${UPDATE_STRATEGY} leaves pod restart control to the operator/manual update policy" true \
-    "$PODS_JSON"
-  exit 0
-fi
-
-if ! mariadb_operator_wait_for_restart "$CONTAINER" "$WAIT_TIMEOUT" "${PODS[@]}"; then
+# --- 2) CHECK that the operator recreated every pod and it is Ready ----------
+if mariadb_operator_wait_for_restart "$CONTAINER" "$WAIT_TIMEOUT" "${PODS[@]}"; then
   PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
-  mariadb_restart_emit_result "ERROR" "OPERATOR_RESTART_TIMEOUT" \
-    "MariaDB CR was patched, but not all pods restarted and became Ready within ${WAIT_TIMEOUT}s" true \
-    "$PODS_JSON"
-  exit 0
+  emit RESTARTED RESTART_COMPLETED "MariaDB CR patched and mariadb-operator restarted all pods" true "$PODS_JSON"
+else
+  PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
+  emit ERROR OPERATOR_RESTART_TIMEOUT "CR patched, but not all pods restarted and became Ready within ${WAIT_TIMEOUT}s" true "$PODS_JSON"
 fi
-
-PODS_JSON=$(mariadb_operator_build_pods_json "${PODS[@]}")
-mariadb_restart_emit_result "RESTARTED" "RESTART_COMPLETED" \
-  "MariaDB restart annotation was patched and mariadb-operator restarted all pods" true \
-  "$PODS_JSON"

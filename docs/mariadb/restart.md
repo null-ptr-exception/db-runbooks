@@ -23,10 +23,9 @@ The task remains conservative:
   this task.
 - It blocks before patching if any current MariaDB Pod is not Ready.
 - It defaults to dry-run and requires `dry_run=false` plus `confirm=true`.
-- For automatic update strategies, it waits until all current pods have been
-  recreated and are Ready.
-- For `OnDelete` or `Never`, it reports the CR patch as pending because those
-  strategies intentionally do not let this task force a Pod restart.
+- After patching, it waits until all current pods have been recreated and are
+  Ready. Strategies that do not auto-recreate pods (`OnDelete`, `Never`) will
+  therefore reach the wait timeout and report `OPERATOR_RESTART_TIMEOUT`.
 
 This task does **not** track primary/replica roles, impose a restart order, or
 promote replicas — mariadb-operator owns the rollout. Its only job is to patch
@@ -50,33 +49,19 @@ separate, explicit promote-replica procedure for role changes.
 
 Valid namespaces: `mariadb-1`, `mariadb-2`, `mariadb-3`
 
-Deprecated compatibility inputs:
-
-| Flag | Behaviour |
-|------|-----------|
-| `--target-pod` | Returns `TARGET_POD_UNSUPPORTED`; operator-driven restart is resource-scoped |
-| `--include-primary` | Accepted but ignored; mariadb-operator controls rollout order |
-
 ## Output (written to `$AQSH_RESULT_FILE`)
 
 ```json
 {
   "status": "READY",
   "reason_code": "RESTART_DRY_RUN",
-  "summary": "Dry-run made no changes; mariadb-operator will decide restart order after the annotation patch",
-  "target": {
-    "context": "kind-cluster-dbs",
-    "namespace": "mariadb-1",
-    "resource": "mariadb",
-    "mdb": "mariadb",
-    "update_strategy": "ReplicasFirstPrimaryLast",
-    "replicas": 1
-  },
+  "summary": "Dry-run made no changes; the operator decides restart order after the patch",
+  "namespace": "mariadb-1",
+  "mdb": "mariadb",
   "operator_controlled": true,
   "annotation": {
-    "metadata_field": "podMetadata",
     "key": "aqsh.null-ptr-exception.dev/restarted-at",
-    "value": null
+    "metadata_field": "podMetadata"
   },
   "dry_run": true,
   "confirm": false,
@@ -102,12 +87,10 @@ operator recreated that Pod and it became Ready again.
 |--------|-------------|---------|
 | `READY` | `RESTART_DRY_RUN` | Dry-run plan; no patch applied |
 | `RESTARTED` | `RESTART_COMPLETED` | CR patched, operator recreated all current pods, and pods are Ready |
-| `PATCHED` | `OPERATOR_UPDATE_PENDING` | CR patched, but `OnDelete` or `Never` strategy leaves restart pending |
 | `BLOCKED` | `RESTART_CONFIRM_REQUIRED` | `dry_run=false` without `confirm=true` |
 | `BLOCKED` | `MARIADB_OPERATOR_REQUIRED` | MariaDB CR not found; native StatefulSet-only mode is unsupported |
 | `BLOCKED` | `MARIADB_PODS_NOT_FOUND` | MariaDB CR exists but no MariaDB pods were found |
 | `BLOCKED` | `POD_NOT_READY` | Existing MariaDB pod is not Ready before the patch |
-| `BLOCKED` | `TARGET_POD_UNSUPPORTED` | `target_pod` was requested, but operator-driven restart is resource-scoped |
 | `BLOCKED` | `RESTART_METADATA_FIELD_UNSUPPORTED` | CRD exposes neither `spec.podMetadata` nor `spec.inheritMetadata` |
 | `BLOCKED` | `RESTART_METADATA_FIELD_INVALID` | `metadata_field` is not `auto`, `podMetadata`, or `inheritMetadata` |
 | `ERROR` | `RESTART_PATCH_FAILED` | `kubectl patch mariadb` failed |
@@ -158,6 +141,6 @@ curl -s -X POST "$MARIADB_AQSH_URL/tasks/restart" \
 | Restart requested without confirm | `status=BLOCKED`, `reason_code=RESTART_CONFIRM_REQUIRED` |
 | Existing pod is not Ready | `status=BLOCKED`, `reason_code=POD_NOT_READY` |
 | Single-pod cluster | Allowed; operator decides whether and how to restart the primary |
-| `OnDelete` / `Never` update strategy | `status=PATCHED`, `reason_code=OPERATOR_UPDATE_PENDING` |
+| `OnDelete` / `Never` update strategy | Pods are not auto-recreated, so the wait reaches `status=ERROR`, `reason_code=OPERATOR_RESTART_TIMEOUT` |
 | CR patch denied or failed | `status=ERROR`, `reason_code=RESTART_PATCH_FAILED` |
 | Operator rollout timeout | `status=ERROR`, `reason_code=OPERATOR_RESTART_TIMEOUT` |

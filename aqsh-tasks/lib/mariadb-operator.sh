@@ -83,7 +83,7 @@ mariadb_operator_build_pods_json() {
     pods_json=$(jq -c \
       --arg name "$pod" \
       --arg uid "$uid" \
-      --argjson restarted "$(task_json_bool "$restarted")" \
+      --argjson restarted "$restarted" \
       --argjson ready_after "$ready_after" \
       '. + [{
         name: $name,

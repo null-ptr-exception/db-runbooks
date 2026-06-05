@@ -237,18 +237,6 @@ EOF
   [ ! -f "${TEST_TMPDIR}/patched" ]
 }
 
-@test "target pod is blocked because operator-driven restart is resource-scoped" {
-  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --target-pod mariadb-1 --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "BLOCKED" ]
-  [ "$reason_code" = "TARGET_POD_UNSUPPORTED" ]
-  [ ! -f "${TEST_TMPDIR}/patched" ]
-}
-
 @test "missing MariaDB CR blocks because operator control is required" {
   export MOCK_ABSENT=1
   run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --json
@@ -289,21 +277,6 @@ EOF
   [ "$changed" = "false" ]
 }
 
-@test "OnDelete strategy reports patched pending instead of deleting pods" {
-  export MOCK_STRATEGY="OnDelete"
-  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 \
-    --dry-run false --confirm true --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-  strategy=$(printf '%s' "$output" | jq -r '.target.update_strategy')
-
-  [ "$result_status" = "PATCHED" ]
-  [ "$reason_code" = "OPERATOR_UPDATE_PENDING" ]
-  [ "$strategy" = "OnDelete" ]
-  [ -f "${TEST_TMPDIR}/patched" ]
-}
 
 @test "operator rollout timeout reports partial state after the patch" {
   export NO_ROLLOUT=1

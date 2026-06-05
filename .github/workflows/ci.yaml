@@ -34,6 +34,7 @@ jobs:
         run: |
           if [ -d tests/unit ]; then
             bats_bin="$(mise which bats)"
+            bats_bin="$(readlink -f "$bats_bin")"
             bats_core_dir="${bats_bin%/bin/bats}/libexec/bats-core"
             PATH="${bats_core_dir}:${PATH}" "$bats_bin" --recursive tests/unit
           fi
@@ -147,6 +148,7 @@ jobs:
       - name: Run infra e2e tests
         run: |
           bats_bin="$(mise which bats)"
+          bats_bin="$(readlink -f "$bats_bin")"
           bats_core_dir="${bats_bin%/bin/bats}/libexec/bats-core"
           PATH="${bats_core_dir}:${PATH}" "$bats_bin" tests/infra/
 

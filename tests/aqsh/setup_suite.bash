@@ -22,7 +22,7 @@ setup_suite() {
 
   # Build aqsh image and load into cluster-a
   skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest
-  kind load docker-image aqsh-mariadb:latest --name cluster-a
+  kind load docker-image ghcr.io/null-ptr-exception/db-runbooks:latest --name cluster-a
 
   # Extract runtime credentials from live clusters
   local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B

@@ -30,9 +30,9 @@ redis:
 # --- aqsh (with kube-auth-proxy sidecar) ---
 aqsh:
   enabled: false
-  image: aqsh-mariadb:latest
+  image: ghcr.io/null-ptr-exception/db-runbooks:latest
   imagePullPolicy: Never
-  tasksConfig: /etc/aqsh/tasks.yaml
+  tasksConfig: /etc/aqsh/tasks-mariadb.yaml
   workerQueues: mariadb
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1

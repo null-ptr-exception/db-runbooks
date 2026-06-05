@@ -1,0 +1,80 @@
+{{- if .Values.aqsh.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-auth-proxy
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aqsh
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aqsh
+  template:
+    metadata:
+      labels:
+        app: aqsh
+    spec:
+      serviceAccountName: kube-auth-proxy
+      containers:
+        - name: aqsh
+          image: {{ .Values.aqsh.image }}
+          imagePullPolicy: {{ .Values.aqsh.imagePullPolicy }}
+          env:
+            - name: AQSH_MODE
+              value: both
+            - name: AQSH_BIND
+              value: "0.0.0.0:8080"
+            - name: AQSH_REDIS_ADDR
+              value: "redis:6379"
+            - name: AQSH_TASKS_CONFIG
+              value: {{ .Values.aqsh.tasksConfig }}
+            - name: AQSH_TASKS_DIR
+              value: /tasks
+            - name: AQSH_REQUIRE_IDENTITY
+              value: "true"
+            - name: AQSH_WORKER_QUEUES
+              value: {{ .Values.aqsh.workerQueues }}
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+        - name: kube-auth-proxy
+          image: {{ .Values.aqsh.authProxy.image }}
+          env:
+            - name: UPSTREAM
+              value: "http://localhost:8080"
+            - name: TOKEN_REVIEW_URL
+              value: {{ .Values.aqsh.authProxy.tokenReviewURL | quote }}
+            - name: PORT
+              value: "4180"
+          ports:
+            - containerPort: 4180
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4180
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aqsh
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: aqsh
+  ports:
+    - port: 4180
+      targetPort: 4180
+{{- end }}

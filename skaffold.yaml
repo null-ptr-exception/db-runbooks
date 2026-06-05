@@ -5,7 +5,7 @@ metadata:
 build:
   artifacts:
     - image: ghcr.io/null-ptr-exception/db-runbooks
-      context: aqsh-tasks
+      context: .
       docker:
         dockerfile: Dockerfile
   local:

@@ -221,8 +221,8 @@ open "http://${CLUSTER_MINIO_IP}:30093"  # Web UI
 ### Project Structure
 
 ```
+Dockerfile                    # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
 aqsh-tasks/
-├── Dockerfile              # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
 ├── tasks-mariadb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── tasks-mongodb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries

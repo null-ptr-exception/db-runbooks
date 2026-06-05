@@ -39,7 +39,7 @@ jobs:
       - name: Run Hadolint
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
         with:
-          dockerfile: aqsh-tasks/Dockerfile
+          dockerfile: Dockerfile
           ignore: DL3008,DL4006
 
   build-image:
@@ -52,7 +52,7 @@ jobs:
           persist-credentials: false
 
       - name: Build db-runbooks task image
-        run: docker build -t "${IMAGE_DB_RUNBOOKS}:ci" ./aqsh-tasks
+        run: docker build -t "${IMAGE_DB_RUNBOOKS}:ci" .
 
   integration:
     runs-on: [self-hosted, aws-runner]
@@ -121,7 +121,7 @@ jobs:
       - name: Build and push db-runbooks task image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          context: ./aqsh-tasks
+          context: .
           push: true
           tags: ${{ env.IMAGE_DB_RUNBOOKS }}:${{ steps.image-tag.outputs.image_tag }}
 

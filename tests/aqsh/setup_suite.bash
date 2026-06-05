@@ -20,9 +20,9 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
-  # Build aqsh image and load into cluster-a
-  skaffold build --filename="${ROOT_DIR}/skaffold.yaml" --tag=latest
-  kind load docker-image ghcr.io/null-ptr-exception/db-runbooks:latest --name cluster-a
+  # Build aqsh image and push to local registry
+  docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
+  docker push localhost:5005/db-runbooks:latest
 
   # Extract runtime credentials from live clusters
   local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B

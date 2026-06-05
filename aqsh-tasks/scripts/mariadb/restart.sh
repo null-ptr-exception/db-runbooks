@@ -127,7 +127,7 @@ bool "$CONFIRM" \
   || { emit BLOCKED RESTART_CONFIRM_REQUIRED "Set confirm=true with dry_run=false to patch the restart annotation" false "$PODS_JSON"; exit 0; }
 
 # --- 1) PATCH the restart annotation on the CR -------------------------------
-PATCH_VALUE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+PATCH_VALUE="$(date -u +%Y-%m-%dT%H:%M:%SZ)-${RANDOM}-$$"
 mariadb_operator_patch_restart_annotation "$RESOURCE" "$MDB" "$METADATA_FIELD" "$ANNOTATION_KEY" "$PATCH_VALUE" >/dev/null 2>&1 \
   || { emit ERROR RESTART_PATCH_FAILED "kubectl patch mariadb failed" false "$PODS_JSON"; exit 0; }
 

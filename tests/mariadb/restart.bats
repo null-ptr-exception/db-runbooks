@@ -82,15 +82,21 @@ restart_annotation() {
   # 2. The operator — not the task — recreates the pods and brings them back Ready.
   K wait pod -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=180s >/dev/null 2>&1
 
-  local after_uids ready replicas
+  local after_uids ready desired_replicas
   after_uids=$(pod_uids)
   echo "pod uids before:"; echo "$before_uids"
   echo "pod uids after:";  echo "$after_uids"
-  assert_not_equal "$after_uids" "$before_uids"   # at least one pod was recreated
+  assert_equal "$(printf '%s\n' "$after_uids" | wc -l | tr -d ' ')" "$(printf '%s\n' "$before_uids" | wc -l | tr -d ' ')"
+  while IFS='=' read -r name uid; do
+    local before_uid
+    before_uid=$(printf '%s\n' "$before_uids" | awk -F= -v name="$name" '$1 == name { print $2 }')
+    assert [ -n "$before_uid" ]
+    assert_not_equal "$uid" "$before_uid"
+  done <<< "$after_uids"
 
   ready=$(K get statefulset mariadb -o jsonpath='{.status.readyReplicas}')
-  replicas=$(K get statefulset mariadb -o jsonpath='{.status.replicas}')
-  echo "ready: ${ready}/${replicas}"
-  assert_equal "$ready" "$replicas"
+  desired_replicas=$(K get statefulset mariadb -o jsonpath='{.spec.replicas}')
+  echo "ready: ${ready}/${desired_replicas}"
+  assert_equal "$ready" "$desired_replicas"
   assert [ "$ready" != "0" ]
 }

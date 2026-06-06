@@ -23,7 +23,7 @@ spec:
       serviceAccountName: test-client
       containers:
         - name: test-client
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.20.0
           command: ["sleep", "infinity"]
           volumeMounts:
             - name: token

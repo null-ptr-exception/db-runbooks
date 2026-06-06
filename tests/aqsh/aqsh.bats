@@ -54,9 +54,10 @@ wait_for_task() {
       '${base_url}/tasks/${task_id}'")
     export TASK_RESPONSE
 
-    status=$(echo "$TASK_RESPONSE" | jq -r '.status' 2>/dev/null || true)
+    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
     [[ "$status" == "completed" ]] && return 0
     [[ "$status" == "failed" ]] && { echo "Task ${task_id} failed: ${TASK_RESPONSE}" >&2; return 1; }
+    [[ -z "$status" && -n "$TASK_RESPONSE" ]] && { echo "Task ${task_id} returned invalid response: ${TASK_RESPONSE}" >&2; return 1; }
 
     sleep 5
     elapsed=$((elapsed + 5))

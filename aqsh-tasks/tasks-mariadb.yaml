@@ -274,6 +274,405 @@ tasks:
         required: false
         type: string
         default: "false"
+  blue-green/status:
+    script: mariadb/blue-green/status.sh
+    description: "Read MariaDB multiCluster, version, and replication status for blue/green runbooks"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+  blue-green/validate:
+    script: mariadb/blue-green/validate.sh
+    description: "Validate MariaDB version, multiCluster primary, and replication catch-up"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: expected_version
+        env: EXPECTED_VERSION
+        required: false
+        type: string
+        default: ""
+      - name: expected_primary
+        env: EXPECTED_PRIMARY
+        required: false
+        type: string
+        default: ""
+      - name: check_replication
+        env: CHECK_REPLICATION
+        required: false
+        type: string
+        default: "true"
+      - name: lag_threshold
+        env: LAG_THRESHOLD
+        required: false
+        type: string
+        default: "0"
+  blue-green/create-physical-backup:
+    script: mariadb/blue-green/create-physical-backup.sh
+    description: "Create a PhysicalBackup descriptor for bootstrapping Green"
+    timeout: 12m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: backup_name
+        env: BACKUP_NAME
+        required: false
+        type: string
+        default: physicalbackup-blue
+      - name: backup_bucket
+        env: BACKUP_BUCKET
+        required: true
+        type: string
+      - name: backup_prefix
+        env: BACKUP_PREFIX
+        required: true
+        type: string
+      - name: backup_endpoint
+        env: BACKUP_ENDPOINT
+        required: true
+        type: string
+      - name: backup_region
+        env: BACKUP_REGION
+        required: false
+        type: string
+        default: us-east-1
+      - name: backup_access_secret
+        env: BACKUP_ACCESS_SECRET
+        required: false
+        type: string
+        default: minio
+      - name: backup_access_key
+        env: BACKUP_ACCESS_KEY
+        required: false
+        type: string
+        default: access-key-id
+      - name: backup_secret_key
+        env: BACKUP_SECRET_KEY
+        required: false
+        type: string
+        default: secret-access-key
+      - name: backup_target
+        env: BACKUP_TARGET
+        required: false
+        type: string
+        default: PreferReplica
+      - name: backup_compression
+        env: BACKUP_COMPRESSION
+        required: false
+        type: string
+        default: bzip2
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/bootstrap-green:
+    script: mariadb/blue-green/bootstrap-green.sh
+    description: "Bootstrap Green from a Blue PhysicalBackup descriptor"
+    timeout: 12m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb-green
+      - name: blue_name
+        env: BLUE_NAME
+        required: true
+        type: string
+      - name: green_image
+        env: GREEN_IMAGE
+        required: false
+        type: string
+        default: mariadb:10.6
+      - name: root_secret_name
+        env: ROOT_SECRET_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: root_secret_key
+        env: ROOT_SECRET_KEY
+        required: false
+        type: string
+        default: password
+      - name: storage_size
+        env: STORAGE_SIZE
+        required: false
+        type: string
+        default: 1Gi
+      - name: replicas
+        env: REPLICAS
+        required: false
+        type: string
+        default: "2"
+      - name: backup_bucket
+        env: BACKUP_BUCKET
+        required: true
+        type: string
+      - name: backup_prefix
+        env: BACKUP_PREFIX
+        required: true
+        type: string
+      - name: backup_endpoint
+        env: BACKUP_ENDPOINT
+        required: true
+        type: string
+      - name: backup_region
+        env: BACKUP_REGION
+        required: false
+        type: string
+        default: us-east-1
+      - name: backup_access_secret
+        env: BACKUP_ACCESS_SECRET
+        required: false
+        type: string
+        default: minio
+      - name: backup_access_key
+        env: BACKUP_ACCESS_KEY
+        required: false
+        type: string
+        default: access-key-id
+      - name: backup_secret_key
+        env: BACKUP_SECRET_KEY
+        required: false
+        type: string
+        default: secret-access-key
+      - name: gtid_domain_id
+        env: GTID_DOMAIN_ID
+        required: false
+        type: string
+        default: "1"
+      - name: server_id_start_index
+        env: SERVER_ID_START_INDEX
+        required: false
+        type: string
+        default: "20"
+      - name: blue_host
+        env: BLUE_HOST
+        required: false
+        type: string
+        default: peer-db-proxy.db-ops.svc.cluster.local
+      - name: green_host
+        env: GREEN_HOST
+        required: false
+        type: string
+        default: ""
+      - name: wait_ready
+        env: WAIT_READY
+        required: false
+        type: string
+        default: "true"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/upgrade-green:
+    script: mariadb/blue-green/upgrade-green.sh
+    description: "Patch Green to the target MariaDB image and wait for readiness"
+    timeout: 12m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb-green
+      - name: target_image
+        env: TARGET_IMAGE
+        required: true
+        type: string
+      - name: wait_ready
+        env: WAIT_READY
+        required: false
+        type: string
+        default: "true"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/maintenance:
+    script: mariadb/blue-green/maintenance.sh
+    description: "Enable MariaDB maintenance/read-only mode before blue/green switchover"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: read_only
+        env: READ_ONLY
+        required: false
+        type: string
+        default: "true"
+      - name: cordon
+        env: CORDON
+        required: false
+        type: string
+        default: "true"
+      - name: drain_connections
+        env: DRAIN_CONNECTIONS
+        required: false
+        type: string
+        default: "true"
+      - name: drain_grace_period_seconds
+        env: DRAIN_GRACE_PERIOD_SECONDS
+        required: false
+        type: string
+        default: "30"
+  blue-green/set-primary:
+    script: mariadb/blue-green/set-primary.sh
+    description: "Patch spec.multiCluster.primary for promotion or demotion"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: primary
+        env: BLUE_GREEN_PRIMARY
+        required: true
+        type: string
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/write-probe:
+    script: mariadb/blue-green/write-probe.sh
+    description: "Insert a small probe row through the current primary to prove writes work"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: database
+        env: PROBE_DATABASE
+        required: false
+        type: string
+        default: bgtest
+      - name: table
+        env: PROBE_TABLE
+        required: false
+        type: string
+        default: events
+      - name: id
+        env: PROBE_ID
+        required: false
+        type: string
+        default: "1"
+      - name: note
+        env: PROBE_NOTE
+        required: false
+        type: string
+        default: aqsh-write-probe
   backup:
     script: backup/backup-mariadb.sh
     description: "Backup MariaDB database to MinIO"

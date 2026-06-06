@@ -18,6 +18,9 @@ spec:
         - name: aqsh
           image: ghcr.io/null-ptr-exception/db-runbooks
           imagePullPolicy: Never
+          command: ["/bin/sh", "-ceu"]
+          args:
+            - cp "$AQSH_TASKS_CONFIG" /etc/aqsh/tasks.yaml && exec aqsh
           env:
             - name: AQSH_MODE
               value: both

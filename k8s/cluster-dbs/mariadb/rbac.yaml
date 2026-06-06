@@ -26,4 +26,7 @@ rules:
     verbs: ["get", "create"]
   - apiGroups: ["k8s.mariadb.com", "mariadb.mmontes.io"]
     resources: ["mariadbs"]
-    verbs: ["get", "list", "watch", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  - apiGroups: ["k8s.mariadb.com", "mariadb.mmontes.io"]
+    resources: ["externalmariadbs", "physicalbackups"]
+    verbs: ["get", "list", "watch", "create", "patch"]

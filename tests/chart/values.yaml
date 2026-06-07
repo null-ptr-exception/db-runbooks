@@ -1,0 +1,50 @@
+# Default values — installs nothing. Each suite's helmfile.yaml enables
+# the components it needs via inline values.
+
+# --- nginx (infra suite) ---
+nginx:
+  enabled: false
+
+# --- curl pod (infra suite, test-client alternative) ---
+curl:
+  enabled: false
+
+# --- kube-federated-auth ---
+federatedAuth:
+  enabled: false
+  image: ghcr.io/rophy/kube-federated-auth:3.2.0
+  # clusters config is passed at install time (runtime-discovered)
+  clusters: {}
+  # CA certs and tokens are passed at install time
+  caCerts: {}
+  tokens: {}
+
+# --- kube-federated-auth-reader RBAC (needed on each cluster) ---
+federatedAuthReader:
+  enabled: false
+
+# --- redis ---
+redis:
+  enabled: false
+
+# --- aqsh (with kube-auth-proxy sidecar) ---
+aqsh:
+  enabled: false
+  image: localhost:5005/db-runbooks:latest
+  imagePullPolicy: Always
+  tasksConfig: /etc/aqsh/tasks-mariadb.yaml
+  workerQueues: mariadb
+  authProxy:
+    image: ghcr.io/rophy/kube-auth-proxy:0.4.1
+    tokenReviewURL: ""
+
+# --- test-client (curl pod with projected SA token) ---
+testClient:
+  enabled: false
+
+# --- Istio Gateway + VirtualServices ---
+gateway:
+  enabled: false
+  hosts: []
+  # Each entry: { name, host, backendHost, backendPort }
+  virtualServices: []

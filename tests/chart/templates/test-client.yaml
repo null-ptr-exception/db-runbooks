@@ -1,0 +1,39 @@
+{{- if .Values.testClient.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: test-client
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-client
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-client
+  template:
+    metadata:
+      labels:
+        app: test-client
+    spec:
+      serviceAccountName: test-client
+      containers:
+        - name: test-client
+          image: curlimages/curl:8.20.0
+          command: ["sleep", "infinity"]
+          volumeMounts:
+            - name: token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+      volumes:
+        - name: token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  expirationSeconds: 3600
+                  path: token
+{{- end }}

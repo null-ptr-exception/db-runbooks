@@ -1,0 +1,21 @@
+{{- if .Values.curl.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: curl
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: curl
+  template:
+    metadata:
+      labels:
+        app: curl
+    spec:
+      containers:
+        - name: curl
+          image: curlimages/curl:8.20.0
+          command: ["sleep", "infinity"]
+{{- end }}

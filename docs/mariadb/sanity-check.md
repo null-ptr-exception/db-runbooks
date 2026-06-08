@@ -91,7 +91,7 @@ represented as the flat fields above.
 }
 ```
 
-### Task Result (`GET /tasks/{id}`)
+### Task Result (`GET /executions/{id}`)
 
 Once `status` is `completed`, the `result.data` field contains:
 

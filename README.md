@@ -196,11 +196,11 @@ curl -X POST "http://${CLUSTER_DBS_IP}:30081/tasks/restart" \
 # → {"id": "abc123", "status": "pending"}
 
 # Poll status
-curl "http://${CLUSTER_DBS_IP}:30081/tasks/abc123" -H "Authorization: Bearer $TOKEN"
+curl "http://${CLUSTER_DBS_IP}:30081/executions/abc123" -H "Authorization: Bearer $TOKEN"
 # → {"id": "abc123", "status": "completed", "result": {...}}
 
 # Stream logs
-curl "http://${CLUSTER_DBS_IP}:30081/tasks/abc123/logs?follow=false" -H "Authorization: Bearer $TOKEN"
+curl "http://${CLUSTER_DBS_IP}:30081/executions/abc123/logs?follow=false" -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Access MinIO (when enabled)
@@ -357,7 +357,7 @@ ENABLE_MINIO=true ./scripts/test.sh
 **Test Coverage**:
 - Infrastructure: federated-auth health, unauthenticated requests → 401
 - Task execution: `common/hello`, `restart`, `sanity-check`
-- Log streaming: `/tasks/<id>/logs`
+- Log streaming: `/executions/<id>/logs`
 - In-pod requests: test-client → aqsh via NodePort
 - MinIO (optional): deployment, nginx proxy routing, backup tasks
 

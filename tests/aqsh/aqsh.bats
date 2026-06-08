@@ -51,7 +51,7 @@ wait_for_task() {
   while (( elapsed < max_wait )); do
     TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
       -H 'Authorization: Bearer ${TOKEN}' \
-      '${base_url}/tasks/${task_id}'")
+      '${base_url}/executions/${task_id}'")
     export TASK_RESPONSE
 
     status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
@@ -103,7 +103,7 @@ wait_for_task() {
   logs=$(kexec "curl -s -m 5 \
     -H 'Authorization: Bearer ${TOKEN}' \
     -H 'Accept: text/event-stream' \
-    '${AQSH_URL}/tasks/${task_id}/logs?follow=false'" 2>/dev/null || true)
+    '${AQSH_URL}/executions/${task_id}/logs?follow=false'" 2>/dev/null || true)
 
   echo "$logs"
   [[ "$logs" == *"Hello, World!"* ]]

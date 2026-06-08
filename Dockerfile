@@ -1,4 +1,4 @@
-FROM ghcr.io/null-ptr-exception/aqsh:0.4.0
+FROM ghcr.io/null-ptr-exception/aqsh:0.5.0
 
 ARG KUBECTL_VERSION=v1.30.0
 

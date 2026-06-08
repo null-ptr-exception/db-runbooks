@@ -75,3 +75,442 @@ tasks:
         required: false
         type: string
         default: db-backups
+  create-account:
+    script: mongodb/account/create-account.sh
+    description: "Create or recreate a temporary MongoDB account"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: roles_json
+        env: ACCOUNT_ROLES_JSON
+        required: false
+        type: string
+        default: ""
+      - name: database
+        env: ACCOUNT_DATABASE
+        required: false
+        type: string
+        default: admin
+      - name: temp_days
+        env: TEMP_DAYS
+        required: false
+        type: string
+        default: "14"
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: allow_existing
+        env: ALLOW_EXISTING
+        required: false
+        type: string
+        default: "false"
+      - name: password_length
+        env: PASSWORD_LENGTH
+        required: false
+        type: string
+        default: "24"
+      - name: password_special_chars
+        env: PASSWORD_SPECIAL_CHARS
+        required: false
+        type: string
+        default: "!@#%^*_-+=."
+      - name: password_special_max
+        env: PASSWORD_SPECIAL_MAX
+        required: false
+        type: string
+        default: "4"
+      - name: password_delivery_mode
+        env: PASSWORD_DELIVERY_MODE
+        required: false
+        type: string
+        default: one_time_plaintext
+      - name: recipient_pgp_pubkey
+        env: RECIPIENT_PGP_PUBKEY
+        required: false
+        type: string
+        default: ""
+      - name: request_id
+        env: REQUEST_ID
+        required: false
+        type: string
+        default: ""
+      - name: requested_by
+        env: REQUESTED_BY
+        required: false
+        type: string
+        default: ""
+  delete-account:
+    script: mongodb/account/delete-account.sh
+    description: "Delete an existing MongoDB account"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: delete_reason
+        env: DELETE_REASON
+        required: false
+        type: string
+        default: MANUAL_DELETE
+  ban-account:
+    script: mongodb/account/ban-account.sh
+    description: "Ban an account by removing all roles"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: ban_reason
+        env: BAN_REASON
+        required: false
+        type: string
+        default: SECURITY_POLICY
+  extend-expiry:
+    script: mongodb/account/extend-expiry.sh
+    description: "Extend temporary account expiry"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: extend_days
+        env: EXTEND_DAYS
+        required: true
+        type: string
+      - name: allow_terminal_override
+        env: ALLOW_TERMINAL_OVERRIDE
+        required: false
+        type: string
+        default: "false"
+  update-account-roles:
+    script: mongodb/account/update-account-roles.sh
+    description: "Update account role to database bindings"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: roles_json
+        env: ACCOUNT_ROLES_JSON
+        required: true
+        type: string
+  force-permanent:
+    script: mongodb/account/force-permanent.sh
+    description: "Force a temporary account into permanent state"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: forced_by
+        env: FORCED_BY
+        required: false
+        type: string
+        default: unknown
+      - name: force_reason
+        env: FORCE_REASON
+        required: false
+        type: string
+        default: MANUAL_FORCE_PERMANENT
+  reset-password:
+    script: mongodb/account/reset-password.sh
+    description: "Reset account password and optionally restart temporary lifecycle"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: auth_db
+        env: ACCOUNT_AUTH_DB
+        required: false
+        type: string
+        default: admin
+      - name: username
+        env: ACCOUNT_USERNAME
+        required: true
+        type: string
+      - name: temp_days
+        env: TEMP_DAYS
+        required: false
+        type: string
+        default: "14"
+      - name: reset_override
+        env: RESET_OVERRIDE
+        required: false
+        type: string
+        default: "false"
+      - name: password_length
+        env: PASSWORD_LENGTH
+        required: false
+        type: string
+        default: "24"
+      - name: password_special_chars
+        env: PASSWORD_SPECIAL_CHARS
+        required: false
+        type: string
+        default: "!@#%^*_-+=."
+      - name: password_special_max
+        env: PASSWORD_SPECIAL_MAX
+        required: false
+        type: string
+        default: "4"
+      - name: password_delivery_mode
+        env: PASSWORD_DELIVERY_MODE
+        required: false
+        type: string
+        default: one_time_plaintext
+  reconcile-expiry:
+    script: mongodb/account/reconcile-expiry.sh
+    description: "Reconcile expired temporary accounts"
+    timeout: 15m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        default: mongo-1
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS

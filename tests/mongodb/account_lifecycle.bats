@@ -1,0 +1,209 @@
+setup_file() {
+  load '../test_helper/common_setup'
+  common_setup --create-token
+  deploy_mongodb "mongo-1"
+}
+
+setup() {
+  load '../test_helper/common_setup'
+}
+
+teardown_file() {
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
+}
+
+_task_result_data() {
+  echo "$TASK_RESPONSE" | jq -c '
+    .result.data as $data |
+    (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))
+  '
+}
+
+_root_user() {
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d
+}
+
+_root_pass() {
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d
+}
+
+_mongo_exec() {
+  local js="$1"
+  local user pass
+  user="$(_root_user)"
+  pass="$(_root_pass)"
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 exec mongodb-0 -- \
+    mongosh --quiet --norc "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" --eval "$js"
+}
+
+_mongo_exec_as() {
+  local auth_db="$1"
+  local username="$2"
+  local password="$3"
+  local js="$4"
+
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 exec mongodb-0 -- \
+    mongosh --quiet --norc \
+      --username "$username" \
+      --password "$password" \
+      --authenticationDatabase "$auth_db" \
+      "$auth_db" \
+      --eval "$js"
+}
+
+_cleanup_account() {
+  local username="$1"
+  _mongo_exec "try { db.getSiblingDB('admin').dropUser('${username}'); } catch (e) { /* ignore missing user */ }"
+  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').deleteOne({username:'${username}', auth_db:'admin'});"
+}
+
+_submit_task() {
+  local path="$1"
+  local payload="$2"
+  local task_id
+
+  http_post "${MONGODB_AQSH_URL}/tasks/${path}" "$payload"
+  assert_equal "$HTTP_CODE" "202"
+
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [ -n "$task_id" ]
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id"
+}
+
+@test "create-account creates temporary user and policy" {
+  _cleanup_account "qa_temp_user"
+
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_temp_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    request_id: "test-create-001",
+    requested_by: "bats"
+  }')
+
+  _submit_task "create-account" "$payload"
+
+  local result status user_exists policy_status
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "CREATED" ] || [ "$status" = "RECREATED" ]
+
+  user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_temp_user'); print(u ? 'yes' : 'no');" | tail -1)
+  [ "$user_exists" = "yes" ]
+
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('temp_user_policies').findOne({username:'qa_temp_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  [ "$policy_status" = "ACTIVE" ]
+}
+
+@test "delete-account removes user" {
+  _cleanup_account "qa_delete_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_delete_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local delete_payload
+  delete_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_delete_user",
+    delete_reason: "bats-cleanup"
+  }')
+  _submit_task "delete-account" "$delete_payload"
+
+  local user_exists
+  user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_delete_user'); print(u ? 'yes' : 'no');" | tail -1)
+  [ "$user_exists" = "no" ]
+}
+
+@test "reconcile-expiry deletes unchanged expired account" {
+  _cleanup_account "qa_expire_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_expire_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').updateOne({username:'qa_expire_user', auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
+
+  local reconcile_payload
+  reconcile_payload=$(jq -nc '{namespace:"mongo-1"}')
+  _submit_task "reconcile-expiry" "$reconcile_payload"
+
+  local user_exists policy_status
+  user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_expire_user'); print(u ? 'yes' : 'no');" | tail -1)
+  [ "$user_exists" = "no" ]
+
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('temp_user_policies').findOne({username:'qa_expire_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  [ "$policy_status" = "EXPIRED_DELETED" ]
+}
+
+@test "create-account encrypted payload can be decrypted and used" {
+  if ! command -v gpg >/dev/null 2>&1; then
+    skip "gpg is required for encrypted payload test"
+  fi
+
+  _cleanup_account "qa_encrypt_user"
+
+  local gnupg_home recipient key_block_b64 payload
+  local result status mode ciphertext decrypted ping_ok
+
+  gnupg_home=$(mktemp -d)
+  chmod 700 "$gnupg_home"
+  recipient="bats-encrypted@example.com"
+
+  GNUPGHOME="$gnupg_home" gpg --batch --pinentry-mode loopback --passphrase '' \
+    --quick-generate-key "$recipient" rsa3072 encr 1d >/dev/null 2>&1
+
+  key_block_b64=$(GNUPGHOME="$gnupg_home" gpg --batch --armor --export "$recipient" | base64 | tr -d '\n')
+
+  payload=$(jq -nc \
+    --arg pub "$key_block_b64" \
+    '{
+      namespace: "mongo-1",
+      auth_db: "admin",
+      username: "qa_encrypt_user",
+      roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+      dry_run: "false",
+      confirm: "true",
+      password_delivery_mode: "encrypted_payload",
+      recipient_pgp_pubkey: $pub
+    }')
+
+  _submit_task "create-account" "$payload"
+
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "CREATED" ] || [ "$status" = "RECREATED" ]
+
+  mode=$(echo "$result" | jq -r '.delivery_payload.mode // empty')
+  [ "$mode" = "encrypted_payload" ]
+
+  ciphertext=$(echo "$result" | jq -r '.delivery_payload.ciphertext // empty')
+  [ -n "$ciphertext" ]
+
+  decrypted=$(printf '%s' "$ciphertext" | GNUPGHOME="$gnupg_home" gpg --batch --decrypt 2>/dev/null)
+  [ -n "$decrypted" ]
+
+  ping_ok=$(_mongo_exec_as "admin" "qa_encrypt_user" "$decrypted" "db.adminCommand({ping:1}).ok" | tail -1)
+  [ "$ping_ok" = "1" ]
+
+  rm -rf "$gnupg_home"
+}

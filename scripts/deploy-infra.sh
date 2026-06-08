@@ -298,6 +298,10 @@ fi
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
 kubectl_apply_with_retry "kind-cluster-auth" "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
 
+# kube-federated-auth reads clusters.yaml at startup; restart so configmap changes
+# (for single/dual mode switches) are picked up deterministically.
+kubectl --context kind-cluster-auth -n db-ops rollout restart deployment/kube-federated-auth
+
 echo "Waiting for kube-federated-auth to be ready..."
 kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=240s
 wait_for_log_message "kind-cluster-auth" "db-ops" "app=kube-federated-auth" "starting server" 240

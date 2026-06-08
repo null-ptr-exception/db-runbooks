@@ -23,8 +23,14 @@ if [[ "$DB_MODE" == "dual" ]]; then
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
-    "${ROOT_DIR}/tests/mariadb/create_account.bats" \
-    "${ROOT_DIR}/tests/mongodb"
+    "${ROOT_DIR}/tests/mariadb/create_account.bats"
+
+  # Run MongoDB tests file-by-file to avoid occasional hangs seen when
+  # invoking the whole directory in a single bats process.
+  "$BATS_BIN" "${ROOT_DIR}/tests/mongodb/account_lifecycle.bats"
+  "$BATS_BIN" "${ROOT_DIR}/tests/mongodb/replication.bats"
+  "$BATS_BIN" "${ROOT_DIR}/tests/mongodb/restart.bats"
+  "$BATS_BIN" "${ROOT_DIR}/tests/mongodb/sanity_check.bats"
 else
   "$BATS_BIN" --recursive \
     "${ROOT_DIR}/tests/common" \

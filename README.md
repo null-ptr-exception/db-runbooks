@@ -196,11 +196,11 @@ curl -X POST "http://${CLUSTER_DBS_IP}:30081/tasks/restart" \
 # → {"id": "abc123", "status": "pending"}
 
 # Poll status
-curl "http://${CLUSTER_DBS_IP}:30081/tasks/abc123" -H "Authorization: Bearer $TOKEN"
+curl "http://${CLUSTER_DBS_IP}:30081/executions/abc123" -H "Authorization: Bearer $TOKEN"
 # → {"id": "abc123", "status": "completed", "result": {...}}
 
 # Stream logs
-curl "http://${CLUSTER_DBS_IP}:30081/tasks/abc123/logs?follow=false" -H "Authorization: Bearer $TOKEN"
+curl "http://${CLUSTER_DBS_IP}:30081/executions/abc123/logs?follow=false" -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Access MinIO (when enabled)
@@ -357,7 +357,7 @@ ENABLE_MINIO=true ./scripts/test.sh
 **Test Coverage**:
 - Infrastructure: federated-auth health, unauthenticated requests → 401
 - Task execution: `common/hello`, `restart`, `sanity-check`
-- Log streaming: `/tasks/<id>/logs`
+- Log streaming: `/executions/<id>/logs`
 - In-pod requests: test-client → aqsh via NodePort
 - MinIO (optional): deployment, nginx proxy routing, backup tasks
 
@@ -384,7 +384,7 @@ CI runs on [self-hosted aws-runners](https://github.com/null-ptr-exception/aws-r
 |-------|---------|--------|
 | kube-federated-auth | 3.2.0 | ghcr.io/rophy/kube-federated-auth |
 | kube-auth-proxy | 0.4.1 | ghcr.io/rophy/kube-auth-proxy |
-| aqsh (base) | 0.4.0 | ghcr.io/null-ptr-exception/aqsh |
+| aqsh (base) | 0.5.0 | ghcr.io/null-ptr-exception/aqsh |
 | db-runbooks | local / main tag | Single task image built via Skaffold for Kind; main publishes `ghcr.io/null-ptr-exception/db-runbooks:yyyymmdd-short_sha` |
 | mariadb-operator | latest | Deployed via Helm |
 | mariadb | 10.6, 10.11, 11.4 | Official MariaDB images |

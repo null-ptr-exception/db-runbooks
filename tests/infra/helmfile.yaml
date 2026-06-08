@@ -1,0 +1,40 @@
+releases:
+  - name: infra-a
+    chart: ../chart
+    namespace: infra-a
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    values:
+      - nginx:
+          enabled: true
+        curl:
+          enabled: true
+        gateway:
+          enabled: true
+          hosts:
+            - "*.kind-a.test"
+          virtualServices:
+            - name: nginx
+              host: "nginx.kind-a.test"
+              backendHost: nginx.infra-a.svc.cluster.local
+              backendPort: 80
+
+  - name: infra-b
+    chart: ../chart
+    namespace: infra-b
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    values:
+      - nginx:
+          enabled: true
+        curl:
+          enabled: true
+        gateway:
+          enabled: true
+          hosts:
+            - "*.kind-b.test"
+          virtualServices:
+            - name: nginx
+              host: "nginx.kind-b.test"
+              backendHost: nginx.infra-b.svc.cluster.local
+              backendPort: 80

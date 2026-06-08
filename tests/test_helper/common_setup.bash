@@ -84,7 +84,7 @@ http_post() {
 # ---------------------------------------------------------------------------
 # wait_for_task <base_url> <task_id> [max_wait_seconds]
 #
-# Polls GET <base_url>/tasks/<task_id> until status is completed or failed.
+# Polls GET <base_url>/executions/<task_id> until status is completed or failed.
 # Sets TASK_RESPONSE to the final JSON body.
 # Returns 0 on completed, 1 on failed/timeout.
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ wait_for_task() {
   while (( elapsed < max_wait )); do
     TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
       -H 'Authorization: Bearer ${TOKEN}' \
-      '${base_url}/tasks/${task_id}'")
+      '${base_url}/executions/${task_id}'")
     export TASK_RESPONSE
 
     status=$(echo "$TASK_RESPONSE" | jq -r '.status' 2>/dev/null || true)

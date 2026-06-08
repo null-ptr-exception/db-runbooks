@@ -1,0 +1,137 @@
+{{- if .Values.federatedAuth.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-federated-auth
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-federated-auth-tokenreview
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-federated-auth-tokenreview
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-federated-auth-tokenreview
+subjects:
+  - kind: ServiceAccount
+    name: kube-federated-auth
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-federated-auth-ca-certs
+  namespace: {{ .Release.Namespace }}
+data:
+  {{- range $key, $value := .Values.federatedAuth.caCerts }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kube-federated-auth-tokens
+  namespace: {{ .Release.Namespace }}
+stringData:
+  {{- range $key, $value := .Values.federatedAuth.tokens }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-federated-auth-config
+  namespace: {{ .Release.Namespace }}
+data:
+  clusters.yaml: |
+    authorized_clients:
+      {{- range .Values.federatedAuth.authorizedClients }}
+      - {{ . | quote }}
+      {{- end }}
+    cache:
+      ttl: 60
+      max_entries: 1000
+    clusters:
+      {{- range $name, $cluster := .Values.federatedAuth.clusters }}
+      {{ $name }}:
+        issuer: {{ $cluster.issuer | quote }}
+        api_server: {{ $cluster.apiServer | quote }}
+        ca_cert: "/etc/kube-federated-auth/ca-certs/{{ $name }}-ca.crt"
+        token_path: "/etc/kube-federated-auth/tokens/{{ $name }}-token"
+      {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-federated-auth
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-federated-auth
+  template:
+    metadata:
+      labels:
+        app: kube-federated-auth
+    spec:
+      serviceAccountName: kube-federated-auth
+      containers:
+        - name: kube-federated-auth
+          image: {{ .Values.federatedAuth.image }}
+          env:
+            - name: CONFIG_PATH
+              value: /etc/kube-federated-auth/config/clusters.yaml
+            - name: PORT
+              value: "8080"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kube-federated-auth/config
+              readOnly: true
+            - name: ca-certs
+              mountPath: /etc/kube-federated-auth/ca-certs
+              readOnly: true
+            - name: tokens
+              mountPath: /etc/kube-federated-auth/tokens
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: kube-federated-auth-config
+        - name: ca-certs
+          configMap:
+            name: kube-federated-auth-ca-certs
+        - name: tokens
+          secret:
+            secretName: kube-federated-auth-tokens
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-federated-auth
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: kube-federated-auth
+  ports:
+    - port: 8080
+      targetPort: 8080
+{{- end }}

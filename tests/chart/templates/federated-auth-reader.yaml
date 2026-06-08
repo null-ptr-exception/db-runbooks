@@ -1,0 +1,29 @@
+{{- if .Values.federatedAuthReader.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-federated-auth-reader
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kube-federated-auth-reader
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kube-federated-auth-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kube-federated-auth-reader
+subjects:
+  - kind: ServiceAccount
+    name: kube-federated-auth-reader
+    namespace: {{ .Release.Namespace }}
+{{- end }}

@@ -384,7 +384,7 @@ CI runs on [self-hosted aws-runners](https://github.com/null-ptr-exception/aws-r
 |-------|---------|--------|
 | kube-federated-auth | 3.2.0 | ghcr.io/rophy/kube-federated-auth |
 | kube-auth-proxy | 0.4.1 | ghcr.io/rophy/kube-auth-proxy |
-| aqsh (base) | 0.4.0 | ghcr.io/null-ptr-exception/aqsh |
+| aqsh (base) | 0.5.0 | ghcr.io/null-ptr-exception/aqsh |
 | db-runbooks | local / main tag | Single task image built via Skaffold for Kind; main publishes `ghcr.io/null-ptr-exception/db-runbooks:yyyymmdd-short_sha` |
 | mariadb-operator | latest | Deployed via Helm |
 | mariadb | 10.6, 10.11, 11.4 | Official MariaDB images |

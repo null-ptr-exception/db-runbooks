@@ -672,6 +672,252 @@ tasks:
         required: false
         type: string
         default: aqsh-write-probe
+  blue-green/create:
+    script: mariadb/blue-green/create.sh
+    description: "Provision Green from a Blue physical backup (backup -> bootstrap -> upgrade) in one task"
+    timeout: 30m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: blue_name
+        env: BLUE_NAME
+        required: true
+        type: string
+      - name: green_name
+        env: GREEN_NAME
+        required: true
+        type: string
+      - name: green_namespace
+        env: GREEN_NAMESPACE
+        required: false
+        type: string
+        default: ""
+      - name: green_image
+        env: GREEN_IMAGE
+        required: true
+        type: string
+      - name: target_image
+        env: TARGET_IMAGE
+        required: false
+        type: string
+        default: ""
+      - name: peer_aqsh_url
+        env: PEER_AQSH_URL
+        required: true
+        type: string
+      - name: peer_token
+        env: PEER_TOKEN
+        required: true
+        type: string
+      - name: backup_name
+        env: BACKUP_NAME
+        required: false
+        type: string
+        default: physicalbackup-blue
+      - name: backup_bucket
+        env: BACKUP_BUCKET
+        required: true
+        type: string
+      - name: backup_prefix
+        env: BACKUP_PREFIX
+        required: true
+        type: string
+      - name: backup_endpoint
+        env: BACKUP_ENDPOINT
+        required: true
+        type: string
+      - name: backup_region
+        env: BACKUP_REGION
+        required: false
+        type: string
+        default: us-east-1
+      - name: backup_access_secret
+        env: BACKUP_ACCESS_SECRET
+        required: false
+        type: string
+        default: minio
+      - name: backup_access_key
+        env: BACKUP_ACCESS_KEY
+        required: false
+        type: string
+        default: access-key-id
+      - name: backup_secret_key
+        env: BACKUP_SECRET_KEY
+        required: false
+        type: string
+        default: secret-access-key
+      - name: backup_target
+        env: BACKUP_TARGET
+        required: false
+        type: string
+        default: PreferReplica
+      - name: backup_compression
+        env: BACKUP_COMPRESSION
+        required: false
+        type: string
+        default: bzip2
+      - name: root_secret_name
+        env: ROOT_SECRET_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: root_secret_key
+        env: ROOT_SECRET_KEY
+        required: false
+        type: string
+        default: password
+      - name: storage_size
+        env: STORAGE_SIZE
+        required: false
+        type: string
+        default: 1Gi
+      - name: replicas
+        env: REPLICAS
+        required: false
+        type: string
+        default: "2"
+      - name: gtid_domain_id
+        env: GTID_DOMAIN_ID
+        required: false
+        type: string
+        default: "1"
+      - name: server_id_start_index
+        env: SERVER_ID_START_INDEX
+        required: false
+        type: string
+        default: "20"
+      - name: blue_host
+        env: BLUE_HOST
+        required: false
+        type: string
+        default: peer-db-proxy.db-ops.svc.cluster.local
+      - name: green_host
+        env: GREEN_HOST
+        required: false
+        type: string
+        default: ""
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: peer_timeout
+        env: PEER_TIMEOUT
+        required: false
+        type: string
+        default: "900"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/switchover:
+    script: mariadb/blue-green/switchover.sh
+    description: "Switch the multiCluster primary from Blue to Green with built-in guardrails and rollback"
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: blue_name
+        env: BLUE_NAME
+        required: true
+        type: string
+      - name: green_name
+        env: GREEN_NAME
+        required: true
+        type: string
+      - name: green_namespace
+        env: GREEN_NAMESPACE
+        required: false
+        type: string
+        default: ""
+      - name: peer_aqsh_url
+        env: PEER_AQSH_URL
+        required: true
+        type: string
+      - name: peer_token
+        env: PEER_TOKEN
+        required: true
+        type: string
+      - name: expected_blue_version
+        env: EXPECTED_BLUE_VERSION
+        required: false
+        type: string
+        default: ""
+      - name: expected_green_version
+        env: EXPECTED_GREEN_VERSION
+        required: false
+        type: string
+        default: ""
+      - name: lag_threshold
+        env: LAG_THRESHOLD
+        required: false
+        type: string
+        default: "0"
+      - name: skip_write_probe
+        env: SKIP_WRITE_PROBE
+        required: false
+        type: string
+        default: "false"
+      - name: peer_timeout
+        env: PEER_TIMEOUT
+        required: false
+        type: string
+        default: "540"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  blue-green/delete:
+    script: mariadb/blue-green/delete.sh
+    description: "Delete a Green deployment (MariaDB CR, ExternalMariaDB refs, optional PhysicalBackup)"
+    timeout: 6m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: mariadb-green
+      - name: blue_name
+        env: BLUE_NAME
+        required: false
+        type: string
+        default: ""
+      - name: delete_external
+        env: DELETE_EXTERNAL
+        required: false
+        type: string
+        default: "true"
+      - name: backup_name
+        env: BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 5m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   backup:
     script: backup/backup-mariadb.sh
     description: "Backup MariaDB database to MinIO"

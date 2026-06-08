@@ -98,3 +98,40 @@ task_result_data() {
   run bash -c 'jq -e ".database == \"bgtest\" and .table == \"events\" and .id == 4 and .count == 1" <<<"$1"' _ "$data"
   assert_success
 }
+
+@test "blue-green switchover guardrails block switchover when blue is not primary" {
+  require_blue_green_demo
+
+  # In the already-switched-over fixture, Green is primary. The switchover
+  # orchestrator must fail at the read-only guardrail phase (and mutate nothing)
+  # rather than attempting the cutover.
+  http_post "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fswitchover" \
+    "$(jq -nc --arg url "$MARIADB_AQSH_B_URL" --arg tok "$TOKEN" \
+      '{namespace:"mariadb-bg",blue_name:"mariadb-blue",green_name:"mariadb-green",peer_aqsh_url:$url,peer_token:$tok,confirm:"true"}')"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "no task id: $HTTP_BODY" >&2; return 1; }
+
+  wait_for_task "$MARIADB_AQSH_A_URL" "$task_id" 180 || true
+  assert_equal "$(echo "$TASK_RESPONSE" | jq -r '.status')" "failed"
+  echo "$TASK_RESPONSE" | grep -qi "guardrail"
+}
+
+@test "blue-green delete requires confirm" {
+  require_blue_green_demo
+
+  # No confirm -> the task must refuse before deleting anything.
+  http_post "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fdelete" \
+    '{"namespace":"mariadb-bg","mdb":"mariadb-green"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "no task id: $HTTP_BODY" >&2; return 1; }
+
+  wait_for_task "$MARIADB_AQSH_B_URL" "$task_id" 60 || true
+  assert_equal "$(echo "$TASK_RESPONSE" | jq -r '.status')" "failed"
+  echo "$TASK_RESPONSE" | grep -qi "confirm"
+}

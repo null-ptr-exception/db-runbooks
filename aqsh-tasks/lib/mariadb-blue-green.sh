@@ -210,3 +210,112 @@ bg_replication_check() {
       }
   ' <<<"$cr_json"
 }
+
+# ---------------------------------------------------------------------------
+# Cross-cluster orchestration helpers
+#
+# The blue/green orchestrator tasks (create/switchover) run on one cluster's
+# AQSH and drive the peer cluster by calling its AQSH over HTTP. The kube
+# single-cluster boundary is preserved: each AQSH only ever runs kubectl
+# against its own cluster. The orchestrator never holds the peer's kubeconfig,
+# only the peer AQSH URL and a bearer token the caller already holds (both
+# clusters validate against the same TokenReview backend).
+# ---------------------------------------------------------------------------
+
+# bg_local_step <script_path> [KEY=VALUE ...]
+# Run a sibling granular task script in a child process against the LOCAL
+# cluster, capturing its JSON result from stdout. On success echoes the inner
+# .data object (compact) and returns 0. On failure sets BG_LOCAL_ERR to the
+# child's response JSON and returns 1 (does NOT exit, so callers can roll back).
+# BG_LOCAL_ERR is read by the orchestrator scripts that source this lib.
+# shellcheck disable=SC2034
+bg_local_step() {
+  local script="$1"
+  shift
+  local out rc
+  BG_LOCAL_ERR=""
+  # Capture inside an `if` so a non-zero child does not trip the caller's set -e
+  # before we can inspect the result.
+  if out="$(env "$@" AQSH_RESULT_FILE= LIB_DIR="$LIB_DIR" bash "$script")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if (( rc != 0 )); then
+    BG_LOCAL_ERR="$out"
+    return 1
+  fi
+  # The granular script may emit non-JSON lines (e.g. `kubectl wait` output)
+  # before its single-line JSON result, so parse the last line.
+  jq -c '.data // {}' <<<"$(printf '%s\n' "$out" | tail -n1)" 2>/dev/null || printf '{}'
+  return 0
+}
+
+# bg_peer_call_task <op> <peer_url> <peer_token> <task_path> <payload> [timeout_seconds]
+# Submit a task to the peer AQSH, poll to completion, and echo its inner
+# result data (compact JSON) on success returning 0. On any failure sets
+# BG_PEER_ERR to a diagnostic JSON object and returns 1 (does NOT exit).
+# BG_PEER_ERR is read by the orchestrator scripts that source this lib.
+# shellcheck disable=SC2034
+bg_peer_call_task() {
+  local op="$1" peer_url="$2" peer_token="$3" task_path="$4" payload="$5" timeout="${6:-540}"
+  local encoded submit code body task_id resp status elapsed=0
+
+  BG_PEER_ERR=""
+  encoded="${task_path//\//%2F}"
+
+  submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
+    -X POST "${peer_url}/tasks/${encoded}" \
+    -H "Authorization: Bearer ${peer_token}" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" 2>/dev/null || true)"
+  code="$(printf '%s' "$submit" | tail -n1)"
+  body="$(printf '%s' "$submit" | sed '$d')"
+  if [[ "$code" != "202" ]]; then
+    BG_PEER_ERR="$(jq -n --arg task "$task_path" --arg code "$code" --arg body "$body" \
+      '{peerTask: $task, httpCode: $code, body: $body}')"
+    return 1
+  fi
+  task_id="$(jq -r '.id // empty' <<<"$body" 2>/dev/null || true)"
+  if [[ -z "$task_id" ]]; then
+    BG_PEER_ERR="$(jq -n --arg task "$task_path" --arg body "$body" '{peerTask: $task, body: $body}')"
+    return 1
+  fi
+
+  while (( elapsed < timeout )); do
+    resp="$(curl -sS --connect-timeout 5 -m 15 \
+      -H "Authorization: Bearer ${peer_token}" \
+      "${peer_url}/tasks/${task_id}" 2>/dev/null || true)"
+    status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
+    case "$status" in
+      completed)
+        jq -c '
+          .result.data as $d
+          | (($d | try fromjson catch null) // (if ($d | type) == "object" then $d else {} end))
+          | (.data // {})
+        ' <<<"$resp" 2>/dev/null || printf '{}'
+        return 0
+        ;;
+      failed)
+        BG_PEER_ERR="$(jq -n --arg task "$task_path" \
+          --argjson resp "$(jq -c '.' <<<"$resp" 2>/dev/null || printf '{}')" \
+          '{peerTask: $task, peerResponse: $resp}')"
+        return 1
+        ;;
+    esac
+    sleep 5
+    elapsed=$(( elapsed + 5 ))
+  done
+
+  BG_PEER_ERR="$(jq -n --arg task "$task_path" --arg id "$task_id" --argjson timeout "$timeout" \
+    '{peerTask: $task, taskId: $id, timeoutSeconds: $timeout}')"
+  return 1
+}
+
+# bg_require <name> <value> <op>  (alias of bg_required for orchestrator readability)
+bg_validate_url() {
+  local name="$1" value="$2" op="$3"
+  if [[ ! "$value" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
+    bg_fail "$op" "${name} must be an http(s) URL" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  fi
+}

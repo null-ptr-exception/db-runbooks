@@ -27,8 +27,12 @@ jobs:
 
       - name: Run ShellCheck
         run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
           find . -type f -name '*.sh' -print0 \
-            | xargs -0 --no-run-if-empty mise exec -- shellcheck --severity=warning -x
+            | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
 
       - name: Run Bats unit tests
         run: |
@@ -85,7 +89,7 @@ jobs:
           sudo sysctl fs.inotify.max_user_instances=512
 
       - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
-        run: mise exec -- ./scripts/test.sh
+        run: ./scripts/test.sh
 
       - name: Tear down clusters
         if: always()
@@ -143,7 +147,7 @@ jobs:
         run: ./scripts/preflight.sh
 
       - name: Run infra e2e tests
-        run: mise exec -- bats tests/infra/
+        run: bats tests/infra/
 
       - name: Tear down infra clusters
         if: always()

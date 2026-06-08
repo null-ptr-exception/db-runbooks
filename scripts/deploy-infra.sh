@@ -13,6 +13,10 @@ export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
 export MARIADB_OPERATOR_CHART_VERSION="${MARIADB_OPERATOR_CHART_VERSION:-}"
 export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
+if command -v mise >/dev/null 2>&1; then
+  eval "$(mise activate bash)"
+fi
+
 SKAFFOLD_RENDER_DIR="${ROOT_DIR}/.skaffold-rendered"
 SKAFFOLD_BUILD_OUTPUT="${SKAFFOLD_RENDER_DIR}/build.json"
 

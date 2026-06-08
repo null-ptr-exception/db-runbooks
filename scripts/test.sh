@@ -9,6 +9,12 @@ BATS_BIN="bats"
 # Ensure all prerequisites are installed
 "${SCRIPT_DIR}/preflight.sh"
 
+# Ensure mise-managed tool shims are available in this shell when scripts are
+# run directly (for example in CI without `mise exec --`).
+if command -v mise >/dev/null 2>&1; then
+  eval "$(mise activate bash)"
+fi
+
 # Teardown clusters on exit (success or failure) — registered early so
 # clusters are cleaned up even if setup or deploy fails.
 trap '"${SCRIPT_DIR}/teardown.sh"' EXIT

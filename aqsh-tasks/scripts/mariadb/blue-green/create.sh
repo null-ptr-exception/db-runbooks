@@ -20,19 +20,21 @@ fi
 source "${LIB_DIR}/mariadb-blue-green.sh"
 
 OP="blue-green/create"
+BG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INTERNAL_STEP="${INTERNAL_STEP:-}"
 
-BLUE_NAME="${BLUE_NAME:?BLUE_NAME is required}"
-GREEN_NAME="${GREEN_NAME:?GREEN_NAME is required}"
+BLUE_NAME="${BLUE_NAME:-}"
+GREEN_NAME="${GREEN_NAME:-}"
 GREEN_NAMESPACE="${GREEN_NAMESPACE:-$BG_NAMESPACE}"
-GREEN_IMAGE="${GREEN_IMAGE:?GREEN_IMAGE is required}"
+GREEN_IMAGE="${GREEN_IMAGE:-}"
 TARGET_IMAGE="${TARGET_IMAGE:-}"
-PEER_AQSH_URL="${PEER_AQSH_URL:?PEER_AQSH_URL is required}"
-PEER_TOKEN="${PEER_TOKEN:?PEER_TOKEN is required}"
+PEER_AQSH_URL="${PEER_AQSH_URL:-}"
+PEER_TOKEN="${PEER_TOKEN:-}"
 
 BACKUP_NAME="${BACKUP_NAME:-physicalbackup-blue}"
-BACKUP_BUCKET="${BACKUP_BUCKET:?BACKUP_BUCKET is required}"
-BACKUP_PREFIX="${BACKUP_PREFIX:?BACKUP_PREFIX is required}"
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:?BACKUP_ENDPOINT is required}"
+BACKUP_BUCKET="${BACKUP_BUCKET:-}"
+BACKUP_PREFIX="${BACKUP_PREFIX:-}"
+BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-}"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
 BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
@@ -50,6 +52,48 @@ BLUE_HOST="${BLUE_HOST:-peer-db-proxy.db-ops.svc.cluster.local}"
 GREEN_HOST="${GREEN_HOST:-}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 PEER_TIMEOUT="${PEER_TIMEOUT:-900}"
+
+case "$INTERNAL_STEP" in
+  bootstrap)
+    result="$(bg_local_step "$BG_DIR/bootstrap-green.sh" \
+      "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
+      "BLUE_NAME=$BLUE_NAME" "GREEN_IMAGE=$GREEN_IMAGE" \
+      "ROOT_SECRET_NAME=$ROOT_SECRET_NAME" "ROOT_SECRET_KEY=$ROOT_SECRET_KEY" \
+      "STORAGE_SIZE=$STORAGE_SIZE" "REPLICAS=$REPLICAS" \
+      "BACKUP_BUCKET=$BACKUP_BUCKET" "BACKUP_PREFIX=$BACKUP_PREFIX" \
+      "BACKUP_ENDPOINT=$BACKUP_ENDPOINT" "BACKUP_REGION=$BACKUP_REGION" \
+      "BACKUP_ACCESS_SECRET=$BACKUP_ACCESS_SECRET" \
+      "BACKUP_ACCESS_KEY=$BACKUP_ACCESS_KEY" "BACKUP_SECRET_KEY=$BACKUP_SECRET_KEY" \
+      "GTID_DOMAIN_ID=$GTID_DOMAIN_ID" "SERVER_ID_START_INDEX=$SERVER_ID_START_INDEX" \
+      "BLUE_HOST=$BLUE_HOST" "GREEN_HOST=$GREEN_HOST" \
+      "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true")" \
+      || bg_fail "$OP" "internal bootstrap failed" "$BG_LOCAL_ERR"
+    bg_write_result "$(response_ok "$OP" "internal bootstrap completed" "$result")"
+    exit 0
+    ;;
+  upgrade)
+    result="$(bg_local_step "$BG_DIR/upgrade-green.sh" \
+      "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
+      "TARGET_IMAGE=$TARGET_IMAGE" "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true")" \
+      || bg_fail "$OP" "internal upgrade failed" "$BG_LOCAL_ERR"
+    bg_write_result "$(response_ok "$OP" "internal upgrade completed" "$result")"
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    bg_fail "$OP" "internal_step is not supported" "$(jq -n --arg internalStep "$INTERNAL_STEP" '{internalStep: $internalStep}')" 2
+    ;;
+esac
+
+bg_required "blue_name" "$BLUE_NAME" "$OP"
+bg_required "green_name" "$GREEN_NAME" "$OP"
+bg_required "green_image" "$GREEN_IMAGE" "$OP"
+bg_required "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
+bg_required "peer_token" "$PEER_TOKEN" "$OP"
+bg_required "backup_bucket" "$BACKUP_BUCKET" "$OP"
+bg_required "backup_prefix" "$BACKUP_PREFIX" "$OP"
+bg_required "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 
 BG_MDB="$BLUE_NAME"
 bg_init_target
@@ -86,10 +130,11 @@ bootstrap_payload="$(jq -n \
     backup_access_key: $accessKey, backup_secret_key: $secretKey,
     gtid_domain_id: $gtid, server_id_start_index: $serverIdx,
     blue_host: $blueHost, green_host: $greenHost,
+    internal_step: "bootstrap",
     wait_ready: "true", wait_timeout: $timeout, confirm: "true"
   } | with_entries(select(.value != ""))')"
 
-bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/bootstrap-green" \
+bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
   "$bootstrap_payload" "$PEER_TIMEOUT")" \
   || bg_fail "$OP" "bootstrap of green failed" "$BG_PEER_ERR"
 
@@ -97,10 +142,18 @@ bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/
 # and different from the bootstrap image.
 upgrade="{}"
 if [[ -n "$TARGET_IMAGE" && "$TARGET_IMAGE" != "$GREEN_IMAGE" ]]; then
-  upgrade="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/upgrade-green" \
-    "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg image "$TARGET_IMAGE" \
+  upgrade="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
+    "$(jq -n \
+      --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
+      --arg greenImage "$GREEN_IMAGE" --arg image "$TARGET_IMAGE" \
+      --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" \
       --arg timeout "$WAIT_TIMEOUT" \
-      '{namespace: $ns, mdb: $mdb, target_image: $image, wait_ready: "true", wait_timeout: $timeout, confirm: "true"}')" \
+      '{
+        namespace: $ns, green_name: $mdb, blue_name: $blue, green_image: $greenImage,
+        target_image: $image, backup_bucket: $bucket, backup_prefix: $prefix,
+        backup_endpoint: $endpoint, internal_step: "upgrade",
+        wait_ready: "true", wait_timeout: $timeout, confirm: "true"
+      }')" \
     "$PEER_TIMEOUT")" \
     || bg_fail "$OP" "upgrade of green failed" "$BG_PEER_ERR"
 fi

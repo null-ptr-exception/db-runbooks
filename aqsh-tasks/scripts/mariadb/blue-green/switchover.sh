@@ -24,16 +24,63 @@ source "${LIB_DIR}/mariadb-blue-green.sh"
 
 OP="blue-green/switchover"
 
-BLUE_NAME="${BLUE_NAME:?BLUE_NAME is required}"
-GREEN_NAME="${GREEN_NAME:?GREEN_NAME is required}"
+INTERNAL_STEP="${INTERNAL_STEP:-}"
+BLUE_NAME="${BLUE_NAME:-}"
+GREEN_NAME="${GREEN_NAME:-}"
 GREEN_NAMESPACE="${GREEN_NAMESPACE:-$BG_NAMESPACE}"
-PEER_AQSH_URL="${PEER_AQSH_URL:?PEER_AQSH_URL is required}"
-PEER_TOKEN="${PEER_TOKEN:?PEER_TOKEN is required}"
+PEER_AQSH_URL="${PEER_AQSH_URL:-}"
+PEER_TOKEN="${PEER_TOKEN:-}"
 EXPECTED_BLUE_VERSION="${EXPECTED_BLUE_VERSION:-}"
 EXPECTED_GREEN_VERSION="${EXPECTED_GREEN_VERSION:-}"
+EXPECTED_PRIMARY="${EXPECTED_PRIMARY:-}"
+BLUE_GREEN_PRIMARY="${BLUE_GREEN_PRIMARY:-}"
 LAG_THRESHOLD="${LAG_THRESHOLD:-0}"
+CHECK_REPLICATION="${CHECK_REPLICATION:-true}"
 SKIP_WRITE_PROBE="${SKIP_WRITE_PROBE:-false}"
 PEER_TIMEOUT="${PEER_TIMEOUT:-540}"
+PROBE_DATABASE="${PROBE_DATABASE:-bgtest}"
+PROBE_TABLE="${PROBE_TABLE:-events}"
+PROBE_ID="${PROBE_ID:-1}"
+PROBE_NOTE="${PROBE_NOTE:-aqsh-write-probe}"
+
+case "$INTERNAL_STEP" in
+  validate)
+    result="$(bg_local_step "$BG_DIR/validate.sh" \
+      "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
+      "EXPECTED_PRIMARY=$EXPECTED_PRIMARY" "EXPECTED_VERSION=$EXPECTED_GREEN_VERSION" \
+      "CHECK_REPLICATION=$CHECK_REPLICATION" "LAG_THRESHOLD=$LAG_THRESHOLD")" \
+      || bg_fail "$OP" "internal validation failed" "$BG_LOCAL_ERR"
+    bg_write_result "$(response_ok "$OP" "internal validation completed" "$result")"
+    exit 0
+    ;;
+  set-primary)
+    result="$(bg_local_step "$BG_DIR/set-primary.sh" \
+      "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
+      "BLUE_GREEN_PRIMARY=$BLUE_GREEN_PRIMARY" "CONFIRM=true")" \
+      || bg_fail "$OP" "internal primary switch failed" "$BG_LOCAL_ERR"
+    bg_write_result "$(response_ok "$OP" "internal primary switch completed" "$result")"
+    exit 0
+    ;;
+  write-probe)
+    result="$(bg_local_step "$BG_DIR/write-probe.sh" \
+      "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" "CONFIRM=true" \
+      "PROBE_DATABASE=$PROBE_DATABASE" "PROBE_TABLE=$PROBE_TABLE" \
+      "PROBE_ID=$PROBE_ID" "PROBE_NOTE=$PROBE_NOTE")" \
+      || bg_fail "$OP" "internal write probe failed" "$BG_LOCAL_ERR"
+    bg_write_result "$(response_ok "$OP" "internal write probe completed" "$result")"
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    bg_fail "$OP" "internal_step is not supported" "$(jq -n --arg internalStep "$INTERNAL_STEP" '{internalStep: $internalStep}')" 2
+    ;;
+esac
+
+bg_required "blue_name" "$BLUE_NAME" "$OP"
+bg_required "green_name" "$GREEN_NAME" "$OP"
+bg_required "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
+bg_required "peer_token" "$PEER_TOKEN" "$OP"
 
 # Local target is Blue.
 BG_MDB="$BLUE_NAME"
@@ -55,9 +102,9 @@ bg_rollback() {
   # Best-effort restoration of Blue as primary. Each step tolerates failure so
   # the rollback always attempts every undo it can.
   if (( green_promoted )); then
-    bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/set-primary" \
-      "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg primary "$BLUE_NAME" \
-        '{namespace: $ns, mdb: $mdb, primary: $primary, confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null || true
+    bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+      "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" --arg primary "$BLUE_NAME" \
+        '{namespace: $ns, green_name: $mdb, blue_name: $blue, primary: $primary, internal_step: "set-primary", confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null || true
   fi
   if (( blue_demoted )); then
     _kubectl patch "$BG_RESOURCE" "$BLUE_NAME" --type merge \
@@ -74,15 +121,20 @@ fail_with_rollback() {
   bg_fail "$OP" "$message (rolled back Blue)" "$detail"
 }
 
+fail_after_promotion() {
+  local message="$1" detail="$2"
+  bg_fail "$OP" "$message (green remains primary; manual inspection required)" "$detail"
+}
+
 # ---------------------------------------------------------------------------
 # Phase 1: guardrails (read-only; no rollback needed)
 # ---------------------------------------------------------------------------
 
 # Green must be a healthy, caught-up replica of Blue before we switch.
-green_validate="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/validate" \
-  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg primary "$BLUE_NAME" \
+green_validate="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" --arg primary "$BLUE_NAME" \
     --arg version "$EXPECTED_GREEN_VERSION" --arg lag "$LAG_THRESHOLD" \
-    '{namespace: $ns, mdb: $mdb, expected_primary: $primary, expected_version: $version, check_replication: "true", lag_threshold: $lag}')" \
+    '{namespace: $ns, green_name: $mdb, blue_name: $blue, expected_primary: $primary, expected_green_version: $version, check_replication: "true", lag_threshold: $lag, internal_step: "validate"}')" \
   "$PEER_TIMEOUT")" \
   || bg_fail "$OP" "guardrail failed: green is not a healthy caught-up replica" "$BG_PEER_ERR"
 
@@ -115,9 +167,9 @@ bg_local_step "$BG_DIR/set-primary.sh" \
   || fail_with_rollback "failed to demote blue" "$BG_LOCAL_ERR"
 blue_demoted=1
 
-bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/set-primary" \
-  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg primary "$GREEN_NAME" \
-    '{namespace: $ns, mdb: $mdb, primary: $primary, confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null \
+bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" --arg primary "$GREEN_NAME" \
+    '{namespace: $ns, green_name: $mdb, blue_name: $blue, primary: $primary, internal_step: "set-primary", confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null \
   || fail_with_rollback "failed to promote green" "$BG_PEER_ERR"
 green_promoted=1
 
@@ -125,20 +177,20 @@ green_promoted=1
 # Phase 3: verify the new primary
 # ---------------------------------------------------------------------------
 
-green_post="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/validate" \
-  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg primary "$GREEN_NAME" \
+green_post="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" --arg primary "$GREEN_NAME" \
     --arg version "$EXPECTED_GREEN_VERSION" \
-    '{namespace: $ns, mdb: $mdb, expected_primary: $primary, expected_version: $version, check_replication: "false"}')" \
+    '{namespace: $ns, green_name: $mdb, blue_name: $blue, expected_primary: $primary, expected_green_version: $version, check_replication: "false", internal_step: "validate"}')" \
   "$PEER_TIMEOUT")" \
-  || fail_with_rollback "post-switchover validation of green failed" "$BG_PEER_ERR"
+  || fail_after_promotion "post-switchover validation of green failed" "$BG_PEER_ERR"
 
 probe_result="{}"
 if [[ "$SKIP_WRITE_PROBE" != "true" ]]; then
-  probe_result="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/write-probe" \
-    "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" \
-      '{namespace: $ns, mdb: $mdb, confirm: "true", note: "aqsh-switchover-postflight"}')" \
+  probe_result="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+    "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
+      '{namespace: $ns, green_name: $mdb, blue_name: $blue, confirm: "true", note: "aqsh-switchover-postflight", internal_step: "write-probe"}')" \
     "$PEER_TIMEOUT")" \
-    || fail_with_rollback "green did not accept writes after promotion" "$BG_PEER_ERR"
+    || fail_after_promotion "green did not accept writes after promotion" "$BG_PEER_ERR"
 fi
 
 data="$(jq -n \

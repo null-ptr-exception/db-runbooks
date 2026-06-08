@@ -259,16 +259,29 @@ bg_local_step() {
 # shellcheck disable=SC2034
 bg_peer_call_task() {
   local op="$1" peer_url="$2" peer_token="$3" task_path="$4" payload="$5" timeout="${6:-540}"
-  local encoded submit code body task_id resp status elapsed=0
+  local encoded submit code body task_id resp status elapsed=0 curl_rc curl_err
 
   BG_PEER_ERR=""
   encoded="${task_path//\//%2F}"
 
-  submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
+  curl_err="$(mktemp)"
+  if submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
     -X POST "${peer_url}/tasks/${encoded}" \
     -H "Authorization: Bearer ${peer_token}" \
     -H 'Content-Type: application/json' \
-    -d "$payload" 2>/dev/null || true)"
+    -d "$payload" 2>"$curl_err")"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+  if (( curl_rc != 0 )); then
+    BG_PEER_ERR="$(jq -n --arg task "$task_path" --argjson rc "$curl_rc" --arg stderr "$(cat "$curl_err")" \
+      '{peerTask: $task, curlExitCode: $rc, stderr: $stderr}')"
+    rm -f "$curl_err"
+    return 1
+  fi
+  rm -f "$curl_err"
+
   code="$(printf '%s' "$submit" | tail -n1)"
   body="$(printf '%s' "$submit" | sed '$d')"
   if [[ "$code" != "202" ]]; then
@@ -283,9 +296,21 @@ bg_peer_call_task() {
   fi
 
   while (( elapsed < timeout )); do
-    resp="$(curl -sS --connect-timeout 5 -m 15 \
+    curl_err="$(mktemp)"
+    if resp="$(curl -sS --connect-timeout 5 -m 15 \
       -H "Authorization: Bearer ${peer_token}" \
-      "${peer_url}/tasks/${task_id}" 2>/dev/null || true)"
+      "${peer_url}/executions/${task_id}" 2>"$curl_err")"; then
+      curl_rc=0
+    else
+      curl_rc=$?
+    fi
+    if (( curl_rc != 0 )); then
+      BG_PEER_ERR="$(jq -n --arg task "$task_path" --arg id "$task_id" --argjson rc "$curl_rc" --arg stderr "$(cat "$curl_err")" \
+        '{peerTask: $task, taskId: $id, curlExitCode: $rc, stderr: $stderr}')"
+      rm -f "$curl_err"
+      return 1
+    fi
+    rm -f "$curl_err"
     status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
     case "$status" in
       completed)
@@ -333,6 +358,7 @@ bg_set_maintenance() {
     drain="$(bg_bool_json "${DRAIN_CONNECTIONS:-true}")"
     read_only="$(bg_bool_json "${READ_ONLY:-true}")"
     grace="${DRAIN_GRACE_PERIOD_SECONDS:-30}"
+    [[ "$grace" =~ ^[0-9]+$ ]] || return 1
     _kubectl patch "$BG_RESOURCE" "$BG_MDB" --type merge -p "{
       \"spec\": {
         \"maintenance\": {

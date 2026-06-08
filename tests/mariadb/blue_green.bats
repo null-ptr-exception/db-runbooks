@@ -77,30 +77,6 @@ task_result_data() {
   echo "$TASK_RESPONSE" | grep -qi "confirm"
 }
 
-@test "blue-green validate task accepts Green after switchover" {
-  require_blue_green_demo
-
-  submit_blue_green_task "$MARIADB_AQSH_B_URL" "blue-green%2Fvalidate" \
-    '{"namespace":"mariadb-bg","mdb":"mariadb-green","expected_version":"10.11","expected_primary":"mariadb-green"}'
-
-  local data
-  data="$(task_result_data)"
-  run bash -c 'jq -e ".name == \"mariadb-green\" and (.version | startswith(\"10.11\"))" <<<"$1"' _ "$data"
-  assert_success
-}
-
-@test "blue-green write-probe task writes through Green primary" {
-  require_blue_green_demo
-
-  submit_blue_green_task "$MARIADB_AQSH_B_URL" "blue-green%2Fwrite-probe" \
-    '{"namespace":"mariadb-bg","mdb":"mariadb-green","confirm":"true","id":"4","note":"bats-aqsh-after-switchover"}'
-
-  local data
-  data="$(task_result_data)"
-  run bash -c 'jq -e ".database == \"bgtest\" and .table == \"events\" and .id == 4 and .count == 1" <<<"$1"' _ "$data"
-  assert_success
-}
-
 @test "blue-green switchover guardrails block switchover when blue is not primary" {
   require_blue_green_demo
 

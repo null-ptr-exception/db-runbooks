@@ -300,264 +300,6 @@ tasks:
         required: false
         type: string
         default: mariadb
-  blue-green/validate:
-    script: mariadb/blue-green/validate.sh
-    description: "Validate MariaDB version, multiCluster primary, and replication catch-up"
-    timeout: 3m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: resource
-        env: MARIADB_RESOURCE
-        required: false
-        type: string
-        default: mariadb
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-        default: mariadb
-      - name: container
-        env: MARIADB_CONTAINER
-        required: false
-        type: string
-        default: mariadb
-      - name: expected_version
-        env: EXPECTED_VERSION
-        required: false
-        type: string
-        default: ""
-      - name: expected_primary
-        env: EXPECTED_PRIMARY
-        required: false
-        type: string
-        default: ""
-      - name: check_replication
-        env: CHECK_REPLICATION
-        required: false
-        type: string
-        default: "true"
-      - name: lag_threshold
-        env: LAG_THRESHOLD
-        required: false
-        type: string
-        default: "0"
-  blue-green/bootstrap-green:
-    script: mariadb/blue-green/bootstrap-green.sh
-    description: "Bootstrap Green from a Blue PhysicalBackup descriptor"
-    timeout: 12m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-        default: mariadb-green
-      - name: blue_name
-        env: BLUE_NAME
-        required: true
-        type: string
-      - name: green_image
-        env: GREEN_IMAGE
-        required: true
-        type: string
-      - name: root_secret_name
-        env: ROOT_SECRET_NAME
-        required: false
-        type: string
-        default: mariadb
-      - name: root_secret_key
-        env: ROOT_SECRET_KEY
-        required: false
-        type: string
-        default: password
-      - name: storage_size
-        env: STORAGE_SIZE
-        required: false
-        type: string
-        default: 1Gi
-      - name: replicas
-        env: REPLICAS
-        required: false
-        type: string
-        default: "2"
-      - name: backup_bucket
-        env: BACKUP_BUCKET
-        required: true
-        type: string
-      - name: backup_prefix
-        env: BACKUP_PREFIX
-        required: true
-        type: string
-      - name: backup_endpoint
-        env: BACKUP_ENDPOINT
-        required: true
-        type: string
-      - name: backup_region
-        env: BACKUP_REGION
-        required: false
-        type: string
-        default: us-east-1
-      - name: backup_access_secret
-        env: BACKUP_ACCESS_SECRET
-        required: false
-        type: string
-        default: minio
-      - name: backup_access_key
-        env: BACKUP_ACCESS_KEY
-        required: false
-        type: string
-        default: access-key-id
-      - name: backup_secret_key
-        env: BACKUP_SECRET_KEY
-        required: false
-        type: string
-        default: secret-access-key
-      - name: gtid_domain_id
-        env: GTID_DOMAIN_ID
-        required: false
-        type: string
-        default: "1"
-      - name: server_id_start_index
-        env: SERVER_ID_START_INDEX
-        required: false
-        type: string
-        default: "20"
-      - name: blue_host
-        env: BLUE_HOST
-        required: false
-        type: string
-        default: peer-db-proxy.db-ops.svc.cluster.local
-      - name: green_host
-        env: GREEN_HOST
-        required: false
-        type: string
-        default: ""
-      - name: wait_ready
-        env: WAIT_READY
-        required: false
-        type: string
-        default: "true"
-      - name: wait_timeout
-        env: WAIT_TIMEOUT
-        required: false
-        type: string
-        default: 10m
-      - name: confirm
-        env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-  blue-green/upgrade-green:
-    script: mariadb/blue-green/upgrade-green.sh
-    description: "Patch Green to the target MariaDB image and wait for readiness"
-    timeout: 12m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-        default: mariadb-green
-      - name: target_image
-        env: TARGET_IMAGE
-        required: true
-        type: string
-      - name: wait_ready
-        env: WAIT_READY
-        required: false
-        type: string
-        default: "true"
-      - name: wait_timeout
-        env: WAIT_TIMEOUT
-        required: false
-        type: string
-        default: 10m
-      - name: confirm
-        env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-  blue-green/set-primary:
-    script: mariadb/blue-green/set-primary.sh
-    description: "Patch spec.multiCluster.primary for promotion or demotion"
-    timeout: 2m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-        default: mariadb
-      - name: primary
-        env: BLUE_GREEN_PRIMARY
-        required: true
-        type: string
-      - name: confirm
-        env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-  blue-green/write-probe:
-    script: mariadb/blue-green/write-probe.sh
-    description: "Insert a small probe row through the current primary to prove writes work"
-    timeout: 2m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-        default: mariadb
-      - name: confirm
-        env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-      - name: database
-        env: PROBE_DATABASE
-        required: false
-        type: string
-        default: bgtest
-      - name: table
-        env: PROBE_TABLE
-        required: false
-        type: string
-        default: events
-      - name: id
-        env: PROBE_ID
-        required: false
-        type: string
-        default: "1"
-      - name: note
-        env: PROBE_NOTE
-        required: false
-        type: string
-        default: aqsh-write-probe
   blue-green/create:
     script: mariadb/blue-green/create.sh
     description: "Provision Green from a Blue physical backup (backup -> bootstrap -> upgrade) in one task"
@@ -593,12 +335,17 @@ tasks:
         default: ""
       - name: peer_aqsh_url
         env: PEER_AQSH_URL
-        required: true
+        required: false
         type: string
       - name: peer_token
         env: PEER_TOKEN
-        required: true
+        required: false
         type: string
+      - name: internal_step
+        env: INTERNAL_STEP
+        required: false
+        type: string
+        default: ""
       - name: backup_name
         env: BACKUP_NAME
         required: false
@@ -727,12 +474,27 @@ tasks:
         default: ""
       - name: peer_aqsh_url
         env: PEER_AQSH_URL
-        required: true
+        required: false
         type: string
       - name: peer_token
         env: PEER_TOKEN
-        required: true
+        required: false
         type: string
+      - name: internal_step
+        env: INTERNAL_STEP
+        required: false
+        type: string
+        default: ""
+      - name: primary
+        env: BLUE_GREEN_PRIMARY
+        required: false
+        type: string
+        default: ""
+      - name: expected_primary
+        env: EXPECTED_PRIMARY
+        required: false
+        type: string
+        default: ""
       - name: expected_blue_version
         env: EXPECTED_BLUE_VERSION
         required: false
@@ -748,11 +510,36 @@ tasks:
         required: false
         type: string
         default: "0"
+      - name: check_replication
+        env: CHECK_REPLICATION
+        required: false
+        type: string
+        default: "true"
       - name: skip_write_probe
         env: SKIP_WRITE_PROBE
         required: false
         type: string
         default: "false"
+      - name: database
+        env: PROBE_DATABASE
+        required: false
+        type: string
+        default: bgtest
+      - name: table
+        env: PROBE_TABLE
+        required: false
+        type: string
+        default: events
+      - name: id
+        env: PROBE_ID
+        required: false
+        type: string
+        default: "1"
+      - name: note
+        env: PROBE_NOTE
+        required: false
+        type: string
+        default: aqsh-write-probe
       - name: peer_timeout
         env: PEER_TIMEOUT
         required: false

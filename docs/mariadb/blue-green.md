@@ -13,7 +13,7 @@ Deployments (Create / Switchover / Delete / Describe):
 | Task | Runs on | Behavior |
 |------|---------|----------|
 | `blue-green/create` | Blue AQSH | Physical backup of Blue → bootstrap Green → optional upgrade. One call. |
-| `blue-green/switchover` | Blue AQSH | Guardrails (validate + write-probe) → maintenance Blue → demote Blue → promote Green → verify. Rolls back Blue if promotion/verification fails. |
+| `blue-green/switchover` | Blue AQSH | Guardrails (validate + write-probe) → maintenance Blue → demote Blue → promote Green → verify. Rolls back Blue if promotion fails. |
 | `blue-green/delete` | Green AQSH | Delete the Green MariaDB CR, its ExternalMariaDB refs, and optional PhysicalBackup. |
 | `blue-green/status` | either AQSH | Read multiCluster, version, and replication state for one MariaDB. |
 
@@ -29,12 +29,10 @@ Green cluster's kubeconfig. It only needs the peer AQSH URL and a bearer token
 the caller already holds (both clusters validate tokens against the same
 TokenReview backend), supplied as `peer_aqsh_url` and `peer_token`.
 
-The granular tasks that span clusters (`bootstrap-green`, `upgrade-green`,
-`set-primary`, `validate`, `write-probe`) remain registered as the low-level
-substrate the orchestrators call over HTTP, and are documented under
-[Low-level tasks](#low-level-tasks) for recovery and debugging. The two
-purely-local steps (physical backup, maintenance) are not separate tasks — they
-are folded into `create` and `switchover` respectively.
+The granular bootstrap, upgrade, validation, primary switch, and write-probe
+steps are internal orchestration details. The public AQSH task API intentionally
+stays at Create / Switchover / Delete / Status so callers cannot accidentally
+skip guardrails or run the steps out of order.
 
 ## Prerequisites
 
@@ -100,8 +98,9 @@ result includes the backup descriptor, bootstrap, and upgrade sub-results.
 
 Run on the Blue AQSH. The task enforces guardrails before mutating anything,
 performs the switchover in the safe order (demote Blue before promoting Green to
-avoid a dual-primary intent), and rolls Blue back if promotion or verification
-fails.
+avoid a dual-primary intent), and rolls Blue back if promotion fails. If
+post-promotion verification fails, Green remains primary and the task reports
+the failure for manual inspection.
 
 ```bash
 curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fswitchover" \
@@ -170,91 +169,4 @@ Successful switchover has these properties:
 - Blue is in maintenance/cordoned state.
 - Blue `currentMultiClusterPrimary` is `mariadb-green`.
 - Green is running and `currentMultiClusterPrimary` is `mariadb-green`.
-- Green accepts the `blue-green/write-probe` task.
-
----
-
-## Low-level tasks
-
-The orchestrators above are built from these granular tasks. They are the same
-single-cluster building blocks and can be called directly for recovery,
-debugging, or step-by-step runs. Each step must complete before the next is
-started; they are not a cross-cluster atomic transaction.
-
-### Provision Green, step by step
-
-Provisioning the Blue physical backup is folded into `blue-green/create` (it
-runs on the Blue cluster as the first step). To bootstrap Green by hand, point
-`backup_bucket` / `backup_prefix` / `backup_endpoint` at an existing Blue
-physical backup, then call bootstrap on cluster B:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fbootstrap-green" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "namespace": "mariadb-bg",
-    "mdb": "mariadb-green",
-    "blue_name": "mariadb-blue",
-    "green_image": "mariadb:10.6",
-    "backup_bucket": "multi-cluster",
-    "backup_prefix": "mariadb-bg/blue",
-    "backup_endpoint": "172.19.0.16:30092",
-    "confirm": "true"
-  }'
-```
-
-Upgrade Green after bootstrap:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fupgrade-green" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "namespace": "mariadb-bg",
-    "mdb": "mariadb-green",
-    "target_image": "mariadb:10.11",
-    "confirm": "true"
-  }'
-```
-
-### Switchover, step by step
-
-Validate Blue and Green before switchover:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fvalidate" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-blue", "expected_version": "10.6", "expected_primary": "mariadb-blue"}'
-
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fvalidate" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-green", "expected_version": "10.11", "expected_primary": "mariadb-blue"}'
-```
-
-Putting Blue into maintenance/read-only mode is folded into
-`blue-green/switchover` (with automatic rollback). When running by hand, demote
-Blue so it follows Green, then promote Green:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fset-primary" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-blue", "primary": "mariadb-green", "confirm": "true"}'
-
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fset-primary" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-green", "primary": "mariadb-green", "confirm": "true"}'
-```
-
-Verify Green accepts writes after switchover:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fwrite-probe" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-green", "confirm": "true", "id": "2", "note": "written-after-switchover"}'
-```
+- The post-switchover write probe inside `blue-green/switchover` succeeds.

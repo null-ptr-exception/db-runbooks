@@ -312,10 +312,124 @@ bg_peer_call_task() {
   return 1
 }
 
-# bg_require <name> <value> <op>  (alias of bg_required for orchestrator readability)
 bg_validate_url() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
     bg_fail "$op" "${name} must be an http(s) URL" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
   fi
+}
+
+# bg_set_maintenance <true|false>
+# Toggle maintenance/read-only mode on the local-target MariaDB ($BG_MDB).
+# Reads CORDON / DRAIN_CONNECTIONS / READ_ONLY / DRAIN_GRACE_PERIOD_SECONDS for
+# the enable case (sensible defaults if unset). Echoes status data on success
+# and returns 0; returns 1 if the patch fails (does NOT exit, so the switchover
+# orchestrator can roll back).
+bg_set_maintenance() {
+  local enabled="$1"
+  if [[ "$enabled" == "true" ]]; then
+    local cordon drain read_only grace
+    cordon="$(bg_bool_json "${CORDON:-true}")"
+    drain="$(bg_bool_json "${DRAIN_CONNECTIONS:-true}")"
+    read_only="$(bg_bool_json "${READ_ONLY:-true}")"
+    grace="${DRAIN_GRACE_PERIOD_SECONDS:-30}"
+    _kubectl patch "$BG_RESOURCE" "$BG_MDB" --type merge -p "{
+      \"spec\": {
+        \"maintenance\": {
+          \"enabled\": true,
+          \"cordon\": ${cordon},
+          \"drainConnections\": ${drain},
+          \"drainGracePeriodSeconds\": ${grace},
+          \"readOnly\": ${read_only}
+        }
+      }
+    }" >/dev/null || return 1
+  else
+    _kubectl patch "$BG_RESOURCE" "$BG_MDB" --type merge \
+      -p '{"spec":{"maintenance":{"enabled":false}}}' >/dev/null || return 1
+  fi
+  bg_status_data "$(bg_get_mariadb_json)"
+}
+
+# bg_create_physical_backup <op>
+# Create a PhysicalBackup of the local-target MariaDB ($BG_MDB) and wait for it
+# to complete. Reads BACKUP_* and WAIT_TIMEOUT from the caller's scope. On
+# success sets BG_BACKUP_DATA to the bootstrap descriptor (object) and returns
+# 0. Validation and not-Ready failures call bg_fail (exit). Folds the former
+# blue-green/create-physical-backup task into the create orchestrator.
+# BG_BACKUP_DATA is read by the create orchestrator that sources this lib.
+# shellcheck disable=SC2034
+bg_create_physical_backup() {
+  local op="${1:-blue-green/create}"
+
+  bg_validate_dns_label "namespace" "$BG_NAMESPACE" "$op"
+  bg_validate_dns_label "mariadb" "$BG_MDB" "$op"
+  bg_validate_dns_label "backup_name" "$BACKUP_NAME" "$op"
+  bg_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$op"
+  bg_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$op"
+  bg_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$op"
+  bg_validate_region "backup_region" "$BACKUP_REGION" "$op"
+  bg_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$op"
+  bg_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$op"
+  bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$op"
+  bg_validate_enum "backup_target" "$BACKUP_TARGET" "$op" Primary Replica PreferReplica
+  bg_validate_enum "backup_compression" "$BACKUP_COMPRESSION" "$op" bzip2 gzip none
+
+  local source_status ready_status
+  source_status="$(bg_status_data "$(bg_get_mariadb_json)")"
+  ready_status="$(jq -r '.conditions[]? | select(.type == "Ready") | .status' <<<"$source_status" | tail -1)"
+  if [[ "$ready_status" != "True" ]]; then
+    bg_fail "$op" "source MariaDB must be Ready before creating a PhysicalBackup" "$source_status"
+  fi
+
+  _kubectl apply -f - <<EOF
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: PhysicalBackup
+metadata:
+  name: ${BACKUP_NAME}
+  namespace: ${BG_NAMESPACE}
+spec:
+  mariaDbRef:
+    name: ${BG_MDB}
+  schedule:
+    cron: "0 * * * *"
+    immediate: true
+  target: ${BACKUP_TARGET}
+  compression: ${BACKUP_COMPRESSION}
+  storage:
+    s3:
+      bucket: ${BACKUP_BUCKET}
+      prefix: ${BACKUP_PREFIX}
+      endpoint: ${BACKUP_ENDPOINT}
+      region: ${BACKUP_REGION}
+      accessKeyIdSecretKeyRef:
+        name: ${BACKUP_ACCESS_SECRET}
+        key: ${BACKUP_ACCESS_KEY}
+      secretAccessKeySecretKeyRef:
+        name: ${BACKUP_ACCESS_SECRET}
+        key: ${BACKUP_SECRET_KEY}
+EOF
+
+  _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" --timeout="$WAIT_TIMEOUT" >/dev/null
+
+  BG_BACKUP_DATA="$(jq -n \
+    --arg namespace "$BG_NAMESPACE" \
+    --arg source "$BG_MDB" \
+    --arg backupName "$BACKUP_NAME" \
+    --arg bucket "$BACKUP_BUCKET" \
+    --arg prefix "$BACKUP_PREFIX" \
+    --arg endpoint "$BACKUP_ENDPOINT" \
+    --arg region "$BACKUP_REGION" \
+    --argjson sourceStatus "$source_status" \
+    '{
+      namespace: $namespace,
+      source: $source,
+      backupName: $backupName,
+      bucket: $bucket,
+      prefix: $prefix,
+      endpoint: $endpoint,
+      region: $region,
+      backupContentType: "Physical",
+      sourceStatus: $sourceStatus
+    }')"
 }

@@ -29,11 +29,12 @@ Green cluster's kubeconfig. It only needs the peer AQSH URL and a bearer token
 the caller already holds (both clusters validate tokens against the same
 TokenReview backend), supplied as `peer_aqsh_url` and `peer_token`.
 
-The eight granular tasks (`create-physical-backup`, `bootstrap-green`,
-`upgrade-green`, `validate`, `maintenance`, `set-primary`, `write-probe`,
-`status`) remain registered as the low-level substrate the orchestrators call,
-and are documented under [Low-level tasks](#low-level-tasks) for recovery and
-debugging.
+The granular tasks that span clusters (`bootstrap-green`, `upgrade-green`,
+`set-primary`, `validate`, `write-probe`) remain registered as the low-level
+substrate the orchestrators call over HTTP, and are documented under
+[Low-level tasks](#low-level-tasks) for recovery and debugging. The two
+purely-local steps (physical backup, maintenance) are not separate tasks — they
+are folded into `create` and `switchover` respectively.
 
 ## Prerequisites
 
@@ -182,37 +183,10 @@ started; they are not a cross-cluster atomic transaction.
 
 ### Provision Green, step by step
 
-Create a physical backup from Blue on cluster A:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fcreate-physical-backup" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "namespace": "mariadb-bg",
-    "mdb": "mariadb-blue",
-    "backup_name": "physicalbackup-blue",
-    "backup_bucket": "multi-cluster",
-    "backup_prefix": "mariadb-bg/blue",
-    "backup_endpoint": "172.19.0.16:30092",
-    "confirm": "true"
-  }'
-```
-
-The completed result includes the contract that links Green to Blue:
-
-```json
-{
-  "source": "mariadb-blue",
-  "backupName": "physicalbackup-blue",
-  "bucket": "multi-cluster",
-  "prefix": "mariadb-bg/blue",
-  "endpoint": "172.19.0.16:30092",
-  "backupContentType": "Physical"
-}
-```
-
-Bootstrap Green on cluster B from that descriptor:
+Provisioning the Blue physical backup is folded into `blue-green/create` (it
+runs on the Blue cluster as the first step). To bootstrap Green by hand, point
+`backup_bucket` / `backup_prefix` / `backup_endpoint` at an existing Blue
+physical backup, then call bootstrap on cluster B:
 
 ```bash
 curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fbootstrap-green" \
@@ -260,16 +234,9 @@ curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fvalidate" \
   -d '{"namespace": "mariadb-bg", "mdb": "mariadb-green", "expected_version": "10.11", "expected_primary": "mariadb-blue"}'
 ```
 
-Put Blue into maintenance/read-only mode:
-
-```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fmaintenance" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-blue", "confirm": "true"}'
-```
-
-Demote Blue so it follows Green, then promote Green:
+Putting Blue into maintenance/read-only mode is folded into
+`blue-green/switchover` (with automatic rollback). When running by hand, demote
+Blue so it follows Green, then promote Green:
 
 ```bash
 curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fset-primary" \

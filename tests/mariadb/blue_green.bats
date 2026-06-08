@@ -59,20 +59,22 @@ task_result_data() {
   assert_success
 }
 
-@test "blue-green create-physical-backup returns bootstrap descriptor" {
+@test "blue-green create requires confirm" {
   require_blue_green_demo
-  if ! kubectl --context kind-cluster-dbs-a -n mariadb-bg get mariadb mariadb-blue -o json \
-    | jq -e '.status.conditions[]? | select(.type == "Ready" and .status == "True")' >/dev/null; then
-    skip "mariadb-blue is not Ready; physical backup provisioning is only tested before switchover"
-  fi
 
-  submit_blue_green_task "$MARIADB_AQSH_A_URL" "blue-green%2Fcreate-physical-backup" \
-    '{"namespace":"mariadb-bg","mdb":"mariadb-blue","backup_name":"physicalbackup-bats","backup_bucket":"multi-cluster","backup_prefix":"blue-bats","backup_endpoint":"'"${CLUSTER_MINIO_IP}"':30092","confirm":"true"}'
+  # No confirm -> the orchestrator must refuse before provisioning anything.
+  http_post "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fcreate" \
+    "$(jq -nc --arg url "$MARIADB_AQSH_B_URL" --arg tok "$TOKEN" \
+      '{namespace:"mariadb-bg",blue_name:"mariadb-blue",green_name:"mariadb-green",green_image:"mariadb:10.6",peer_aqsh_url:$url,peer_token:$tok,backup_bucket:"multi-cluster",backup_prefix:"blue-bats",backup_endpoint:"minio:30092"}')"
+  assert_equal "$HTTP_CODE" "202"
 
-  local data
-  data="$(task_result_data)"
-  run bash -c 'jq -e ".source == \"mariadb-blue\" and .backupName == \"physicalbackup-bats\" and .backupContentType == \"Physical\"" <<<"$1"' _ "$data"
-  assert_success
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "no task id: $HTTP_BODY" >&2; return 1; }
+
+  wait_for_task "$MARIADB_AQSH_A_URL" "$task_id" 60 || true
+  assert_equal "$(echo "$TASK_RESPONSE" | jq -r '.status')" "failed"
+  echo "$TASK_RESPONSE" | grep -qi "confirm"
 }
 
 @test "blue-green validate task accepts Green after switchover" {

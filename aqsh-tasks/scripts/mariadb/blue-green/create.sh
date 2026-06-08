@@ -15,7 +15,6 @@ if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
 fi
-BG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # shellcheck source=aqsh-tasks/lib/mariadb-blue-green.sh
 source "${LIB_DIR}/mariadb-blue-green.sh"
@@ -63,15 +62,9 @@ bg_validate_image "green_image" "$GREEN_IMAGE" "$OP"
 [[ -n "$TARGET_IMAGE" ]] && bg_validate_image "target_image" "$TARGET_IMAGE" "$OP"
 bg_validate_url "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 
-# Step 1: physical backup of Blue (local cluster).
-backup="$(bg_local_step "$BG_DIR/create-physical-backup.sh" \
-  "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$BLUE_NAME" "CONFIRM=true" \
-  "BACKUP_NAME=$BACKUP_NAME" "BACKUP_BUCKET=$BACKUP_BUCKET" "BACKUP_PREFIX=$BACKUP_PREFIX" \
-  "BACKUP_ENDPOINT=$BACKUP_ENDPOINT" "BACKUP_REGION=$BACKUP_REGION" \
-  "BACKUP_ACCESS_SECRET=$BACKUP_ACCESS_SECRET" "BACKUP_ACCESS_KEY=$BACKUP_ACCESS_KEY" \
-  "BACKUP_SECRET_KEY=$BACKUP_SECRET_KEY" "BACKUP_TARGET=$BACKUP_TARGET" \
-  "BACKUP_COMPRESSION=$BACKUP_COMPRESSION" "WAIT_TIMEOUT=$WAIT_TIMEOUT")" \
-  || bg_fail "$OP" "physical backup of blue failed" "$BG_LOCAL_ERR"
+# Step 1: physical backup of Blue (local cluster). Sets BG_BACKUP_DATA.
+bg_create_physical_backup "$OP"
+backup="$BG_BACKUP_DATA"
 
 # Step 2: bootstrap Green from that backup (peer cluster).
 bootstrap_payload="$(jq -n \

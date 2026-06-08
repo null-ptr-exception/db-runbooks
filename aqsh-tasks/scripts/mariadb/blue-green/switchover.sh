@@ -64,8 +64,7 @@ bg_rollback() {
       -p "{\"spec\":{\"multiCluster\":{\"primary\":$(bg_json_string "$BLUE_NAME")}}}" >/dev/null 2>&1 || true
   fi
   if (( blue_maintenance )); then
-    _kubectl patch "$BG_RESOURCE" "$BLUE_NAME" --type merge \
-      -p '{"spec":{"maintenance":{"enabled":false}}}' >/dev/null 2>&1 || true
+    bg_set_maintenance false >/dev/null 2>&1 || true
   fi
 }
 
@@ -106,9 +105,8 @@ fi
 # Phase 2: execute (state changes; roll back on any failure)
 # ---------------------------------------------------------------------------
 
-bg_local_step "$BG_DIR/maintenance.sh" \
-  "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$BLUE_NAME" "CONFIRM=true" >/dev/null \
-  || fail_with_rollback "failed to put blue into maintenance" "$BG_LOCAL_ERR"
+bg_set_maintenance true >/dev/null \
+  || fail_with_rollback "failed to put blue into maintenance" '{"step":"maintenance"}'
 blue_maintenance=1
 
 bg_local_step "$BG_DIR/set-primary.sh" \

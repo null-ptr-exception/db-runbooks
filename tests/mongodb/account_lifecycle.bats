@@ -207,3 +207,97 @@ _submit_task() {
 
   rm -rf "$gnupg_home"
 }
+
+@test "reset-password encrypted payload can be decrypted and used" {
+  if ! command -v gpg >/dev/null 2>&1; then
+    skip "gpg is required for encrypted payload test"
+  fi
+
+  _cleanup_account "qa_reset_encrypt_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_encrypt_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local gnupg_home recipient key_block_b64 payload
+  local result mode ciphertext decrypted ping_ok
+
+  gnupg_home=$(mktemp -d)
+  chmod 700 "$gnupg_home"
+  recipient="bats-reset-encrypted@example.com"
+
+  GNUPGHOME="$gnupg_home" gpg --batch --pinentry-mode loopback --passphrase '' \
+    --quick-generate-key "$recipient" rsa3072 encr 1d >/dev/null 2>&1
+
+  key_block_b64=$(GNUPGHOME="$gnupg_home" gpg --batch --armor --export "$recipient" | base64 | tr -d '\n')
+
+  payload=$(jq -nc --arg pub "$key_block_b64" '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_encrypt_user",
+    temp_days: "7",
+    password_delivery_mode: "encrypted_payload",
+    recipient_pgp_pubkey: $pub
+  }')
+
+  _submit_task "reset-password" "$payload"
+
+  result="$(_task_result_data)"
+  mode=$(echo "$result" | jq -r '.delivery_payload.mode // empty')
+  [ "$mode" = "encrypted_payload" ]
+
+  ciphertext=$(echo "$result" | jq -r '.delivery_payload.ciphertext // empty')
+  [ -n "$ciphertext" ]
+
+  decrypted=$(printf '%s' "$ciphertext" | GNUPGHOME="$gnupg_home" gpg --batch --decrypt 2>/dev/null)
+  [ -n "$decrypted" ]
+
+  ping_ok=$(_mongo_exec_as "admin" "qa_reset_encrypt_user" "$decrypted" "db.adminCommand({ping:1}).ok" | tail -1)
+  [ "$ping_ok" = "1" ]
+
+  rm -rf "$gnupg_home"
+}
+
+@test "delete-account blocks terminal or error policy state" {
+  _cleanup_account "qa_delete_blocked_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_delete_blocked_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').updateOne({username:'qa_delete_blocked_user', auth_db:'admin'}, {\$set:{status:'ERROR', updated_at:new Date().toISOString()}})"
+
+  local payload task_id
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_delete_blocked_user",
+    delete_reason: "blocked-state-test"
+  }')
+
+  http_post "${MONGODB_AQSH_URL}/tasks/delete-account" "$payload"
+  assert_equal "$HTTP_CODE" "202"
+
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [ -n "$task_id" ]
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" || true
+
+  local result reason
+  result="$(_task_result_data)"
+  reason=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason" = "STATE_BLOCKED" ]
+}

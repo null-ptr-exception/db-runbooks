@@ -17,7 +17,7 @@ ACCOUNT_USERNAME="${ACCOUNT_USERNAME:?ACCOUNT_USERNAME is required}"
 ACCOUNT_ROLES_JSON="${ACCOUNT_ROLES_JSON:?ACCOUNT_ROLES_JSON is required}"
 
 if ! echo "$ACCOUNT_ROLES_JSON" | jq -e 'type == "array" and length > 0 and all(.[]; has("role") and has("db"))' >/dev/null 2>&1; then
-  fail_task "INVALID_INPUT" "account_roles_json must be a non-empty role array"
+  fail_task "INVALID_INPUT" "roles_json must be a non-empty role array"
 fi
 
 precheck_rc=0
@@ -43,7 +43,7 @@ _mongosh_eval "admin" "$js" >/dev/null 2>&1 || fail_task "UPDATE_ROLES_FAILED" "
 
 now_utc="$(iso_utc_now)"
 policy_set=$(jq -nc --argjson roles "$ACCOUNT_ROLES_JSON" --arg updated_at "$now_utc" '{roles:$roles, updated_at:$updated_at}')
-mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || true
+mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
 write_task_result "$(jq -n \
   --arg status "UPDATED" \

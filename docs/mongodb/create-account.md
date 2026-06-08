@@ -145,6 +145,13 @@ Set policy to `PERMANENT`, clear expiry enforcement path, and persist force meta
 
 Rotate password for the same account and return a fresh delivery payload. By default blocks `CHANGED` and `PERMANENT` unless `reset_override=true`.
 
+Delivery mode behavior:
+
+1. Supports both `one_time_plaintext` and `encrypted_payload`.
+2. When `password_delivery_mode=encrypted_payload`, `recipient_pgp_pubkey` is required.
+3. Invalid `password_delivery_mode` fails input validation before password mutation.
+4. `initial_cred_fingerprint` is preserved when already present; `last_cred_fingerprint` is updated to the rotated credential fingerprint.
+
 ### `reconcile-expiry`
 
 Cron-friendly reconciliation:
@@ -156,7 +163,7 @@ Cron-friendly reconciliation:
 
 ## CronJob Patch and Operations
 
-Use a Kubernetes CronJob in `db-ops` to invoke reconcile task periodically.
+Use a Kubernetes CronJob in `mongo-1` to invoke reconcile task periodically.
 
 Example patch workflow:
 
@@ -168,13 +175,13 @@ Example patch workflow:
 Manual trigger example:
 
 ```bash
-kubectl --context kind-cluster-dbs -n db-ops create job --from=cronjob/mongo-account-reconciler mongo-account-reconciler-manual-$(date +%s)
+kubectl --context kind-cluster-dbs -n mongo-1 create job --from=cronjob/mongo-account-reconciler mongo-account-reconciler-manual-$(date +%s)
 ```
 
 Inspect logs:
 
 ```bash
-kubectl --context kind-cluster-dbs -n db-ops logs job/<job-name>
+kubectl --context kind-cluster-dbs -n mongo-1 logs job/<job-name>
 ```
 
 Verification checks:

@@ -85,6 +85,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -190,6 +191,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -235,6 +237,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -280,6 +283,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -329,6 +333,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -373,6 +378,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -483,6 +489,11 @@ tasks:
         required: false
         type: string
         default: one_time_plaintext
+      - name: recipient_pgp_pubkey
+        env: RECIPIENT_PGP_PUBKEY
+        required: false
+        type: string
+        default: ""
   reconcile-expiry:
     script: mongodb/account/reconcile-expiry.sh
     description: "Reconcile expired temporary accounts"
@@ -493,6 +504,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME

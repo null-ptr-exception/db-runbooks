@@ -24,11 +24,18 @@ case "$precheck_rc" in
   2) fail_task "NOT_FOUND" "account not found" ;;
 esac
 
+policy_status=""
+if policy_status=$(mongo_policy_status "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" 2>/dev/null); then
+  if [[ "$policy_status" == "EXPIRED_DELETED" || "$policy_status" == "CANCELLED" || "$policy_status" == "ERROR" ]]; then
+    fail_task "STATE_BLOCKED" "cannot delete account in terminal/error policy state"
+  fi
+fi
+
 mongo_drop_user "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" >/dev/null 2>&1 || fail_task "DELETE_FAILED" "cannot drop account"
 
 now_utc="$(iso_utc_now)"
 policy_set=$(jq -nc --arg status "CANCELLED" --arg updated_at "$now_utc" --arg deleted_at "$now_utc" --arg delete_reason "$DELETE_REASON" '{status:$status, updated_at:$updated_at, deleted_at:$deleted_at, delete_reason:$delete_reason}')
-mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || true
+mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
 write_task_result "$(jq -n \
   --arg status "DELETED" \

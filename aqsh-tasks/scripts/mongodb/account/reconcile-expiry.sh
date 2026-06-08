@@ -40,7 +40,7 @@ while IFS= read -r row; do
   if ! mongo_account_exists "$auth_db" "$username"; then
     now_utc=$(iso_utc_now)
     set_json=$(jq -nc --arg status "EXPIRED_DELETED" --arg deleted_at "$now_utc" --arg updated_at "$now_utc" --arg reason "USER_NOT_FOUND_AT_RECONCILE" '{status:$status, deleted_at:$deleted_at, updated_at:$updated_at, delete_reason:$reason}')
-    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || true
+    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot persist reconciled status"
     deleted=$((deleted + 1))
     continue
   fi
@@ -50,18 +50,18 @@ while IFS= read -r row; do
 
   if [[ -n "$current_fp" && -n "$initial_fp" && "$current_fp" != "$initial_fp" ]]; then
     set_json=$(jq -nc --arg status "CHANGED" --arg changed_at "$now_utc" --arg updated_at "$now_utc" --arg last_fp "$current_fp" '{status:$status, changed_at:$changed_at, updated_at:$updated_at, last_cred_fingerprint:$last_fp}')
-    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || true
+    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot persist changed status"
     changed=$((changed + 1))
     continue
   fi
 
   if mongo_drop_user "$auth_db" "$username" >/dev/null 2>&1; then
     set_json=$(jq -nc --arg status "EXPIRED_DELETED" --arg deleted_at "$now_utc" --arg updated_at "$now_utc" --arg reason "EXPIRED_UNCHANGED_PASSWORD" '{status:$status, deleted_at:$deleted_at, updated_at:$updated_at, delete_reason:$reason}')
-    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || true
+    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot persist deleted status"
     deleted=$((deleted + 1))
   else
     set_json=$(jq -nc --arg status "ERROR" --arg updated_at "$now_utc" --arg code "DELETE_FAILED" '{status:$status, updated_at:$updated_at, last_error_code:$code}')
-    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || true
+    mongo_policy_upsert "$auth_db" "$username" "$set_json" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot persist error status"
     skipped=$((skipped + 1))
   fi
 done < <(echo "$expired_json" | jq -c '.[]')

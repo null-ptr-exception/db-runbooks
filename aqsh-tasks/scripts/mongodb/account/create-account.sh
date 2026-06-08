@@ -37,7 +37,11 @@ if ! [[ "$TEMP_DAYS" =~ ^[0-9]+$ ]] || [[ "$TEMP_DAYS" -lt 1 ]]; then
 fi
 
 if ! echo "$ACCOUNT_ROLES_JSON" | jq -e 'type == "array" and length > 0 and all(.[]; has("role") and has("db"))' >/dev/null 2>&1; then
-  fail_task "INVALID_INPUT" "account_roles_json must be a non-empty role array"
+  fail_task "INVALID_INPUT" "roles_json must be a non-empty role array"
+fi
+
+if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" && "$PASSWORD_DELIVERY_MODE" != "encrypted_payload" ]]; then
+  fail_task "INVALID_INPUT" "unsupported password_delivery_mode"
 fi
 
 generate_password() {
@@ -137,6 +141,10 @@ fi
 
 if bool_enabled "$DRY_RUN" && bool_enabled "$CONFIRM"; then
   fail_task "INVALID_INPUT" "confirm=true with dry_run=true is not supported"
+fi
+
+if ! bool_enabled "$DRY_RUN" && ! bool_enabled "$CONFIRM"; then
+  fail_task "INVALID_INPUT" "confirm=true is required when dry_run=false"
 fi
 
 mongo_account_set_connection_from_root_secret "$DB_NAMESPACE" "$MONGO_STS_NAME" "$MONGO_CRED_SECRET" "$MONGO_CRED_USER_KEY" "$MONGO_CRED_PASS_KEY" \

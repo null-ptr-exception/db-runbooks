@@ -20,10 +20,62 @@ PASSWORD_LENGTH="${PASSWORD_LENGTH:-24}"
 PASSWORD_SPECIAL_CHARS="${PASSWORD_SPECIAL_CHARS:-!@#%^*_-+=.}"
 PASSWORD_SPECIAL_MAX="${PASSWORD_SPECIAL_MAX:-4}"
 PASSWORD_DELIVERY_MODE="${PASSWORD_DELIVERY_MODE:-one_time_plaintext}"
+RECIPIENT_PGP_PUBKEY="${RECIPIENT_PGP_PUBKEY:-}"
 
 if ! [[ "$TEMP_DAYS" =~ ^[0-9]+$ ]] || [[ "$TEMP_DAYS" -lt 1 ]]; then
   fail_task "INVALID_INPUT" "temp_days must be a positive integer"
 fi
+
+if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" && "$PASSWORD_DELIVERY_MODE" != "encrypted_payload" ]]; then
+  fail_task "INVALID_INPUT" "unsupported password_delivery_mode"
+fi
+
+encrypt_password_payload() {
+  local plaintext_password="${1:?password is required}"
+  local pubkey_input="${2:?recipient pgp public key is required}"
+  local gnupg_home raw_import_ok fingerprint ciphertext decoded_key
+
+  gnupg_home=$(mktemp -d)
+  chmod 700 "$gnupg_home"
+
+  export GNUPGHOME="$gnupg_home"
+
+  if printf '%s' "$pubkey_input" | gpg --batch --import >/dev/null 2>&1; then
+    raw_import_ok="true"
+  else
+    raw_import_ok="false"
+  fi
+
+  if [[ "$raw_import_ok" != "true" ]]; then
+    decoded_key=$(printf '%s' "$pubkey_input" | base64 -d 2>/dev/null || true)
+    if [[ -z "$decoded_key" ]]; then
+      rm -rf "$gnupg_home"
+      return 1
+    fi
+    printf '%s' "$decoded_key" | gpg --batch --import >/dev/null 2>&1 || {
+      rm -rf "$gnupg_home"
+      return 1
+    }
+  fi
+
+  fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10; exit}')
+  if [[ -z "$fingerprint" ]]; then
+    rm -rf "$gnupg_home"
+    return 1
+  fi
+
+  ciphertext=$(printf '%s' "$plaintext_password" | gpg --batch --yes --trust-model always --armor --recipient "$fingerprint" --encrypt 2>/dev/null) || {
+    rm -rf "$gnupg_home"
+    return 1
+  }
+
+  rm -rf "$gnupg_home"
+
+  jq -nc \
+    --arg recipient_key_fingerprint "$fingerprint" \
+    --arg ciphertext "$ciphertext" \
+    '{mode:"encrypted_payload", recipient_key_fingerprint:$recipient_key_fingerprint, content_type:"application/pgp-encrypted", ciphertext:$ciphertext}'
+}
 
 generate_password() {
   python3 - "$PASSWORD_LENGTH" "$PASSWORD_SPECIAL_CHARS" "$PASSWORD_SPECIAL_MAX" <<'PY'
@@ -74,23 +126,39 @@ if policy_status=$(mongo_policy_status "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" 2>
   fi
 fi
 
+if [[ "$PASSWORD_DELIVERY_MODE" == "encrypted_payload" ]] && [[ -z "$RECIPIENT_PGP_PUBKEY" ]]; then
+  fail_task "INVALID_INPUT" "recipient_pgp_pubkey is required when password_delivery_mode=encrypted_payload"
+fi
+
 new_password="$(generate_password)"
 mongo_update_user_password "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$new_password" >/dev/null 2>&1 || fail_task "RESET_FAILED" "cannot update account password"
 
 new_fingerprint=$(mongo_account_credentials_fingerprint "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME") || fail_task "FINGERPRINT_FAILED" "cannot compute credentials fingerprint"
 now_utc="$(iso_utc_now)"
 expires_at="$(iso_utc_after_days "$TEMP_DAYS")"
+initial_fingerprint="$new_fingerprint"
+if [[ -n "$policy_status" ]]; then
+  existing_initial=$(mongo_policy_get_json "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" | jq -r '.initial_cred_fingerprint // empty' 2>/dev/null || true)
+  if [[ -n "$existing_initial" ]]; then
+    initial_fingerprint="$existing_initial"
+  fi
+fi
 policy_set=$(jq -nc \
   --arg status "ACTIVE" \
   --arg updated_at "$now_utc" \
   --arg expires_at "$expires_at" \
-  --arg initial_cred_fingerprint "$new_fingerprint" \
+  --arg initial_cred_fingerprint "$initial_fingerprint" \
   --arg last_cred_fingerprint "$new_fingerprint" \
   '{status:$status, updated_at:$updated_at, expires_at:$expires_at, initial_cred_fingerprint:$initial_cred_fingerprint, last_cred_fingerprint:$last_cred_fingerprint}')
 mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
-if [[ "$PASSWORD_DELIVERY_MODE" == "encrypted_payload" ]]; then
-  fail_task "DELIVERY_MODE_UNSUPPORTED" "encrypted_payload mode is not configured in this implementation"
+delivery_payload_json=""
+if [[ "$PASSWORD_DELIVERY_MODE" == "one_time_plaintext" ]]; then
+  delivery_payload_json=$(jq -nc --arg password "$new_password" '{mode:"one_time_plaintext", password:$password}')
+else
+  if ! delivery_payload_json=$(encrypt_password_payload "$new_password" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null); then
+    fail_task "DELIVERY_ENCRYPT_FAILED" "failed to encrypt password payload with recipient public key"
+  fi
 fi
 
 write_task_result "$(jq -n \
@@ -101,5 +169,5 @@ write_task_result "$(jq -n \
   --arg auth_db "$ACCOUNT_AUTH_DB" \
   --arg username "$ACCOUNT_USERNAME" \
   --arg expires_at "$expires_at" \
-  --arg password "$new_password" \
-  '{status:$status, reason_code:$reason_code, summary:$summary, namespace:$namespace, auth_db:$auth_db, username:$username, expires_at:$expires_at, delivery_payload:{mode:"one_time_plaintext", password:$password}}')"
+  --argjson delivery_payload "$delivery_payload_json" \
+  '{status:$status, reason_code:$reason_code, summary:$summary, namespace:$namespace, auth_db:$auth_db, username:$username, expires_at:$expires_at, delivery_payload:$delivery_payload}')"

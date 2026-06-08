@@ -45,10 +45,19 @@ spec:
         spec:
           serviceAccountName: mongo-account-reconciler
           restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: reconcile
               image: ghcr.io/null-ptr-exception/db-runbooks
-              imagePullPolicy: Never
+              imagePullPolicy: IfNotPresent
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
               env:
                 - name: DB_NAMESPACE
                   valueFrom:

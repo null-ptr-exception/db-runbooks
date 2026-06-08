@@ -38,7 +38,7 @@ _mongosh_eval "admin" "$js" >/dev/null 2>&1 || fail_task "BAN_FAILED" "cannot up
 
 now_utc="$(iso_utc_now)"
 policy_set=$(jq -nc --arg status "BANNED" --arg updated_at "$now_utc" --arg banned_at "$now_utc" --arg ban_reason "$BAN_REASON" '{status:$status, updated_at:$updated_at, banned_at:$banned_at, ban_reason:$ban_reason}')
-mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || true
+mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
 write_task_result "$(jq -n \
   --arg status "BANNED" \

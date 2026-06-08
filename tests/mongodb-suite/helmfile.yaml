@@ -1,0 +1,69 @@
+releases:
+  # cluster-a: fedauth reader RBAC
+  - name: mongodb-rbac-a
+    chart: ../chart
+    namespace: mongo-core
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    values:
+      - federatedAuthReader:
+          enabled: true
+
+  # cluster-b: fedauth reader RBAC + test-client
+  - name: mongodb-client
+    chart: ../chart
+    namespace: mongo-core
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    values:
+      - federatedAuthReader:
+          enabled: true
+        testClient:
+          enabled: true
+
+  # cluster-a: MongoDB instance (creates mongo-1 namespace)
+  - name: mongo-1
+    chart: ../chart
+    namespace: mongo-1
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    values:
+      - mongodb:
+          enabled: true
+          namespace: mongo-1
+
+  # cluster-a: fedauth, aqsh-mongodb, redis, rbac, gateway
+  - name: mongodb-server
+    chart: ../chart
+    namespace: mongo-core
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    needs:
+      - kind-cluster-a/mongo-1/mongo-1
+    values:
+      - federatedAuth:
+          enabled: true
+        redis:
+          enabled: true
+        aqsh:
+          enabled: true
+          tasksConfig: /etc/aqsh/tasks-mongodb.yaml
+          workerQueues: mongodb
+          authProxy:
+            tokenReviewURL: "http://fedauth.kind-a.test:30080"
+        mongodbRbac:
+          enabled: true
+        gateway:
+          enabled: true
+          hosts:
+            - "fedauth.kind-a.test"
+            - "aqsh-mongodb.kind-a.test"
+          virtualServices:
+            - name: fedauth
+              host: "fedauth.kind-a.test"
+              backendHost: kube-federated-auth.mongo-core.svc.cluster.local
+              backendPort: 8080
+            - name: aqsh-mongodb
+              host: "aqsh-mongodb.kind-a.test"
+              backendHost: aqsh.mongo-core.svc.cluster.local
+              backendPort: 4180

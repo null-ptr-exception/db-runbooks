@@ -38,6 +38,17 @@ aqsh:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     tokenReviewURL: ""
 
+# --- mongodb ---
+mongodb:
+  enabled: false
+  namespace: mongo-1
+  image: mongo:7
+  storage: 1Gi
+
+# --- mongodb RBAC ---
+mongodbRbac:
+  enabled: false
+
 # --- test-client (curl pod with projected SA token) ---
 testClient:
   enabled: false

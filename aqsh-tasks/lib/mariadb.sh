@@ -23,6 +23,61 @@ mariadb_set_target() {
   MARIADB_CONTAINER="${5:-${MARIADB_CONTAINER:-mariadb}}"
 }
 
+# ---------------------------------------------------------------------------
+# mariadb_resolve_name [include_sts]
+# Discover the target name in K8S_NAMESPACE when the caller didn't supply one.
+# Looks for MariaDB CRs of kind $MARIADB_RESOURCE first; if include_sts=true and
+# no CR exists, falls back to StatefulSets (native, operator-less deployments).
+#
+# stdout : the resolved name (rc 0), or comma-separated candidates (rc 2).
+# returns: 0 resolved | 1 none found | 2 ambiguous (more than one).
+# ---------------------------------------------------------------------------
+mariadb_resolve_name() {
+  local include_sts="${1:-false}" kind names count
+
+  for kind in "$MARIADB_RESOURCE" statefulset; do
+    names=$(_kubectl get "$kind" \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+      | sed '/^$/d')
+    count=$(printf '%s' "$names" | grep -c . || true)
+    if [[ "$count" -eq 1 ]]; then printf '%s' "$names"; return 0; fi
+    if [[ "$count" -gt 1 ]]; then printf '%s' "$names" | paste -sd, -; return 2; fi
+    # CR-only callers stop after the first (CR) pass.
+    [[ "$include_sts" == "true" ]] || break
+  done
+
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# mariadb_autodetect_target <include_sts> <on_ambiguous_fn> <on_none_fn>
+# Shared auto-detect entry point for the task scripts. Resolves the target via
+# mariadb_resolve_name and, on success, sets MARIADB_NAME (the caller copies it
+# into its own MDB). On failure it invokes the caller-supplied callback so each
+# script emits the error in its own result format:
+#   - ambiguous: on_ambiguous_fn is called with the comma-separated candidates
+#   - none:      on_none_fn is called with no arguments
+#
+# returns: 0 resolved (MARIADB_NAME set) | 1 not resolved (a callback ran)
+#
+# Callbacks that should abort the task must `exit` themselves (status / restart /
+# create-account do); callbacks that only record a check and let the task carry
+# on (sanity-check) simply return, and the caller skips its post-resolve setup
+# via the return code. The helper is called directly (never in a $() subshell)
+# so a callback's `exit` terminates the script, not a subshell.
+# ---------------------------------------------------------------------------
+mariadb_autodetect_target() {
+  local include_sts="${1:-false}" on_ambiguous="$2" on_none="$3"
+  local rc=0 resolved
+  resolved=$(mariadb_resolve_name "$include_sts") || rc=$?
+  case "$rc" in
+    0) MARIADB_NAME="$resolved"; return 0 ;;
+    2) "$on_ambiguous" "$resolved" ;;
+    *) "$on_none" ;;
+  esac
+  return 1
+}
+
 mariadb_jsonpath() {
   local resource="${1:?resource is required}"
   local name="${2:?name is required}"

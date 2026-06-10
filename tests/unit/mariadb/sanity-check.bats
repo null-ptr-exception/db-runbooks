@@ -5,6 +5,9 @@ setup() {
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/sanity-check.sh"
+  # Most cases target a fixed "mariadb" CR; set it explicitly so the script uses
+  # it directly instead of auto-detecting. Cases passing --mdb still override.
+  export MARIADB_NAME=mariadb
   export _LOG_CURRENT_LEVEL=3
   mkdir -p "${TEST_TMPDIR}/bin"
 

@@ -9,6 +9,10 @@ set -euo pipefail
 # Rundeck/local users can pass the same values as CLI flags.
 # =============================================================================
 
+# Capture the caller-supplied target name BEFORE sourcing libs — lib/mariadb.sh
+# defaults MARIADB_NAME to "mariadb" at load time. Empty here means auto-detect.
+MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +42,7 @@ Required:
 Target options:
   --context <context>              Kubernetes context. Optional for in-cluster AQSH.
   --resource <kind>                MariaDB CR kind. Default: mariadb
-  --mdb <name>                     MariaDB CR / StatefulSet name. Default: mariadb
+  --mdb <name>                     MariaDB CR / StatefulSet name. Default: auto-detected from the namespace.
   --container <name>               MariaDB container name. Default: mariadb
   --host <host>                    MariaDB account host. Default: %
 
@@ -89,7 +93,8 @@ json_escape() {
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
+# Empty when the caller gave no name → auto-detected from the namespace below.
+MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 DATABASE="${ACCOUNT_DATABASE:-}"
 USERNAME="${ACCOUNT_USERNAME:-}"
@@ -279,8 +284,9 @@ result_json() {
   local sql_plan_json="${6:-[]}"
   local error_json="${7:-[]}"
   local secret_managed="${8:-false}"
+  local candidates_json="${9:-[]}"
 
-  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s"},"database":"%s","username":"%s","host":"%s","privileges":[%s],"primary":"%s","dry_run":%s,"account_exists":%s,"password_secret":{"name":"%s","key":"%s","managed":%s},"sql_plan":%s,"errors":%s}\n' \
+  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s"},"database":"%s","username":"%s","host":"%s","privileges":[%s],"primary":"%s","dry_run":%s,"account_exists":%s,"password_secret":{"name":"%s","key":"%s","managed":%s},"sql_plan":%s,"errors":%s,"candidates":%s}\n' \
     "$status" \
     "$(json_escape "$reason_code")" \
     "$(json_escape "$summary")" \
@@ -299,7 +305,8 @@ result_json() {
     "$(json_escape "$PASSWORD_SECRET_KEY")" \
     "$secret_managed" \
     "$sql_plan_json" \
-    "$error_json"
+    "$error_json" \
+    "$candidates_json"
 }
 
 errors_json() {
@@ -384,6 +391,27 @@ if ! k8s_check >/dev/null; then
   SUMMARY="kubectl is unavailable or cannot reach the target cluster"
   RESULT_JSON="$(result_json ERROR KUBECTL_UNAVAILABLE "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
   emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+fi
+
+# Auto-detect the target when --mdb / MARIADB_NAME was not supplied (CR first,
+# then StatefulSet). The emitters exit, so the helper never returns on failure.
+_on_ambiguous() {
+  local summary="Multiple MariaDB targets in namespace ($1); specify --mdb"
+  local cand_json="" cand_sep="" _c
+  IFS=',' read -ra _cands <<< "$1"
+  for _c in "${_cands[@]}"; do
+    cand_json="${cand_json}${cand_sep}\"$(json_escape "$_c")\""; cand_sep=","
+  done
+  emit_result "$(result_json ERROR MARIADB_AMBIGUOUS "$summary" "" false "$SQL_PLAN_JSON" "[]" false "[${cand_json}]")" ERROR "$summary"
+}
+_on_none() {
+  local summary="No MariaDB CR or StatefulSet found in namespace"
+  emit_result "$(result_json ERROR MARIADB_NOT_FOUND "$summary" "" false "$SQL_PLAN_JSON" "[]" false)" ERROR "$summary"
+}
+
+if [[ -z "$MDB" ]]; then
+  mariadb_autodetect_target true _on_ambiguous _on_none
+  MDB="$MARIADB_NAME"
 fi
 
 CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}' || true)"

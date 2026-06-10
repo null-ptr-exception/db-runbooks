@@ -284,8 +284,9 @@ result_json() {
   local sql_plan_json="${6:-[]}"
   local error_json="${7:-[]}"
   local secret_managed="${8:-false}"
+  local candidates_json="${9:-[]}"
 
-  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s"},"database":"%s","username":"%s","host":"%s","privileges":[%s],"primary":"%s","dry_run":%s,"account_exists":%s,"password_secret":{"name":"%s","key":"%s","managed":%s},"sql_plan":%s,"errors":%s}\n' \
+  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s"},"database":"%s","username":"%s","host":"%s","privileges":[%s],"primary":"%s","dry_run":%s,"account_exists":%s,"password_secret":{"name":"%s","key":"%s","managed":%s},"sql_plan":%s,"errors":%s,"candidates":%s}\n' \
     "$status" \
     "$(json_escape "$reason_code")" \
     "$(json_escape "$summary")" \
@@ -304,7 +305,8 @@ result_json() {
     "$(json_escape "$PASSWORD_SECRET_KEY")" \
     "$secret_managed" \
     "$sql_plan_json" \
-    "$error_json"
+    "$error_json" \
+    "$candidates_json"
 }
 
 errors_json() {
@@ -401,7 +403,12 @@ if [[ -z "$MDB" ]]; then
     MARIADB_NAME="$MDB"
   elif [[ "$resolve_rc" -eq 2 ]]; then
     SUMMARY="Multiple MariaDB targets in namespace (${resolved}); specify --mdb"
-    RESULT_JSON="$(result_json ERROR MARIADB_AMBIGUOUS "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
+    cand_json=""; cand_sep=""
+    IFS=',' read -ra _cands <<< "$resolved"
+    for _c in "${_cands[@]}"; do
+      cand_json="${cand_json}${cand_sep}\"$(json_escape "$_c")\""; cand_sep=","
+    done
+    RESULT_JSON="$(result_json ERROR MARIADB_AMBIGUOUS "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false "[${cand_json}]")"
     emit_result "$RESULT_JSON" ERROR "$SUMMARY"
   else
     SUMMARY="No MariaDB CR or StatefulSet found in namespace"

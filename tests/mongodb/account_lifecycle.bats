@@ -488,3 +488,203 @@ _submit_task() {
   # Status should be EXPIRED_DELETED (reconciliation continues despite error)
   [ "$policy_status" = "EXPIRED_DELETED" ]
 }
+
+@test "create-account rejects invalid validity_days" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_invalid_days",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    validity_days: "-5",
+    dry_run: "false",
+    confirm: "true"
+  }')
+
+  _submit_task "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "create-account rejects non-numeric validity_days" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_non_numeric",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    validity_days: "invalid",
+    dry_run: "false",
+    confirm: "true"
+  }')
+
+  _submit_task "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "create-account rejects missing recipient_pgp_pubkey for encrypted mode" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_missing_key",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_delivery_mode: "encrypted_payload"
+  }')
+
+  _submit_task "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "ban-account fails on non-existent account" {
+  _cleanup_account "qa_nonexistent_ban"
+
+  local ban_payload
+  ban_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_nonexistent_ban"
+  }')
+  _submit_task "ban-account" "$ban_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+}
+
+@test "extend-expiry fails on non-existent account" {
+  _cleanup_account "qa_nonexistent_extend"
+
+  local extend_payload
+  extend_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_nonexistent_extend",
+    extend_days: "5"
+  }')
+  _submit_task "extend-expiry" "$extend_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+}
+
+@test "extend-expiry rejects invalid extend_days" {
+  _cleanup_account "qa_invalid_extend"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_invalid_extend",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local extend_payload
+  extend_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_invalid_extend",
+    extend_days: "not_a_number"
+  }')
+  _submit_task "extend-expiry" "$extend_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "force-permanent fails on non-existent account" {
+  _cleanup_account "qa_nonexistent_force"
+
+  local force_payload
+  force_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_nonexistent_force"
+  }')
+  _submit_task "force-permanent" "$force_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+}
+
+@test "reset-password rejects invalid validity_days" {
+  _cleanup_account "qa_reset_invalid"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_invalid",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local reset_payload
+  reset_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_invalid",
+    validity_days: "0"
+  }')
+  _submit_task "reset-password" "$reset_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "reset-password rejects missing recipient_pgp_pubkey for encrypted mode" {
+  _cleanup_account "qa_reset_no_key"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_no_key",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local reset_payload
+  reset_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_reset_no_key",
+    validity_days: "7",
+    password_delivery_mode: "encrypted_payload"
+  }')
+  _submit_task "reset-password" "$reset_payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}

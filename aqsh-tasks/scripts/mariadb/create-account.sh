@@ -394,27 +394,24 @@ if ! k8s_check >/dev/null; then
 fi
 
 # Auto-detect the target when --mdb / MARIADB_NAME was not supplied (CR first,
-# then StatefulSet). None or several → a structured error rather than a guess.
+# then StatefulSet). The emitters exit, so the helper never returns on failure.
+_on_ambiguous() {
+  local summary="Multiple MariaDB targets in namespace ($1); specify --mdb"
+  local cand_json="" cand_sep="" _c
+  IFS=',' read -ra _cands <<< "$1"
+  for _c in "${_cands[@]}"; do
+    cand_json="${cand_json}${cand_sep}\"$(json_escape "$_c")\""; cand_sep=","
+  done
+  emit_result "$(result_json ERROR MARIADB_AMBIGUOUS "$summary" "" false "$SQL_PLAN_JSON" "[]" false "[${cand_json}]")" ERROR "$summary"
+}
+_on_none() {
+  local summary="No MariaDB CR or StatefulSet found in namespace"
+  emit_result "$(result_json ERROR MARIADB_NOT_FOUND "$summary" "" false "$SQL_PLAN_JSON" "[]" false)" ERROR "$summary"
+}
+
 if [[ -z "$MDB" ]]; then
-  resolve_rc=0
-  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
-  if [[ "$resolve_rc" -eq 0 ]]; then
-    MDB="$resolved"
-    MARIADB_NAME="$MDB"
-  elif [[ "$resolve_rc" -eq 2 ]]; then
-    SUMMARY="Multiple MariaDB targets in namespace (${resolved}); specify --mdb"
-    cand_json=""; cand_sep=""
-    IFS=',' read -ra _cands <<< "$resolved"
-    for _c in "${_cands[@]}"; do
-      cand_json="${cand_json}${cand_sep}\"$(json_escape "$_c")\""; cand_sep=","
-    done
-    RESULT_JSON="$(result_json ERROR MARIADB_AMBIGUOUS "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false "[${cand_json}]")"
-    emit_result "$RESULT_JSON" ERROR "$SUMMARY"
-  else
-    SUMMARY="No MariaDB CR or StatefulSet found in namespace"
-    RESULT_JSON="$(result_json ERROR MARIADB_NOT_FOUND "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
-    emit_result "$RESULT_JSON" ERROR "$SUMMARY"
-  fi
+  mariadb_autodetect_target true _on_ambiguous _on_none
+  MDB="$MARIADB_NAME"
 fi
 
 CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}' || true)"

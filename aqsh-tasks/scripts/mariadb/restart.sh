@@ -98,21 +98,15 @@ mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 k8s_check >/dev/null || { emit ERROR KUBECTL_UNAVAILABLE "Kubernetes API is not reachable" false; exit 0; }
 
 # Auto-detect the target CR when --mdb / MARIADB_NAME was not supplied. Restart
-# is operator-driven, so only CRs are considered (no StatefulSet fallback).
+# is operator-driven, so only CRs are considered (no StatefulSet fallback). The
+# emitters exit, so the helper never returns on the failure paths.
+_on_ambiguous() { emit BLOCKED MARIADB_AMBIGUOUS "Multiple MariaDB CRs in namespace ($1); specify --mdb" false; exit 0; }
+_on_none()      { emit BLOCKED MARIADB_OPERATOR_REQUIRED "No MariaDB CR found; operator-driven restart needs a mariadb-operator resource" false; exit 0; }
+
 if [[ -z "$MDB" ]]; then
-  resolve_rc=0
-  resolved=$(mariadb_resolve_name false) || resolve_rc=$?
-  if [[ "$resolve_rc" -eq 0 ]]; then
-    MDB="$resolved"
-    MARIADB_NAME="$MDB"
-    [[ "$JSON_ONLY" -eq 1 ]] || log_info "mariadb-restart" "auto-detected mdb=${MDB}"
-  elif [[ "$resolve_rc" -eq 2 ]]; then
-    emit BLOCKED MARIADB_AMBIGUOUS "Multiple MariaDB CRs in namespace (${resolved}); specify --mdb" false
-    exit 0
-  else
-    emit BLOCKED MARIADB_OPERATOR_REQUIRED "No MariaDB CR found; operator-driven restart needs a mariadb-operator resource" false
-    exit 0
-  fi
+  mariadb_autodetect_target false _on_ambiguous _on_none
+  MDB="$MARIADB_NAME"
+  [[ "$JSON_ONLY" -eq 1 ]] || log_info "mariadb-restart" "auto-detected mdb=${MDB}"
 fi
 
 mariadb_jsonpath "$RESOURCE" "$MDB" '{.metadata.name}' >/dev/null 2>&1 \

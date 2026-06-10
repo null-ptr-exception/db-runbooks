@@ -220,19 +220,17 @@ if ! k8s_check >/dev/null; then
 fi
 
 # Auto-detect the target when --mdb / MARIADB_NAME was not supplied (CR first,
-# then StatefulSet). On failure record an ERROR check and continue — the
-# accumulated result reports ERROR with this as the first reason.
+# then StatefulSet). Unlike the other tasks the emitters DON'T exit — they record
+# an ERROR check and let the run continue, so the accumulated result reports ERROR
+# with this as the first reason. The helper returns non-zero, so the `if` skips
+# the post-resolve setup and MDB stays empty.
+_on_ambiguous() { emit_check target_resolve ERROR MARIADB_AMBIGUOUS "Multiple MariaDB targets in namespace ($1); specify --mdb"; }
+_on_none()      { emit_check target_resolve ERROR MARIADB_NOT_FOUND "No MariaDB CR or StatefulSet found in namespace"; }
+
 if [[ -z "$MDB" ]]; then
-  resolve_rc=0
-  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
-  if [[ "$resolve_rc" -eq 0 ]]; then
-    MDB="$resolved"
-    MARIADB_NAME="$MDB"
+  if mariadb_autodetect_target true _on_ambiguous _on_none; then
+    MDB="$MARIADB_NAME"
     [[ "$JSON_ONLY" -ne 1 ]] && log_info "mariadb-sanity-check" "auto-detected mdb=${MDB}"
-  elif [[ "$resolve_rc" -eq 2 ]]; then
-    emit_check target_resolve ERROR MARIADB_AMBIGUOUS "Multiple MariaDB targets in namespace (${resolved}); specify --mdb"
-  else
-    emit_check target_resolve ERROR MARIADB_NOT_FOUND "No MariaDB CR or StatefulSet found in namespace"
   fi
 fi
 

@@ -118,37 +118,31 @@ if ! k8s_check >/dev/null; then
 fi
 
 # Auto-detect the target when --mdb / MARIADB_NAME was not supplied. Operator
-# CRs are tried first, then StatefulSets (native). Exactly one match → use it;
-# none or several → a structured error so the caller can disambiguate.
+# CRs are tried first, then StatefulSets (native). The shared helper resolves and
+# calls one of these emitters (which exit) when it can't pick a single target.
+_emit_resolve_error() {
+  local reason="$1" summary="$2" candidates="${3:-}"
+  RESULT_JSON=$(jq -nc \
+    --arg context "${CONTEXT:-}" \
+    --arg namespace "$NAMESPACE" \
+    --arg resource "$RESOURCE" \
+    --arg reason "$reason" \
+    --arg summary "$summary" \
+    --arg candidates "$candidates" \
+    '{status:"CRITICAL", reason_code:$reason, summary:$summary,
+      target:{context:$context, namespace:$namespace, resource:$resource, mdb:null},
+      candidates: ($candidates | if . == "" then [] else (. / ",") end)}')
+  [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$RESULT_JSON" > "$RESULT_FILE"
+  printf '%s\n' "$RESULT_JSON"
+  exit 0
+}
+_on_ambiguous() { _emit_resolve_error MARIADB_AMBIGUOUS "Multiple MariaDB targets in namespace; specify --mdb" "$1"; }
+_on_none()      { _emit_resolve_error MARIADB_NOT_FOUND "No MariaDB CR or StatefulSet found in namespace"; }
+
 if [[ -z "$MDB" ]]; then
-  resolve_rc=0
-  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
-  if [[ "$resolve_rc" -eq 0 ]]; then
-    MDB="$resolved"
-    MARIADB_NAME="$MDB"
-    [[ "$JSON_ONLY" -ne 1 ]] && log_info "mariadb-status" "auto-detected mdb=${MDB}"
-  else
-    if [[ "$resolve_rc" -eq 2 ]]; then
-      RESOLVE_REASON="MARIADB_AMBIGUOUS"
-      RESOLVE_SUMMARY="Multiple MariaDB targets in namespace; specify --mdb"
-    else
-      RESOLVE_REASON="MARIADB_NOT_FOUND"
-      RESOLVE_SUMMARY="No MariaDB CR or StatefulSet found in namespace"
-    fi
-    RESULT_JSON=$(jq -nc \
-      --arg context "${CONTEXT:-}" \
-      --arg namespace "$NAMESPACE" \
-      --arg resource "$RESOURCE" \
-      --arg reason "$RESOLVE_REASON" \
-      --arg summary "$RESOLVE_SUMMARY" \
-      --arg candidates "$resolved" \
-      '{status:"CRITICAL", reason_code:$reason, summary:$summary,
-        target:{context:$context, namespace:$namespace, resource:$resource, mdb:null},
-        candidates: ($candidates | if . == "" then [] else (. / ",") end)}')
-    [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$RESULT_JSON" > "$RESULT_FILE"
-    printf '%s\n' "$RESULT_JSON"
-    exit 0
-  fi
+  mariadb_autodetect_target true _on_ambiguous _on_none
+  MDB="$MARIADB_NAME"
+  [[ "$JSON_ONLY" -ne 1 ]] && log_info "mariadb-status" "auto-detected mdb=${MDB}"
 fi
 
 CR_PRESENT=false

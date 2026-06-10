@@ -460,6 +460,10 @@ _submit_task() {
   # Set both as expired
   _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateMany({username:{\$in:['qa_partial_1', 'qa_partial_2']}, auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
 
+  # Simulate error condition: drop first account's user but leave policy intact
+  # This creates a mismatch that should be handled gracefully during reconciliation
+  _mongo_exec "db.getSiblingDB('admin').dropUser('qa_partial_1');"
+
   local reconcile_payload
   reconcile_payload=$(jq -nc '{namespace:"mongo-1"}')
   _submit_task "reconcile-expiry" "$reconcile_payload"
@@ -469,6 +473,18 @@ _submit_task() {
   status=$(echo "$result" | jq -r '.status')
   [ "$status" = "OK" ]
 
+  # Should have processed both accounts (first failed gracefully, second succeeded)
   processed=$(echo "$result" | jq -r '.processed // 0')
   [ "$processed" -ge 2 ]
+
+  # Second account should be deleted (not in error state)
+  local user_exists
+  user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_partial_2'); print(u ? 'yes' : 'no');" | tail -1)
+  [ "$user_exists" = "no" ]
+
+  # First account should still have policy record (even though user was already deleted)
+  local policy_status
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_partial_1', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  # Status should be EXPIRED_DELETED (reconciliation continues despite error)
+  [ "$policy_status" = "EXPIRED_DELETED" ]
 }

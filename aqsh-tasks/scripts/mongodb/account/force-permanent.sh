@@ -26,6 +26,15 @@ case "$precheck_rc" in
 esac
 
 now_utc="$(iso_utc_now)"
+
+# Step 1: Update MongoDB first (must succeed)
+esc_db=$(_escape_js_string "$ACCOUNT_AUTH_DB")
+esc_user=$(_escape_js_string "$ACCOUNT_USERNAME")
+esc_forced=$(_escape_js_string "$now_utc")
+js="const u = db.getSiblingDB('${esc_db}').getUser('${esc_user}', {showCredentials:false, showPrivileges:false}); const current = (u && u.customData) ? u.customData : {}; current.temp_account = false; current.permanent = true; current.forced_at='${esc_forced}'; db.getSiblingDB('${esc_db}').updateUser('${esc_user}', {customData: current}); JSON.stringify({ok:1})"
+_mongosh_eval "admin" "$js" >/dev/null 2>&1 || fail_task "MONGODB_UPDATE_FAILED" "cannot update mongodb customdata"
+
+# Step 2: Update policy after MongoDB succeeds
 policy_set=$(jq -nc \
   --arg status "PERMANENT" \
   --arg updated_at "$now_utc" \
@@ -34,12 +43,6 @@ policy_set=$(jq -nc \
   --arg force_reason "$FORCE_REASON" \
   '{status:$status, updated_at:$updated_at, permanent_forced:true, forced_at:$forced_at, forced_by:$forced_by, force_reason:$force_reason, expires_at:null}')
 mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
-
-esc_db=$(_escape_js_string "$ACCOUNT_AUTH_DB")
-esc_user=$(_escape_js_string "$ACCOUNT_USERNAME")
-esc_forced=$(_escape_js_string "$now_utc")
-js="const u = db.getSiblingDB('${esc_db}').getUser('${esc_user}', {showCredentials:false, showPrivileges:false}); const current = (u && u.customData) ? u.customData : {}; current.temp_account = false; current.permanent = true; current.forced_at='${esc_forced}'; db.getSiblingDB('${esc_db}').updateUser('${esc_user}', {customData: current}); JSON.stringify({ok:1})"
-_mongosh_eval "admin" "$js" >/dev/null 2>&1 || true
 
 write_task_result "$(jq -n \
   --arg status "PERMANENT" \

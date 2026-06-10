@@ -54,7 +54,7 @@ _mongo_exec_as() {
 _cleanup_account() {
   local username="$1"
   _mongo_exec "try { db.getSiblingDB('admin').dropUser('${username}'); } catch (e) { /* ignore missing user */ }"
-  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').deleteOne({username:'${username}', auth_db:'admin'});"
+  _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').deleteOne({username:'${username}', auth_db:'admin'});"
 }
 
 _submit_task() {
@@ -70,7 +70,7 @@ _submit_task() {
   wait_for_task "$MONGODB_AQSH_URL" "$task_id"
 }
 
-@test "create-account creates temporary user and policy" {
+@test "create-account creates run user and policy" {
   _cleanup_account "qa_temp_user"
 
   local payload
@@ -95,7 +95,7 @@ _submit_task() {
   user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_temp_user'); print(u ? 'yes' : 'no');" | tail -1)
   [ "$user_exists" = "yes" ]
 
-  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('temp_user_policies').findOne({username:'qa_temp_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_temp_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
   [ "$policy_status" = "ACTIVE" ]
 }
 
@@ -141,7 +141,7 @@ _submit_task() {
   }')
   _submit_task "create-account" "$create_payload"
 
-  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').updateOne({username:'qa_expire_user', auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
+  _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateOne({username:'qa_expire_user', auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
 
   local reconcile_payload
   reconcile_payload=$(jq -nc '{namespace:"mongo-1"}')
@@ -151,7 +151,7 @@ _submit_task() {
   user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_expire_user'); print(u ? 'yes' : 'no');" | tail -1)
   [ "$user_exists" = "no" ]
 
-  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('temp_user_policies').findOne({username:'qa_expire_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_expire_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
   [ "$policy_status" = "EXPIRED_DELETED" ]
 }
 
@@ -242,7 +242,7 @@ _submit_task() {
     namespace: "mongo-1",
     auth_db: "admin",
     username: "qa_reset_encrypt_user",
-    temp_days: "7",
+    validity_days: "7",
     password_delivery_mode: "encrypted_payload",
     recipient_pgp_pubkey: $pub
   }')
@@ -279,7 +279,7 @@ _submit_task() {
   }')
   _submit_task "create-account" "$create_payload"
 
-  _mongo_exec "db.getSiblingDB('admin').getCollection('temp_user_policies').updateOne({username:'qa_delete_blocked_user', auth_db:'admin'}, {\$set:{status:'ERROR', updated_at:new Date().toISOString()}})"
+  _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateOne({username:'qa_delete_blocked_user', auth_db:'admin'}, {\$set:{status:'ERROR', updated_at:new Date().toISOString()}})"
 
   local payload task_id
   payload=$(jq -nc '{
@@ -300,4 +300,175 @@ _submit_task() {
   result="$(_task_result_data)"
   reason=$(echo "$result" | jq -r '.reason_code // empty')
   [ "$reason" = "STATE_BLOCKED" ]
+}
+
+@test "ban-account removes all roles" {
+  _cleanup_account "qa_ban_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_ban_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local ban_payload
+  ban_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_ban_user"
+  }')
+  _submit_task "ban-account" "$ban_payload"
+
+  local result status policy_status
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "BANNED" ]
+
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_ban_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  [ "$policy_status" = "BANNED" ]
+}
+
+@test "extend-expiry updates expiration date" {
+  _cleanup_account "qa_extend_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_extend_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    validity_days: "1"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local extend_payload
+  extend_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_extend_user",
+    extend_days: "10"
+  }')
+  _submit_task "extend-expiry" "$extend_payload"
+
+  local result status expires_at
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "ACTIVE" ]
+
+  expires_at=$(echo "$result" | jq -r '.expires_at // empty')
+  [ -n "$expires_at" ]
+}
+
+@test "force-permanent sets policy to PERMANENT" {
+  _cleanup_account "qa_force_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_force_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  local force_payload
+  force_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_force_user",
+    forced_by: "bats"
+  }')
+  _submit_task "force-permanent" "$force_payload"
+
+  local result status policy_status
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "PERMANENT" ]
+
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_force_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  [ "$policy_status" = "PERMANENT" ]
+}
+
+@test "reconcile-expiry preserves account with changed password as CHANGED" {
+  _cleanup_account "qa_changed_user"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_changed_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  # Manually change the password to trigger CHANGED state
+  local old_fp
+  old_fp=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_changed_user', auth_db:'admin'}); print(d ? d.initial_cred_fingerprint : 'missing');" | tail -1)
+
+  _mongo_exec "db.getSiblingDB('admin').updateUser('qa_changed_user', {pwd:'different_password_123'});"
+  _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateOne({username:'qa_changed_user', auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
+
+  local reconcile_payload
+  reconcile_payload=$(jq -nc '{namespace:"mongo-1"}')
+  _submit_task "reconcile-expiry" "$reconcile_payload"
+
+  local user_exists policy_status
+  user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_changed_user'); print(u ? 'yes' : 'no');" | tail -1)
+  [ "$user_exists" = "yes" ]
+
+  policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_changed_user', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
+  [ "$policy_status" = "CHANGED" ]
+}
+
+@test "reconcile-expiry continues on partial errors" {
+  # Create two expired accounts
+  _cleanup_account "qa_partial_1"
+  _cleanup_account "qa_partial_2"
+
+  local create_payload
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_partial_1",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  create_payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_partial_2",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true"
+  }')
+  _submit_task "create-account" "$create_payload"
+
+  # Set both as expired
+  _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateMany({username:{\$in:['qa_partial_1', 'qa_partial_2']}, auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
+
+  local reconcile_payload
+  reconcile_payload=$(jq -nc '{namespace:"mongo-1"}')
+  _submit_task "reconcile-expiry" "$reconcile_payload"
+
+  local result status processed
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "OK" ]
+
+  processed=$(echo "$result" | jq -r '.processed // 0')
+  [ "$processed" -ge 2 ]
 }

@@ -1,8 +1,8 @@
-# MongoDB Account Lifecycle Management
+# MongoDB Account Lifecycle API Reference
 
 ## Overview
 
-This document explains account lifecycle management for **permanent run accounts** (not temporary accounts). These are machine-to-machine credentials used by automation and inter-service communication.
+This document provides complete architecture, state machine, and API reference for MongoDB run account lifecycle management.
 
 **Key Constraint:** MongoDB Community Edition lacks native `EXPIRES` mechanism (unlike MariaDB). Account expiry must be tracked via application state and external reconciliation job.
 
@@ -123,7 +123,7 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
       "auth_db": "admin",
       "username": "app_user",
       "roles_json": "[{\"role\":\"readWrite\",\"db\":\"mydb\"}]",
-      "temp_days": "14",
+      "validity_days": "14",
       "password_delivery_mode": "encrypted_payload",
       "recipient_pgp_pubkey": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----",
       "dry_run": "false",
@@ -154,6 +154,32 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
 ```bash
 echo "$CIPHERTEXT" | gpg --decrypt
 ```
+
+#### Encrypted Delivery Behavior (Zero-Trust Design)
+
+When `password_delivery_mode=encrypted_payload`:
+
+1. **Input:** Platform admin provides recipient's PGP public key (ASCII-armored or base64-encoded)
+2. **Key Import:** Script imports key into temporary, isolated GnuPG home directory
+3. **Password Encryption:** Generated password is encrypted using OpenPGP (`gpg --armor --encrypt`)
+4. **Response:** Task returns only ciphertext; plaintext password never stored or logged
+5. **Cleanup:** Temporary GnuPG home is destroyed immediately after encryption (trap handler on all exit paths)
+
+**Recipient-side decryption:**
+```bash
+# Recipient holds the private key locally
+echo "$CIPHERTEXT" | gpg --decrypt
+# Output: plaintext password
+```
+
+**Why PGP + Not Kubernetes Secret?**
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **K8s Secret** | Simple, native to cluster | Plaintext in cluster; requires human RBAC login |
+| **PGP Encrypted** | Zero system-wide persistence; private key never uploaded | Requires recipient key management |
+
+**Selected:** PGP Encrypted for **zero-trust principle**—the system cannot read plaintext credentials even in memory.
 
 ---
 
@@ -228,7 +254,7 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
       "namespace": "mongo-1",
       "auth_db": "admin",
       "username": "app_user",
-      "days": "7"
+      "extend_days": 7
     }
   }'
 ```
@@ -236,10 +262,13 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
 **Response:**
 ```json
 {
-  "status": "EXTENDED",
+  "status": "ACTIVE",
   "reason_code": "EXPIRY_EXTENDED",
+  "summary": "account expiry extended",
+  "namespace": "mongo-1",
+  "auth_db": "admin",
   "username": "app_user",
-  "new_expires_at": "2026-06-30T10:00:00Z"
+  "expires_at": "2026-06-30T10:00:00Z"
 }
 ```
 
@@ -276,6 +305,114 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
   }
 }
 ```
+
+---
+
+### FORCE-PERMANENT (Clear Expiry)
+
+```bash
+curl -X POST http://aqsh-mongodb:4180/api/task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "account/force-permanent",
+    "params": {
+      "namespace": "mongo-1",
+      "auth_db": "admin",
+      "username": "app_user",
+      "forced_by": "admin@example.com"
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "PERMANENT",
+  "reason_code": "FORCED_PERMANENT",
+  "username": "app_user",
+  "auth_db": "admin",
+  "forced_by": "admin@example.com",
+  "summary": "account marked as permanent, expiry enforcement disabled"
+}
+```
+
+**Effect:** Sets policy status to PERMANENT; reconciliation job will skip this account permanently.
+
+---
+
+### UPDATE-ACCOUNT-ROLES (Change Permissions)
+
+```bash
+curl -X POST http://aqsh-mongodb:4180/api/task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "account/update-account-roles",
+    "params": {
+      "namespace": "mongo-1",
+      "auth_db": "admin",
+      "username": "app_user",
+      "roles_json": "[{\"role\":\"read\",\"db\":\"mydb\"},{\"role\":\"readWrite\",\"db\":\"other_db\"}]",
+      "dry_run": "false",
+      "confirm": "true"
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "ROLES_UPDATED",
+  "reason_code": "ROLES_CHANGED",
+  "username": "app_user",
+  "roles": [
+    {"role": "read", "db": "mydb"},
+    {"role": "readWrite", "db": "other_db"}
+  ]
+}
+```
+
+**Effect:** Replaces all roles for the account (atomic operation).
+
+---
+
+### RECONCILE-EXPIRY (Automatic Cleanup)
+
+**Note:** This task is typically invoked via Kubernetes CronJob, not manually.
+
+```bash
+curl -X POST http://aqsh-mongodb:4180/api/task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "account/reconcile-expiry",
+    "params": {
+      "namespace": "mongo-1"
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "OK",
+  "reason_code": "RECONCILED",
+  "summary": "expiry reconciliation completed",
+  "processed": 5,
+  "changed": 1,
+  "deleted": 3,
+  "skipped": 1,
+  "error_count": 0
+}
+```
+
+**Logic:**
+1. Queries all ACTIVE policies where `expires_at <= now`
+2. For each expired account:
+   - Checks password fingerprint against `initial_cred_fingerprint`
+   - If changed: Sets status to CHANGED (account was activated by user)
+   - If unchanged: Drops account and sets status to EXPIRED_DELETED
+3. Returns summary of processed accounts and any errors encountered
+
+**Error Handling:** If individual policy write fails, continues processing remaining accounts (partial success model).
 
 ---
 
@@ -333,7 +470,7 @@ kubectl --context kind-cluster-dbs -n mongo-1 logs job/<job-name>
 
 ## Policy Collection Schema
 
-**Location:** `admin.temp_user_policies`
+**Location:** `admin.run_account_policies`
 
 **Example Document:**
 ```json

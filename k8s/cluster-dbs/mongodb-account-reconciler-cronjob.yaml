@@ -51,8 +51,8 @@ spec:
               type: RuntimeDefault
           containers:
             - name: reconcile
-              image: ghcr.io/null-ptr-exception/db-runbooks
-              imagePullPolicy: IfNotPresent
+              image: ghcr.io/null-ptr-exception/db-runbooks:v0.4.0
+              imagePullPolicy: Always
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true

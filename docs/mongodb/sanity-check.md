@@ -126,7 +126,7 @@ RBAC: `aqsh-mongo-manager` ClusterRole grants `get` on `secrets`, `get`/`list` o
 
 See [examples/mongodb/sanity-check.sh](../../examples/mongodb/sanity-check.sh) for a runnable end-to-end script.
 
-For temporary account lifecycle, expiry reconciliation, and account mutation operations, see [docs/mongodb/create-account.md](create-account.md).
+For run account lifecycle, expiry reconciliation, and account mutation operations, see [docs/mongodb/create-account.md](create-account.md).
 
 ```bash
 MONGODB_AQSH_URL="http://<cluster-dbs-ip>:30082"

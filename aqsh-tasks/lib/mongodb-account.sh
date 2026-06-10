@@ -5,7 +5,7 @@
 _MONGODB_ACCOUNT_LIB_LOADED=1
 
 MONGO_POLICY_DB="${MONGO_POLICY_DB:-admin}"
-MONGO_POLICY_COLLECTION="${MONGO_POLICY_COLLECTION:-temp_user_policies}"
+MONGO_POLICY_COLLECTION="${MONGO_POLICY_COLLECTION:-run_account_policies}"
 
 bool_enabled() {
   case "${1:-false}" in
@@ -182,4 +182,75 @@ mongo_account_shared_precheck() {
   fi
 
   return 0
+}
+
+generate_password() {
+  python3 - "$PASSWORD_LENGTH" "$PASSWORD_SPECIAL_CHARS" "$PASSWORD_SPECIAL_MAX" <<'PY'
+import secrets
+import string
+import sys
+
+length = int(sys.argv[1])
+special = sys.argv[2]
+special_max = int(sys.argv[3])
+
+if length < 12:
+    raise SystemExit("length must be >= 12")
+
+alpha_num = string.ascii_letters + string.digits
+special = ''.join(dict.fromkeys(special))
+if any(ch in "'\"\\  \t\n\r" for ch in special):
+    raise SystemExit("unsupported special charset")
+
+while True:
+    chars = []
+    specials_used = 0
+    for _ in range(length):
+      if special and specials_used < special_max and secrets.randbelow(100) < 20:
+          chars.append(secrets.choice(special))
+          specials_used += 1
+      else:
+          chars.append(secrets.choice(alpha_num))
+    if any(c.islower() for c in chars) and any(c.isupper() for c in chars) and any(c.isdigit() for c in chars):
+        print(''.join(chars))
+        break
+PY
+}
+
+encrypt_password_payload() {
+  local plaintext_password="${1:?password is required}"
+  local pubkey_input="${2:?recipient pgp public key is required}"
+  local gnupg_home raw_import_ok fingerprint ciphertext decoded_key
+
+  gnupg_home=$(mktemp -d)
+  chmod 700 "$gnupg_home"
+  trap 'rm -rf "$gnupg_home"' RETURN EXIT
+
+  export GNUPGHOME="$gnupg_home"
+
+  if printf '%s' "$pubkey_input" | gpg --batch --import >/dev/null 2>&1; then
+    raw_import_ok="true"
+  else
+    raw_import_ok="false"
+  fi
+
+  if [[ "$raw_import_ok" != "true" ]]; then
+    decoded_key=$(printf '%s' "$pubkey_input" | base64 -d 2>/dev/null || true)
+    if [[ -z "$decoded_key" ]]; then
+      return 1
+    fi
+    printf '%s' "$decoded_key" | gpg --batch --import >/dev/null 2>&1 || return 1
+  fi
+
+  fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10; exit}')
+  if [[ -z "$fingerprint" ]]; then
+    return 1
+  fi
+
+  ciphertext=$(printf '%s' "$plaintext_password" | gpg --batch --yes --trust-model always --armor --recipient "$fingerprint" --encrypt 2>/dev/null) || return 1
+
+  jq -nc \
+    --arg recipient_key_fingerprint "$fingerprint" \
+    --arg ciphertext "$ciphertext" \
+    '{mode:"encrypted_payload", recipient_key_fingerprint:$recipient_key_fingerprint, content_type:"application/pgp-encrypted", ciphertext:$ciphertext}'
 }

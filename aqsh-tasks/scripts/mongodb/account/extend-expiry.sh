@@ -45,14 +45,17 @@ fi
 
 expires_at="$(iso_utc_after_days "$EXTEND_DAYS")"
 now_utc="$(iso_utc_now)"
-policy_set=$(jq -nc --arg status "ACTIVE" --arg expires_at "$expires_at" --arg updated_at "$now_utc" '{status:$status, expires_at:$expires_at, updated_at:$updated_at}')
-mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
+# Step 1: Update MongoDB first (must succeed)
 esc_db=$(_escape_js_string "$ACCOUNT_AUTH_DB")
 esc_user=$(_escape_js_string "$ACCOUNT_USERNAME")
 esc_exp=$(_escape_js_string "$expires_at")
 js="const u = db.getSiblingDB('${esc_db}').getUser('${esc_user}', {showCredentials:false, showPrivileges:false}); const current = (u && u.customData) ? u.customData : {}; current.temp_account = true; current.expires_at='${esc_exp}'; db.getSiblingDB('${esc_db}').updateUser('${esc_user}', {customData: current}); JSON.stringify({ok:1})"
-_mongosh_eval "admin" "$js" >/dev/null 2>&1 || true
+_mongosh_eval "admin" "$js" >/dev/null 2>&1 || fail_task "MONGODB_UPDATE_FAILED" "cannot update mongodb customdata"
+
+# Step 2: Update policy after MongoDB succeeds
+policy_set=$(jq -nc --arg status "ACTIVE" --arg expires_at "$expires_at" --arg updated_at "$now_utc" '{status:$status, expires_at:$expires_at, updated_at:$updated_at}')
+mongo_policy_upsert "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$policy_set" '{}' >/dev/null 2>&1 || fail_task "POLICY_WRITE_FAILED" "cannot update policy"
 
 write_task_result "$(jq -n \
   --arg status "ACTIVE" \

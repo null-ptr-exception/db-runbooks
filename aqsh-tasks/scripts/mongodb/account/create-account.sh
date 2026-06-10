@@ -16,7 +16,7 @@ ACCOUNT_AUTH_DB="${ACCOUNT_AUTH_DB:-admin}"
 ACCOUNT_USERNAME="${ACCOUNT_USERNAME:?ACCOUNT_USERNAME is required}"
 ACCOUNT_ROLES_JSON="${ACCOUNT_ROLES_JSON:-}"
 ACCOUNT_DATABASE="${ACCOUNT_DATABASE:-$ACCOUNT_AUTH_DB}"
-TEMP_DAYS="${TEMP_DAYS:-14}"
+VALIDITY_DAYS="${VALIDITY_DAYS:-14}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
 ALLOW_EXISTING="${ALLOW_EXISTING:-false}"
@@ -32,8 +32,8 @@ if [[ -z "$ACCOUNT_ROLES_JSON" ]]; then
   ACCOUNT_ROLES_JSON=$(jq -nc --arg db "$ACCOUNT_DATABASE" '[{"role":"readWrite","db":$db}]')
 fi
 
-if ! [[ "$TEMP_DAYS" =~ ^[0-9]+$ ]] || [[ "$TEMP_DAYS" -lt 1 ]]; then
-  fail_task "INVALID_INPUT" "temp_days must be a positive integer"
+if ! [[ "$VALIDITY_DAYS" =~ ^[0-9]+$ ]] || [[ "$VALIDITY_DAYS" -lt 1 ]]; then
+  fail_task "INVALID_INPUT" "validity_days must be a positive integer"
 fi
 
 if ! echo "$ACCOUNT_ROLES_JSON" | jq -e 'type == "array" and length > 0 and all(.[]; has("role") and has("db"))' >/dev/null 2>&1; then
@@ -44,88 +44,8 @@ if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" && "$PASSWORD_DELIVERY_M
   fail_task "INVALID_INPUT" "unsupported password_delivery_mode"
 fi
 
-generate_password() {
-  python3 - "$PASSWORD_LENGTH" "$PASSWORD_SPECIAL_CHARS" "$PASSWORD_SPECIAL_MAX" <<'PY'
-import secrets
-import string
-import sys
-
-length = int(sys.argv[1])
-special = sys.argv[2]
-special_max = int(sys.argv[3])
-
-if length < 12:
-    raise SystemExit("length must be >= 12")
-
-alpha_num = string.ascii_letters + string.digits
-special = ''.join(dict.fromkeys(special))
-if any(ch in "'\"\\ \t\n\r" for ch in special):
-    raise SystemExit("unsupported special charset")
-
-while True:
-    chars = []
-    specials_used = 0
-    for _ in range(length):
-      if special and specials_used < special_max and secrets.randbelow(100) < 20:
-          chars.append(secrets.choice(special))
-          specials_used += 1
-      else:
-          chars.append(secrets.choice(alpha_num))
-    if any(c.islower() for c in chars) and any(c.isupper() for c in chars) and any(c.isdigit() for c in chars):
-        print(''.join(chars))
-        break
-PY
-}
-
-encrypt_password_payload() {
-  local plaintext_password="${1:?password is required}"
-  local pubkey_input="${2:?recipient pgp public key is required}"
-  local gnupg_home raw_import_ok fingerprint ciphertext decoded_key
-
-  gnupg_home=$(mktemp -d)
-  chmod 700 "$gnupg_home"
-
-  export GNUPGHOME="$gnupg_home"
-
-  if printf '%s' "$pubkey_input" | gpg --batch --import >/dev/null 2>&1; then
-    raw_import_ok="true"
-  else
-    raw_import_ok="false"
-  fi
-
-  if [[ "$raw_import_ok" != "true" ]]; then
-    decoded_key=$(printf '%s' "$pubkey_input" | base64 -d 2>/dev/null || true)
-    if [[ -z "$decoded_key" ]]; then
-      rm -rf "$gnupg_home"
-      return 1
-    fi
-    printf '%s' "$decoded_key" | gpg --batch --import >/dev/null 2>&1 || {
-      rm -rf "$gnupg_home"
-      return 1
-    }
-  fi
-
-  fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10; exit}')
-  if [[ -z "$fingerprint" ]]; then
-    rm -rf "$gnupg_home"
-    return 1
-  fi
-
-  ciphertext=$(printf '%s' "$plaintext_password" | gpg --batch --yes --trust-model always --armor --recipient "$fingerprint" --encrypt 2>/dev/null) || {
-    rm -rf "$gnupg_home"
-    return 1
-  }
-
-  rm -rf "$gnupg_home"
-
-  jq -nc \
-    --arg recipient_key_fingerprint "$fingerprint" \
-    --arg ciphertext "$ciphertext" \
-    '{mode:"encrypted_payload", recipient_key_fingerprint:$recipient_key_fingerprint, content_type:"application/pgp-encrypted", ciphertext:$ciphertext}'
-}
-
 if bool_enabled "$DRY_RUN" && ! bool_enabled "$CONFIRM"; then
-  expires_at=$(iso_utc_after_days "$TEMP_DAYS")
+  expires_at=$(iso_utc_after_days "$VALIDITY_DAYS")
   write_task_result "$(jq -n \
     --arg status "READY" \
     --arg reason_code "DRY_RUN_READY" \
@@ -169,16 +89,16 @@ esc_db=$(_escape_js_string "$ACCOUNT_AUTH_DB")
 esc_user=$(_escape_js_string "$ACCOUNT_USERNAME")
 esc_pass=$(_escape_js_string "$password")
 esc_roles=$(_escape_js_string "$ACCOUNT_ROLES_JSON")
-expires_at="$(iso_utc_after_days "$TEMP_DAYS")"
+expires_at="$(iso_utc_after_days "$VALIDITY_DAYS")"
 now_utc="$(iso_utc_now)"
 esc_expires=$(_escape_js_string "$expires_at")
 esc_now=$(_escape_js_string "$now_utc")
 esc_req_id=$(_escape_js_string "$REQUEST_ID")
 
 if [[ "$account_exists" == "true" ]]; then
-  js="const roles = JSON.parse('${esc_roles}'); db.getSiblingDB('${esc_db}').updateUser('${esc_user}', {pwd:'${esc_pass}', roles:roles, customData:{temp_account:true, expires_at:'${esc_expires}', request_id:'${esc_req_id}', issued_at:'${esc_now}'}}); JSON.stringify({ok:1, action:'recreated'})"
+  js="const roles = JSON.parse('${esc_roles}'); db.getSiblingDB('${esc_db}').updateUser('${esc_user}', {pwd:'${esc_pass}', roles:roles, customData:{provisioned_account:true, expires_at:'${esc_expires}', request_id:'${esc_req_id}', issued_at:'${esc_now}'}}); JSON.stringify({ok:1, action:'recreated'})"
 else
-  js="const roles = JSON.parse('${esc_roles}'); db.getSiblingDB('${esc_db}').createUser({user:'${esc_user}', pwd:'${esc_pass}', roles:roles, customData:{temp_account:true, expires_at:'${esc_expires}', request_id:'${esc_req_id}', issued_at:'${esc_now}'}}); JSON.stringify({ok:1, action:'created'})"
+  js="const roles = JSON.parse('${esc_roles}'); db.getSiblingDB('${esc_db}').createUser({user:'${esc_user}', pwd:'${esc_pass}', roles:roles, customData:{provisioned_account:true, expires_at:'${esc_expires}', request_id:'${esc_req_id}', issued_at:'${esc_now}'}}); JSON.stringify({ok:1, action:'created'})"
 fi
 
 _mongosh_eval "admin" "$js" >/dev/null 2>&1 || fail_task "CREATE_FAILED" "failed to create or recreate account"

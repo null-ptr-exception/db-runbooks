@@ -1,6 +1,6 @@
 # MongoDB Account Lifecycle Tasks
 
-This document describes temporary account lifecycle management for single-cluster MongoDB (`kind-cluster-dbs`, namespace `mongo-1`).
+This document describes run account lifecycle management for single-cluster MongoDB (`kind-cluster-dbs`, namespace `mongo-1`).
 
 ## Core Rules
 
@@ -10,7 +10,7 @@ This document describes temporary account lifecycle management for single-cluste
 
 ## Policy Collection
 
-Collection: `admin.temp_user_policies`
+Collection: `admin.run_account_policies`
 
 Required fields:
 
@@ -31,7 +31,6 @@ Status enum:
 - `ACTIVE`
 - `CHANGED`
 - `PERMANENT`
-- `EXPIRED_PENDING`
 - `EXPIRED_DELETED`
 - `ERROR`
 - `CANCELLED`
@@ -56,7 +55,7 @@ No mutation endpoint should bypass this pipeline.
 
 ### `create-account`
 
-Create (or recreate when `allow_existing=true`) a temporary account.
+Create (or recreate when `allow_existing=true`) a run account.
 
 Request fields:
 
@@ -67,7 +66,7 @@ Request fields:
 - `username`
 - `roles_json` (`[{"role":"readWrite","db":"mydb"}]`)
 - `database` (fallback role db when `roles_json` empty)
-- `temp_days`
+- `validity_days`
 - `dry_run`
 - `confirm`
 - `allow_existing`

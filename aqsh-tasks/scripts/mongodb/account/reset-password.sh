@@ -14,7 +14,7 @@ MONGO_CRED_USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
 MONGO_CRED_PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
 ACCOUNT_AUTH_DB="${ACCOUNT_AUTH_DB:-admin}"
 ACCOUNT_USERNAME="${ACCOUNT_USERNAME:?ACCOUNT_USERNAME is required}"
-TEMP_DAYS="${TEMP_DAYS:-14}"
+VALIDITY_DAYS="${VALIDITY_DAYS:-14}"
 RESET_OVERRIDE="${RESET_OVERRIDE:-false}"
 PASSWORD_LENGTH="${PASSWORD_LENGTH:-24}"
 PASSWORD_SPECIAL_CHARS="${PASSWORD_SPECIAL_CHARS:-!@#%^*_-+=.}"
@@ -22,91 +22,13 @@ PASSWORD_SPECIAL_MAX="${PASSWORD_SPECIAL_MAX:-4}"
 PASSWORD_DELIVERY_MODE="${PASSWORD_DELIVERY_MODE:-one_time_plaintext}"
 RECIPIENT_PGP_PUBKEY="${RECIPIENT_PGP_PUBKEY:-}"
 
-if ! [[ "$TEMP_DAYS" =~ ^[0-9]+$ ]] || [[ "$TEMP_DAYS" -lt 1 ]]; then
-  fail_task "INVALID_INPUT" "temp_days must be a positive integer"
+if ! [[ "$VALIDITY_DAYS" =~ ^[0-9]+$ ]] || [[ "$VALIDITY_DAYS" -lt 1 ]]; then
+  fail_task "INVALID_INPUT" "validity_days must be a positive integer"
 fi
 
 if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" && "$PASSWORD_DELIVERY_MODE" != "encrypted_payload" ]]; then
   fail_task "INVALID_INPUT" "unsupported password_delivery_mode"
 fi
-
-encrypt_password_payload() {
-  local plaintext_password="${1:?password is required}"
-  local pubkey_input="${2:?recipient pgp public key is required}"
-  local gnupg_home raw_import_ok fingerprint ciphertext decoded_key
-
-  gnupg_home=$(mktemp -d)
-  chmod 700 "$gnupg_home"
-
-  export GNUPGHOME="$gnupg_home"
-
-  if printf '%s' "$pubkey_input" | gpg --batch --import >/dev/null 2>&1; then
-    raw_import_ok="true"
-  else
-    raw_import_ok="false"
-  fi
-
-  if [[ "$raw_import_ok" != "true" ]]; then
-    decoded_key=$(printf '%s' "$pubkey_input" | base64 -d 2>/dev/null || true)
-    if [[ -z "$decoded_key" ]]; then
-      rm -rf "$gnupg_home"
-      return 1
-    fi
-    printf '%s' "$decoded_key" | gpg --batch --import >/dev/null 2>&1 || {
-      rm -rf "$gnupg_home"
-      return 1
-    }
-  fi
-
-  fingerprint=$(gpg --batch --with-colons --list-keys | awk -F: '$1=="fpr"{print $10; exit}')
-  if [[ -z "$fingerprint" ]]; then
-    rm -rf "$gnupg_home"
-    return 1
-  fi
-
-  ciphertext=$(printf '%s' "$plaintext_password" | gpg --batch --yes --trust-model always --armor --recipient "$fingerprint" --encrypt 2>/dev/null) || {
-    rm -rf "$gnupg_home"
-    return 1
-  }
-
-  rm -rf "$gnupg_home"
-
-  jq -nc \
-    --arg recipient_key_fingerprint "$fingerprint" \
-    --arg ciphertext "$ciphertext" \
-    '{mode:"encrypted_payload", recipient_key_fingerprint:$recipient_key_fingerprint, content_type:"application/pgp-encrypted", ciphertext:$ciphertext}'
-}
-
-generate_password() {
-  python3 - "$PASSWORD_LENGTH" "$PASSWORD_SPECIAL_CHARS" "$PASSWORD_SPECIAL_MAX" <<'PY'
-import secrets
-import string
-import sys
-
-length = int(sys.argv[1])
-special = ''.join(dict.fromkeys(sys.argv[2]))
-special_max = int(sys.argv[3])
-
-if length < 12:
-    raise SystemExit("length must be >= 12")
-if any(ch in "'\"\\ \t\n\r" for ch in special):
-    raise SystemExit("unsupported special charset")
-
-alpha_num = string.ascii_letters + string.digits
-while True:
-    out = []
-    s_used = 0
-    for _ in range(length):
-        if special and s_used < special_max and secrets.randbelow(100) < 20:
-            out.append(secrets.choice(special))
-            s_used += 1
-        else:
-            out.append(secrets.choice(alpha_num))
-    if any(c.islower() for c in out) and any(c.isupper() for c in out) and any(c.isdigit() for c in out):
-        print(''.join(out))
-        break
-PY
-}
 
 precheck_rc=0
 mongo_account_shared_precheck "true" "$DB_NAMESPACE" "$MONGO_STS_NAME" "$MONGO_CRED_SECRET" "$MONGO_CRED_USER_KEY" "$MONGO_CRED_PASS_KEY" "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" || precheck_rc=$?
@@ -135,7 +57,7 @@ mongo_update_user_password "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" "$new_password
 
 new_fingerprint=$(mongo_account_credentials_fingerprint "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME") || fail_task "FINGERPRINT_FAILED" "cannot compute credentials fingerprint"
 now_utc="$(iso_utc_now)"
-expires_at="$(iso_utc_after_days "$TEMP_DAYS")"
+expires_at="$(iso_utc_after_days "$VALIDITY_DAYS")"
 initial_fingerprint="$new_fingerprint"
 if [[ -n "$policy_status" ]]; then
   existing_initial=$(mongo_policy_get_json "$ACCOUNT_AUTH_DB" "$ACCOUNT_USERNAME" | jq -r '.initial_cred_fingerprint // empty' 2>/dev/null || true)

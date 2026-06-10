@@ -77,7 +77,7 @@ tasks:
         default: db-backups
   create-account:
     script: mongodb/account/create-account.sh
-    description: "Create or recreate a temporary MongoDB account"
+    description: "Create or recreate a run MongoDB account"
     timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -126,8 +126,8 @@ tasks:
         required: false
         type: string
         default: admin
-      - name: temp_days
-        env: TEMP_DAYS
+      - name: validity_days
+        env: VALIDITY_DAYS
         required: false
         type: string
         default: "14"
@@ -275,7 +275,7 @@ tasks:
         default: SECURITY_POLICY
   extend-expiry:
     script: mongodb/account/extend-expiry.sh
-    description: "Extend temporary account expiry"
+    description: "Extend run account expiry"
     timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -370,7 +370,7 @@ tasks:
         type: string
   force-permanent:
     script: mongodb/account/force-permanent.sh
-    description: "Force a temporary account into permanent state"
+    description: "Force a run account into permanent state"
     timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -421,7 +421,7 @@ tasks:
         default: MANUAL_FORCE_PERMANENT
   reset-password:
     script: mongodb/account/reset-password.sh
-    description: "Reset account password and optionally restart temporary lifecycle"
+    description: "Reset account password and optionally restart run lifecycle"
     timeout: 8m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -429,6 +429,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
+        pattern: '^mongo-[0-9]+$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -459,8 +460,8 @@ tasks:
         env: ACCOUNT_USERNAME
         required: true
         type: string
-      - name: temp_days
-        env: TEMP_DAYS
+      - name: validity_days
+        env: VALIDITY_DAYS
         required: false
         type: string
         default: "14"
@@ -496,7 +497,7 @@ tasks:
         default: ""
   reconcile-expiry:
     script: mongodb/account/reconcile-expiry.sh
-    description: "Reconcile expired temporary accounts"
+    description: "Reconcile expired run accounts"
     timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
     input:

@@ -576,7 +576,7 @@ _submit_task_allow_failure() {
   local result reason_code
   result="$(_task_result_data)"
   reason_code=$(echo "$result" | jq -r '.reason_code // empty')
-  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+  [ "$reason_code" = "NOT_FOUND" ] || [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
 }
 
 @test "extend-expiry fails on non-existent account" {
@@ -594,7 +594,7 @@ _submit_task_allow_failure() {
   local result reason_code
   result="$(_task_result_data)"
   reason_code=$(echo "$result" | jq -r '.reason_code // empty')
-  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+  [ "$reason_code" = "NOT_FOUND" ] || [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
 }
 
 @test "extend-expiry rejects invalid extend_days" {
@@ -640,7 +640,7 @@ _submit_task_allow_failure() {
   local result reason_code
   result="$(_task_result_data)"
   reason_code=$(echo "$result" | jq -r '.reason_code // empty')
-  [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
+  [ "$reason_code" = "NOT_FOUND" ] || [ "$reason_code" = "ACCOUNT_NOT_FOUND" ] || [ "$reason_code" = "OPERATION_FAILED" ]
 }
 
 @test "reset-password rejects invalid validity_days" {

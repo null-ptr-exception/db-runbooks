@@ -226,7 +226,7 @@ Dockerfile                    # Base: aqsh + kubectl + mongosh + mariadb-client 
 aqsh-tasks/
 ├── task-mariadb.yaml       # Main config (AQSH_TASKS_CONFIG): defaults + include tasks-mariadb.yaml
 ├── task-mongodb.yaml       # Main config (AQSH_TASKS_CONFIG): defaults + include tasks-mongodb.yaml
-├── tasks-mariadb.yaml      # Included task definitions: restart, sanity-check, common/hello, backup*
+├── tasks-mariadb.yaml      # Included task definitions: restart, sanity-check, create-account, common/hello, backup*
 ├── tasks-mongodb.yaml      # Included task definitions: restart, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries
 │   ├── logging.sh          # log_info / log_error / log_debug

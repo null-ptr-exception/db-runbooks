@@ -46,8 +46,17 @@ startup_logs() {
   local tasks_path="$1" cid
   cid="$(docker run -d --platform linux/amd64 "$SHIPPED_IMG" \
     -tasks "$tasks_path" -mode worker)"
-  sleep 3
-  output="$(docker logs "$cid" 2>&1)"
+  # Poll the logs until a load verdict appears (or we time out) instead of a
+  # fixed sleep — startup timing varies and a hard wait flakes in CI.
+  local deadline=$((SECONDS + 15))
+  while true; do
+    output="$(docker logs "$cid" 2>&1)"
+    [[ "$output" == *"loaded tasks config"* \
+      || "$output" == *"failed to load tasks config"* \
+      || "$output" == *"must not define defaults"* ]] && break
+    (( SECONDS >= deadline )) && break
+    sleep 0.5
+  done
   docker rm -f "$cid" >/dev/null 2>&1 || true
 }
 

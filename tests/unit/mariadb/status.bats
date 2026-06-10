@@ -6,6 +6,8 @@ setup() {
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/status.sh"
   export _LOG_CURRENT_LEVEL=3
+  # Keep the caller environment from leaking a target name into auto-detect.
+  unset MARIADB_NAME MARIADB_STS_NAME || true
   mkdir -p "${TEST_TMPDIR}/bin"
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'
@@ -40,18 +42,30 @@ if [[ "$cmd" == "get" ]]; then
   name="${args[2]:-}"
   output="${args[*]}"
 
+  # List form used by auto-detect: get <resource> -o jsonpath=...items[*]...
+  # KUBECTL_CR_NAMES / KUBECTL_STS_NAMES are space-separated names (may be empty).
+  if [[ "$output" == *'items[*]'* ]]; then
+    if [[ "$resource" == "mariadb" ]]; then
+      printf '%s' "${KUBECTL_CR_NAMES:-}" | tr ' ' '\n' | sed '/^$/d'
+    elif [[ "$resource" == "statefulset" ]]; then
+      printf '%s' "${KUBECTL_STS_NAMES:-}" | tr ' ' '\n' | sed '/^$/d'
+    fi
+    exit 0
+  fi
+
   if [[ "$resource" == "mariadb" && "${KUBECTL_NO_CR:-false}" == "true" ]]; then
     exit 1
   fi
 
-  if [[ "$resource" == "mariadb" && "$name" == "mariadb" ]]; then
+  # Return CR JSON for any requested name (not the list/`-o` form).
+  if [[ "$resource" == "mariadb" && -n "$name" && "$name" != "-o" ]]; then
     cat <<'JSON'
 {"spec":{"replicas":2},"status":{"currentPrimary":"mariadb-0","currentPrimaryPodIndex":0,"conditions":[{"type":"Ready","status":"True"}]}}
 JSON
     exit 0
   fi
 
-  if [[ "$resource" == "statefulset" && "$name" == "mariadb" ]]; then
+  if [[ "$resource" == "statefulset" && -n "$name" && "$name" != "-o" ]]; then
     cat <<'JSON'
 {"spec":{"replicas":2,"updateStrategy":{"type":"RollingUpdate"}},"status":{"readyReplicas":2,"observedGeneration":7}}
 JSON
@@ -151,4 +165,46 @@ EOF
   [ "$cr_present" = "false" ]
   [ "$sts_present" = "true" ]
   [ "$pod_count" -eq 2 ]
+}
+
+@test "auto-detects the single MariaDB CR when --mdb is omitted" {
+  export KUBECTL_CR_NAMES="mdb-v24"
+  export KUBECTL_STS_NAMES="mdb-v24"
+
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --skip-sql --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "MARIADB_STATUS_OK" ]
+  [ "$(printf '%s' "$output" | jq -r '.target.mdb')" = "mdb-v24" ]
+}
+
+@test "auto-detects a single StatefulSet when no CR exists (native)" {
+  export KUBECTL_CR_NAMES=""
+  export KUBECTL_STS_NAMES="legacy-mdb"
+
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --skip-sql --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.target.mdb')" = "legacy-mdb" ]
+}
+
+@test "reports MARIADB_AMBIGUOUS when several CRs and --mdb is omitted" {
+  export KUBECTL_CR_NAMES="alpha beta"
+
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --skip-sql --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "MARIADB_AMBIGUOUS" ]
+  [ "$(printf '%s' "$output" | jq -r '.candidates | join(",")')" = "alpha,beta" ]
+  [ "$(printf '%s' "$output" | jq -r '.target.mdb')" = "null" ]
+}
+
+@test "reports MARIADB_NOT_FOUND when no CR or StatefulSet and --mdb is omitted" {
+  export KUBECTL_CR_NAMES=""
+  export KUBECTL_STS_NAMES=""
+
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace mariadb-1 --skip-sql --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "MARIADB_NOT_FOUND" ]
 }

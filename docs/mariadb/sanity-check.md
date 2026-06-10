@@ -63,7 +63,7 @@ Served by **aqsh-mariadb** on NodePort `30081`.
 | `namespace` | `DB_NAMESPACE` | string | **yes** | - | Target namespace |
 | `context` | `K8S_CONTEXT` | string | no | current / in-cluster | Kubernetes context |
 | `resource` | `MARIADB_RESOURCE` | string | no | `mariadb` | MariaDB CR kind |
-| `mdb` | `MARIADB_NAME` | string | no | `mariadb` | MariaDB CR and StatefulSet name |
+| `mdb` | `MARIADB_NAME` | string | no | _auto-detect_ | MariaDB CR / StatefulSet name. When omitted, auto-detected from the namespace (single CR, else single StatefulSet); several matches return `MARIADB_AMBIGUOUS`. |
 | `container` | `MARIADB_CONTAINER` | string | no | `mariadb` | MariaDB container name |
 | `lag_threshold` | `LAG_THRESHOLD` | string | no | `1` | Max replica lag in seconds |
 | `conn_warn_pct` | `CONN_WARN_PCT` | string | no | `80` | Connection utilization WARN threshold |

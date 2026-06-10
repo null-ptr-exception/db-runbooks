@@ -6,6 +6,10 @@ set -euo pipefail
 # Read-only MariaDB status summary for operator and native StatefulSet targets.
 # =============================================================================
 
+# Capture the caller-supplied target name BEFORE sourcing libs — lib/mariadb.sh
+# defaults MARIADB_NAME to "mariadb" at load time. Empty here means auto-detect.
+MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,7 +28,8 @@ source "${LIB_DIR}/mariadb.sh"
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
+# Empty when the caller gave no name → auto-detected from the namespace below.
+MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 INCLUDE_SQL="${INCLUDE_SQL:-true}"
 RESULT_FILE="${AQSH_RESULT_FILE:-}"
@@ -38,7 +43,7 @@ Usage:
 Options:
   --context <context>      Kubernetes context. Optional for in-cluster AQSH.
   --resource <kind>        MariaDB CR kind. Default: mariadb.
-  --mdb <name>             MariaDB CR / StatefulSet name. Default: mariadb.
+  --mdb <name>             MariaDB CR / StatefulSet name. Default: auto-detected from the namespace.
   --container <name>       MariaDB container name. Default: mariadb.
   --skip-sql               Do not exec into pods for SQL role/readiness.
   --json                   Print only JSON to stdout.
@@ -110,6 +115,40 @@ if ! k8s_check >/dev/null; then
   [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$RESULT_JSON" > "$RESULT_FILE"
   printf '%s\n' "$RESULT_JSON"
   exit 0
+fi
+
+# Auto-detect the target when --mdb / MARIADB_NAME was not supplied. Operator
+# CRs are tried first, then StatefulSets (native). Exactly one match → use it;
+# none or several → a structured error so the caller can disambiguate.
+if [[ -z "$MDB" ]]; then
+  resolve_rc=0
+  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
+  if [[ "$resolve_rc" -eq 0 ]]; then
+    MDB="$resolved"
+    MARIADB_NAME="$MDB"
+    [[ "$JSON_ONLY" -ne 1 ]] && log_info "mariadb-status" "auto-detected mdb=${MDB}"
+  else
+    if [[ "$resolve_rc" -eq 2 ]]; then
+      RESOLVE_REASON="MARIADB_AMBIGUOUS"
+      RESOLVE_SUMMARY="Multiple MariaDB targets in namespace; specify --mdb"
+    else
+      RESOLVE_REASON="MARIADB_NOT_FOUND"
+      RESOLVE_SUMMARY="No MariaDB CR or StatefulSet found in namespace"
+    fi
+    RESULT_JSON=$(jq -nc \
+      --arg context "${CONTEXT:-}" \
+      --arg namespace "$NAMESPACE" \
+      --arg resource "$RESOURCE" \
+      --arg reason "$RESOLVE_REASON" \
+      --arg summary "$RESOLVE_SUMMARY" \
+      --arg candidates "$resolved" \
+      '{status:"CRITICAL", reason_code:$reason, summary:$summary,
+        target:{context:$context, namespace:$namespace, resource:$resource, mdb:null},
+        candidates: ($candidates | if . == "" then [] else (. / ",") end)}')
+    [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$RESULT_JSON" > "$RESULT_FILE"
+    printf '%s\n' "$RESULT_JSON"
+    exit 0
+  fi
 fi
 
 CR_PRESENT=false

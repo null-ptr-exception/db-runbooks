@@ -9,6 +9,10 @@ set -euo pipefail
 # Rundeck/local users can pass the same values as CLI flags.
 # =============================================================================
 
+# Capture the caller-supplied target name BEFORE sourcing libs — lib/mariadb.sh
+# defaults MARIADB_NAME to "mariadb" at load time. Empty here means auto-detect.
+MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +39,7 @@ Required:
 Target options:
   --context <context>              Kubernetes context. Optional for in-cluster AQSH.
   --resource <kind>                MariaDB CR kind. Default: mariadb
-  --mdb <name>                     MariaDB CR / StatefulSet name. Default: mariadb
+  --mdb <name>                     MariaDB CR / StatefulSet name. Default: auto-detected from the namespace.
   --container <name>               MariaDB container name. Default: mariadb
 
 Thresholds:
@@ -88,7 +92,8 @@ bool_enabled() {
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
+# Empty when the caller gave no name → auto-detected from the namespace below.
+MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 LAG_THRESHOLD="${LAG_THRESHOLD:-1}"
 CONN_WARN_PCT="${CONN_WARN_PCT:-80}"
@@ -212,6 +217,23 @@ fi
 
 if ! k8s_check >/dev/null; then
   emit_check kubectl ERROR KUBECTL_UNAVAILABLE "kubectl is not available or cannot reach the cluster"
+fi
+
+# Auto-detect the target when --mdb / MARIADB_NAME was not supplied (CR first,
+# then StatefulSet). On failure record an ERROR check and continue — the
+# accumulated result reports ERROR with this as the first reason.
+if [[ -z "$MDB" ]]; then
+  resolve_rc=0
+  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
+  if [[ "$resolve_rc" -eq 0 ]]; then
+    MDB="$resolved"
+    MARIADB_NAME="$MDB"
+    [[ "$JSON_ONLY" -ne 1 ]] && log_info "mariadb-sanity-check" "auto-detected mdb=${MDB}"
+  elif [[ "$resolve_rc" -eq 2 ]]; then
+    emit_check target_resolve ERROR MARIADB_AMBIGUOUS "Multiple MariaDB targets in namespace (${resolved}); specify --mdb"
+  else
+    emit_check target_resolve ERROR MARIADB_NOT_FOUND "No MariaDB CR or StatefulSet found in namespace"
+  fi
 fi
 
 REPLICAS=""

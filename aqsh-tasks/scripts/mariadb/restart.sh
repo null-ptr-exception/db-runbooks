@@ -11,6 +11,10 @@ set -euo pipefail
 # loop). The flow is deliberately just: guards -> patch -> check.
 # =============================================================================
 
+# Capture the caller-supplied target name BEFORE sourcing libs — lib/mariadb.sh
+# defaults MARIADB_NAME to "mariadb" at load time. Empty here means auto-detect.
+MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,7 +57,8 @@ emit() {
 CONTEXT="${K8S_CONTEXT:-}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="${MARIADB_NAME:-mariadb}"
+# Empty when the caller gave no name → target CR auto-detected from the namespace.
+MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
@@ -91,6 +96,24 @@ mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 
 # --- guards ------------------------------------------------------------------
 k8s_check >/dev/null || { emit ERROR KUBECTL_UNAVAILABLE "Kubernetes API is not reachable" false; exit 0; }
+
+# Auto-detect the target CR when --mdb / MARIADB_NAME was not supplied. Restart
+# is operator-driven, so only CRs are considered (no StatefulSet fallback).
+if [[ -z "$MDB" ]]; then
+  resolve_rc=0
+  resolved=$(mariadb_resolve_name false) || resolve_rc=$?
+  if [[ "$resolve_rc" -eq 0 ]]; then
+    MDB="$resolved"
+    MARIADB_NAME="$MDB"
+    [[ "$JSON_ONLY" -eq 1 ]] || log_info "mariadb-restart" "auto-detected mdb=${MDB}"
+  elif [[ "$resolve_rc" -eq 2 ]]; then
+    emit BLOCKED MARIADB_AMBIGUOUS "Multiple MariaDB CRs in namespace (${resolved}); specify --mdb" false
+    exit 0
+  else
+    emit BLOCKED MARIADB_OPERATOR_REQUIRED "No MariaDB CR found; operator-driven restart needs a mariadb-operator resource" false
+    exit 0
+  fi
+fi
 
 mariadb_jsonpath "$RESOURCE" "$MDB" '{.metadata.name}' >/dev/null 2>&1 \
   || { emit BLOCKED MARIADB_OPERATOR_REQUIRED "MariaDB CR not found; operator-driven restart needs a mariadb-operator resource" false; exit 0; }

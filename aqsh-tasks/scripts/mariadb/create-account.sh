@@ -9,6 +9,10 @@ set -euo pipefail
 # Rundeck/local users can pass the same values as CLI flags.
 # =============================================================================
 
+# Capture the caller-supplied target name BEFORE sourcing libs — lib/mariadb.sh
+# defaults MARIADB_NAME to "mariadb" at load time. Empty here means auto-detect.
+MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +42,7 @@ Required:
 Target options:
   --context <context>              Kubernetes context. Optional for in-cluster AQSH.
   --resource <kind>                MariaDB CR kind. Default: mariadb
-  --mdb <name>                     MariaDB CR / StatefulSet name. Default: mariadb
+  --mdb <name>                     MariaDB CR / StatefulSet name. Default: auto-detected from the namespace.
   --container <name>               MariaDB container name. Default: mariadb
   --host <host>                    MariaDB account host. Default: %
 
@@ -89,7 +93,8 @@ json_escape() {
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
+# Empty when the caller gave no name → auto-detected from the namespace below.
+MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 DATABASE="${ACCOUNT_DATABASE:-}"
 USERNAME="${ACCOUNT_USERNAME:-}"
@@ -384,6 +389,25 @@ if ! k8s_check >/dev/null; then
   SUMMARY="kubectl is unavailable or cannot reach the target cluster"
   RESULT_JSON="$(result_json ERROR KUBECTL_UNAVAILABLE "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
   emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+fi
+
+# Auto-detect the target when --mdb / MARIADB_NAME was not supplied (CR first,
+# then StatefulSet). None or several → a structured error rather than a guess.
+if [[ -z "$MDB" ]]; then
+  resolve_rc=0
+  resolved=$(mariadb_resolve_name true) || resolve_rc=$?
+  if [[ "$resolve_rc" -eq 0 ]]; then
+    MDB="$resolved"
+    MARIADB_NAME="$MDB"
+  elif [[ "$resolve_rc" -eq 2 ]]; then
+    SUMMARY="Multiple MariaDB targets in namespace (${resolved}); specify --mdb"
+    RESULT_JSON="$(result_json ERROR MARIADB_AMBIGUOUS "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
+    emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+  else
+    SUMMARY="No MariaDB CR or StatefulSet found in namespace"
+    RESULT_JSON="$(result_json ERROR MARIADB_NOT_FOUND "$SUMMARY" "" false "$SQL_PLAN_JSON" "[]" false)"
+    emit_result "$RESULT_JSON" ERROR "$SUMMARY"
+  fi
 fi
 
 CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}' || true)"

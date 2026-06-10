@@ -26,7 +26,7 @@ spec:
             - name: AQSH_REDIS_ADDR
               value: "redis:6379"
             - name: AQSH_TASKS_CONFIG
-              value: /etc/aqsh/tasks-mongodb.yaml
+              value: /etc/aqsh/task-mongodb.yaml
             - name: AQSH_TASKS_DIR
               value: /tasks
             - name: AQSH_REQUIRE_IDENTITY

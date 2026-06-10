@@ -26,6 +26,8 @@ RUN apt-get update \
     && curl -fsSLo /usr/local/bin/mc "https://dl.min.io/client/mc/release/linux-$(dpkg --print-architecture)/mc" \
     && chmod +x /usr/local/bin/mc
 
-COPY aqsh-tasks/tasks-*.yaml /etc/aqsh/
+# Both the main configs (task-*.yaml: defaults + include) and the included task
+# lists (tasks-*.yaml) land flat in /etc/aqsh so the relative include resolves.
+COPY aqsh-tasks/task*.yaml /etc/aqsh/
 COPY --chmod=0755 aqsh-tasks/lib/ /tasks/lib/
 COPY --chmod=0755 aqsh-tasks/scripts/ /tasks/

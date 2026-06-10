@@ -1,0 +1,11 @@
+# Main aqsh config for the MongoDB runbook image.
+#
+# Holds the global `defaults:` (an included file must NOT define its own) and
+# pulls the task definitions in via `include:`. AQSH_TASKS_CONFIG points here;
+# `tasks-mongodb.yaml` is the included, defaults-free task list.
+defaults:
+  timeout: 5m
+  max_retry: 0
+  queue: mongodb
+include:
+  - tasks-mongodb.yaml

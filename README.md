@@ -224,8 +224,10 @@ open "http://${CLUSTER_MINIO_IP}:30093"  # Web UI
 ```
 Dockerfile                    # Base: aqsh + kubectl + mongosh + mariadb-client (+ mc if ENABLE_MINIO)
 aqsh-tasks/
-├── tasks-mariadb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
-├── tasks-mongodb.yaml      # Task definitions: restart, sanity-check, common/hello, backup*
+├── task-mariadb.yaml       # Main config (AQSH_TASKS_CONFIG): defaults + include tasks-mariadb.yaml
+├── task-mongodb.yaml       # Main config (AQSH_TASKS_CONFIG): defaults + include tasks-mongodb.yaml
+├── tasks-mariadb.yaml      # Included task definitions: restart, sanity-check, common/hello, backup*
+├── tasks-mongodb.yaml      # Included task definitions: restart, sanity-check, common/hello, backup*
 ├── lib/                    # Shared Bash libraries
 │   ├── logging.sh          # log_info / log_error / log_debug
 │   ├── response.sh         # response_ok / response_err (JSON helpers)

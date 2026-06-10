@@ -1,0 +1,11 @@
+# Main aqsh config for the MariaDB runbook image.
+#
+# Holds the global `defaults:` (an included file must NOT define its own) and
+# pulls the task definitions in via `include:`. AQSH_TASKS_CONFIG points here;
+# `tasks-mariadb.yaml` is the included, defaults-free task list.
+defaults:
+  timeout: 5m
+  max_retry: 0
+  queue: mariadb
+include:
+  - tasks-mariadb.yaml

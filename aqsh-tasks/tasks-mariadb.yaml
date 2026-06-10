@@ -1,7 +1,8 @@
-defaults:
-  timeout: 5m
-  max_retry: 0
-  queue: mariadb
+# Task definitions for the MariaDB runbook image.
+#
+# Pulled in via `include:` from `task-mariadb.yaml`, which owns the global
+# `defaults:` (timeout / max_retry / queue). An included file MUST NOT define
+# its own `defaults:` — aqsh rejects the whole config if it does.
 tasks:
   common/hello:
     script: common/hello.sh

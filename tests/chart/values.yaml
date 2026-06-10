@@ -32,7 +32,7 @@ aqsh:
   enabled: false
   image: localhost:5005/db-runbooks:latest
   imagePullPolicy: Always
-  tasksConfig: /etc/aqsh/tasks-mariadb.yaml
+  tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1

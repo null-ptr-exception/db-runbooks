@@ -70,6 +70,19 @@ _submit_task() {
   wait_for_task "$MONGODB_AQSH_URL" "$task_id"
 }
 
+_submit_task_allow_failure() {
+  local path="$1"
+  local payload="$2"
+  local task_id
+
+  http_post "${MONGODB_AQSH_URL}/tasks/${path}" "$payload"
+  assert_equal "$HTTP_CODE" "202"
+
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [ -n "$task_id" ]
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" || true
+}
+
 @test "create-account creates run user and policy" {
   _cleanup_account "qa_temp_user"
 
@@ -501,7 +514,7 @@ _submit_task() {
     confirm: "true"
   }')
 
-  _submit_task "create-account" "$payload"
+  _submit_task_allow_failure "create-account" "$payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -521,7 +534,7 @@ _submit_task() {
     confirm: "true"
   }')
 
-  _submit_task "create-account" "$payload"
+  _submit_task_allow_failure "create-account" "$payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -541,7 +554,7 @@ _submit_task() {
     password_delivery_mode: "encrypted_payload"
   }')
 
-  _submit_task "create-account" "$payload"
+  _submit_task_allow_failure "create-account" "$payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -558,7 +571,7 @@ _submit_task() {
     auth_db: "admin",
     username: "qa_nonexistent_ban"
   }')
-  _submit_task "ban-account" "$ban_payload"
+  _submit_task_allow_failure "ban-account" "$ban_payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -576,7 +589,7 @@ _submit_task() {
     username: "qa_nonexistent_extend",
     extend_days: "5"
   }')
-  _submit_task "extend-expiry" "$extend_payload"
+  _submit_task_allow_failure "extend-expiry" "$extend_payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -605,7 +618,7 @@ _submit_task() {
     username: "qa_invalid_extend",
     extend_days: "not_a_number"
   }')
-  _submit_task "extend-expiry" "$extend_payload"
+  _submit_task_allow_failure "extend-expiry" "$extend_payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -622,7 +635,7 @@ _submit_task() {
     auth_db: "admin",
     username: "qa_nonexistent_force"
   }')
-  _submit_task "force-permanent" "$force_payload"
+  _submit_task_allow_failure "force-permanent" "$force_payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -651,7 +664,7 @@ _submit_task() {
     username: "qa_reset_invalid",
     validity_days: "0"
   }')
-  _submit_task "reset-password" "$reset_payload"
+  _submit_task_allow_failure "reset-password" "$reset_payload"
 
   local result reason_code
   result="$(_task_result_data)"
@@ -681,7 +694,7 @@ _submit_task() {
     validity_days: "7",
     password_delivery_mode: "encrypted_payload"
   }')
-  _submit_task "reset-password" "$reset_payload"
+  _submit_task_allow_failure "reset-password" "$reset_payload"
 
   local result reason_code
   result="$(_task_result_data)"

@@ -98,6 +98,9 @@ wait_for_task() {
 
     status=$(echo "$TASK_RESPONSE" | jq -r '.status' 2>/dev/null || true)
 
+    # Heartbeat for long-running async tasks to avoid "stuck" perception.
+    echo "Task ${task_id} polling: status=${status:-unknown} elapsed=${elapsed}s/${max_wait}s" >&2
+
     if [[ "$status" == "completed" ]]; then
       return 0
     elif [[ "$status" == "failed" ]]; then
@@ -135,6 +138,44 @@ _wait_for_ns_deleted() {
     elapsed=$((elapsed + 3))
   done
   echo "Namespace ${namespace} still Terminating after 60s" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _wait_for_mongodb_primary <namespace> [context] [max_wait_seconds]
+#
+# Waits until MongoDB responds as writable primary from inside the pod.
+# This avoids transient flakiness right after StatefulSet rollout.
+# ---------------------------------------------------------------------------
+_wait_for_mongodb_primary() {
+  local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local max_wait="${3:-120}"
+  local elapsed=0
+
+  while (( elapsed < max_wait )); do
+    local user pass pod
+    user=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+      -o jsonpath='{.data.MONGO_ROOT_USER}' 2>/dev/null | base64 -d || true)
+    pass=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+      -o jsonpath='{.data.MONGO_ROOT_PASS}' 2>/dev/null | base64 -d || true)
+    pod=$(kubectl --context "$ctx" -n "$namespace" get pod -l app=mongodb \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+
+    if [[ -n "$user" && -n "$pass" && -n "$pod" ]]; then
+      if kubectl --context "$ctx" -n "$namespace" exec "$pod" -- mongosh --quiet --norc \
+        "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=2000" \
+        --eval 'const h=db.hello(); if (h && (h.isWritablePrimary || h.ismaster)) { quit(0); } quit(1);' \
+        >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+
+  echo "MongoDB primary not ready in namespace ${namespace} after ${max_wait}s" >&2
   return 1
 }
 
@@ -252,6 +293,9 @@ EOF
       return 1
     }
   fi
+
+  echo "Waiting for MongoDB primary election in ${namespace}..."
+  _wait_for_mongodb_primary "$namespace" "$ctx" 180
 }
 
 # ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ _STS_NAME="${MONGO_STS_NAME:-mongodb}"
 _CRED_SECRET="${MONGO_CRED_SECRET:-mongodb-credentials}"
 _CRED_USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
 _CRED_PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
+_PRIMARY_RESOLVE_MAX_WAIT="${MONGO_PRIMARY_RESOLVE_MAX_WAIT_SECONDS:-90}"
+_PRIMARY_RESOLVE_INTERVAL="${MONGO_PRIMARY_RESOLVE_INTERVAL_SECONDS:-3}"
 
 # ── Preflight failure writer ──────────────────────────────────────────────────
 # Called when a pre-check step fails before the main check loop runs.
@@ -47,6 +49,29 @@ _preflight_critical() {
   exit 1
 }
 
+_resolve_primary_with_retry() {
+  local seed_host="$1"
+  local seed_port="$2"
+  local user="$3"
+  local pass="$4"
+  local auth_db="$5"
+
+  local elapsed=0 out
+  while (( elapsed < _PRIMARY_RESOLVE_MAX_WAIT )); do
+    if out=$(mongo_resolve_primary "$seed_host" "$seed_port" "$user" "$pass" "$auth_db" 2>/dev/null); then
+      printf '%s\n' "$out"
+      return 0
+    fi
+
+    log_warn "mongo-sanity-check" \
+      "primary not ready yet via ${seed_host}:${seed_port}; retrying in ${_PRIMARY_RESOLVE_INTERVAL}s (${elapsed}/${_PRIMARY_RESOLVE_MAX_WAIT}s elapsed)"
+    sleep "${_PRIMARY_RESOLVE_INTERVAL}"
+    elapsed=$((elapsed + _PRIMARY_RESOLVE_INTERVAL))
+  done
+
+  return 1
+}
+
 # ── Read credentials from K8s Secret ─────────────────────────────────────────
 MONGO_USER=$(kubectl -n "${DB_NAMESPACE}" get secret "${_CRED_SECRET}" \
   -o jsonpath="{.data.${_CRED_USER_KEY}}" 2>/dev/null | base64 -d) || \
@@ -60,8 +85,8 @@ MONGO_PASS=$(kubectl -n "${DB_NAMESPACE}" get secret "${_CRED_SECRET}" \
 _SEED_HOST="${_STS_NAME}-0.${_STS_NAME}.${DB_NAMESPACE}.svc.cluster.local"
 _SEED_PORT="27017"
 
-_PRIMARY_OUTPUT=$(mongo_resolve_primary "$_SEED_HOST" "$_SEED_PORT" "$MONGO_USER" "$MONGO_PASS" "admin") || \
-  _preflight_critical "cannot resolve MongoDB primary via seed ${_SEED_HOST}:${_SEED_PORT} — check that the StatefulSet pods are running and credentials are correct"
+_PRIMARY_OUTPUT=$(_resolve_primary_with_retry "$_SEED_HOST" "$_SEED_PORT" "$MONGO_USER" "$MONGO_PASS" "admin") || \
+  _preflight_critical "cannot resolve MongoDB primary via seed ${_SEED_HOST}:${_SEED_PORT} within ${_PRIMARY_RESOLVE_MAX_WAIT}s — check that the StatefulSet pods are running and credentials are correct"
 MONGO_HOST=$(echo "$_PRIMARY_OUTPUT" | sed -n '1p')
 _RESOLVED_PORT=$(echo "$_PRIMARY_OUTPUT" | sed -n '2p')
 MONGO_PORT="${_RESOLVED_PORT:-27017}"

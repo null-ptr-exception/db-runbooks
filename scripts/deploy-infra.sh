@@ -13,6 +13,10 @@ export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
 export MARIADB_OPERATOR_CHART_VERSION="${MARIADB_OPERATOR_CHART_VERSION:-}"
 export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
+if command -v mise >/dev/null 2>&1; then
+  eval "$(mise activate bash)"
+fi
+
 SKAFFOLD_RENDER_DIR="${ROOT_DIR}/.skaffold-rendered"
 SKAFFOLD_BUILD_OUTPUT="${SKAFFOLD_RENDER_DIR}/build.json"
 
@@ -297,6 +301,10 @@ fi
 
 kubectl --context kind-cluster-auth apply -f "${ROOT_DIR}/k8s/cluster-auth/deployment.yaml"
 kubectl_apply_with_retry "kind-cluster-auth" "${ROOT_DIR}/k8s/cluster-auth/service.yaml"
+
+# kube-federated-auth reads clusters.yaml at startup; restart so configmap changes
+# (for single/dual mode switches) are picked up deterministically.
+kubectl --context kind-cluster-auth -n db-ops rollout restart deployment/kube-federated-auth
 
 echo "Waiting for kube-federated-auth to be ready..."
 kubectl --context kind-cluster-auth -n db-ops rollout status deployment/kube-federated-auth --timeout=240s

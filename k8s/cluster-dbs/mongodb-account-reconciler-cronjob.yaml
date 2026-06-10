@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mongo-account-reconciler
+  namespace: mongo-1
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mongo-account-reconciler
+  namespace: mongo-1
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["mongodb-credentials"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mongo-account-reconciler
+  namespace: mongo-1
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: mongo-account-reconciler
+subjects:
+  - kind: ServiceAccount
+    name: mongo-account-reconciler
+    namespace: mongo-1
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mongo-account-reconciler
+  namespace: mongo-1
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: mongo-account-reconciler
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: reconcile
+              image: ghcr.io/null-ptr-exception/db-runbooks:v0.4.0
+              imagePullPolicy: Always
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              env:
+                - name: DB_NAMESPACE
+                  valueFrom:
+                    fieldRef:
+                      fieldPath: metadata.namespace
+                - name: MONGO_STS_NAME
+                  value: mongodb
+                - name: MONGO_CRED_SECRET
+                  value: mongodb-credentials
+                - name: MONGO_CRED_USER_KEY
+                  value: MONGO_ROOT_USER
+                - name: MONGO_CRED_PASS_KEY
+                  value: MONGO_ROOT_PASS
+              command: ["/tasks/mongodb/account/reconcile-expiry.sh"]

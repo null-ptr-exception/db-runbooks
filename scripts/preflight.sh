@@ -105,12 +105,20 @@ else
   _ok "$(bats --version)"
 fi
 
-# 5. mise tools (kubectl, helm, skaffold, etc.) — from .mise.toml
+# 5. mise tools (runtime required)
 echo ""
 echo "=== mise tools ==="
 mise trust "$ROOT_DIR" 2>/dev/null || true
-mise install
-mise ls --current
+
+# Lint-only tooling is skipped by default to avoid blocking setup/test flows
+# when upstream release mirrors are temporarily unavailable.
+RUNTIME_MISE_TOOLS=(kubectl helm skaffold helmfile ctlptl)
+if [[ "${PREFLIGHT_INSTALL_SHELLCHECK:-0}" == "1" ]]; then
+  RUNTIME_MISE_TOOLS+=(shellcheck)
+fi
+
+mise install "${RUNTIME_MISE_TOOLS[@]}"
+mise ls --current "${RUNTIME_MISE_TOOLS[@]}"
 
 # 6. bats helpers (bats-support, bats-assert, bats-mock)
 echo ""

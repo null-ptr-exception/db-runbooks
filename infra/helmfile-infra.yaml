@@ -9,15 +9,20 @@ helmDefaults:
 
 releases:
   # --- Shared resources (cluster-scoped, used by all test suites) ---
+  # Needs istio-base for Gateway CRD
   - name: shared
     namespace: default
     chart: ./shared
     kubeContext: kind-cluster-a
+    needs:
+      - istio-system/istio-base
 
   - name: shared
     namespace: default
     chart: ./shared
     kubeContext: kind-cluster-b
+    needs:
+      - istio-system/istio-base
 
   # --- Cilium CNI ---
   - name: cilium

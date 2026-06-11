@@ -21,6 +21,7 @@ common_setup() {
   source "${ROOT_DIR}/.env"
 
   export DB_MODE="${DB_MODE:-single}"
+  export ENABLE_MINIO="${ENABLE_MINIO:-false}"
   export USE_MARIADB_OPERATOR="${USE_MARIADB_OPERATOR:-true}"
   export CLUSTER_DBS_CONTEXT="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
 
@@ -31,6 +32,7 @@ common_setup() {
 
   if [[ "$DB_MODE" == "dual" ]]; then
     export CLUSTER_DBS_A_IP CLUSTER_DBS_B_IP
+    export CLUSTER_MINIO_IP="${CLUSTER_MINIO_IP:-}"
     export MARIADB_AQSH_A_URL="http://${CLUSTER_DBS_A_IP}:30081"
     export MARIADB_AQSH_B_URL="http://${CLUSTER_DBS_B_IP}:30081"
     export MONGODB_AQSH_A_URL="http://${CLUSTER_DBS_A_IP}:30082"

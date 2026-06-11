@@ -83,8 +83,13 @@ _build_response() {
   local json_data
   if [[ -z "$data" ]]; then
     json_data="null"
-  elif _is_json "$data"; then
-    json_data="$data"
+  elif _is_json "$data" && json_data="$(jq -c . <<<"$data" 2>/dev/null)"; then
+    # Compact so the response is always a single line — callers (the blue/green
+    # orchestrators in particular) parse task output line-wise. _is_json is only
+    # a prefix heuristic: when the data merely LOOKS like JSON and jq fails to
+    # parse it, fall through and ship it as an escaped string instead of
+    # emitting a broken response.
+    :
   else
     local escaped_data
     escaped_data=$(_escape_json_string "$data")

@@ -136,9 +136,11 @@ render_aqsh_manifests() {
   mkdir -p "$render_dir"
 
   cp "${ROOT_DIR}/k8s/cluster-dbs/redis.yaml" "${render_dir}/redis.yaml"
+  # shellcheck disable=SC2016
   envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-deployment.yaml.tpl" \
     > "${render_dir}/aqsh-mariadb-deployment.yaml"
   cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mariadb-service.yaml" "${render_dir}/aqsh-mariadb-service.yaml"
+  # shellcheck disable=SC2016
   envsubst '${CLUSTER_AUTH_IP}' < "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-deployment.yaml.tpl" \
     > "${render_dir}/aqsh-mongodb-deployment.yaml"
   cp "${ROOT_DIR}/k8s/cluster-dbs/aqsh-mongodb-service.yaml" "${render_dir}/aqsh-mongodb-service.yaml"
@@ -215,10 +217,12 @@ deploy_dbs_cluster() {
     if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then
       # Use HTTP+stream config
       export PEER_DBS_IP="${peer_ip}" CLUSTER_MINIO_IP
+      # shellcheck disable=SC2016
       envsubst '${PEER_DBS_IP} ${CLUSTER_MINIO_IP}' < "${ROOT_DIR}/k8s/nginx-proxy/configmap-http.yaml.tpl" \
         | kubectl --context "$ctx" apply -f -
     else
       # Use stream-only config (existing)
+      # shellcheck disable=SC2016
       PEER_DBS_IP="$peer_ip" envsubst '${PEER_DBS_IP}' < "${ROOT_DIR}/k8s/nginx-proxy/configmap.yaml.tpl" \
         | kubectl --context "$ctx" apply -f -
     fi

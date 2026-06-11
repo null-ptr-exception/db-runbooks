@@ -23,7 +23,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mariadb-[0-9]+$'
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - name: context
         env: K8S_CONTEXT
         required: false
@@ -635,7 +635,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mariadb-[0-9]+$'
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - name: minio_bucket
         env: MINIO_BUCKET
         required: false

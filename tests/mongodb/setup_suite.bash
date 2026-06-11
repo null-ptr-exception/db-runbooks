@@ -25,7 +25,7 @@ setup_suite() {
   docker push localhost:5005/db-runbooks:latest
 
   # Extract runtime credentials (issuers, CA certs)
-  local ISSUER_A ISSUER_B CA_A CA_B
+  local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B
 
   ISSUER_A=$(kubectl --context "$CTX_A" get --raw /.well-known/openid-configuration \
     | python3 -c "import sys,json; print(json.load(sys.stdin)['issuer'])")
@@ -37,31 +37,32 @@ setup_suite() {
   CA_B=$(kubectl --context "$CTX_B" config view --raw \
     -o jsonpath="{.clusters[?(@.name==\"kind-cluster-b\")].cluster.certificate-authority-data}" | base64 -d)
 
-  # Deploy everything in one helmfile apply (tokens are empty placeholders)
-  helmfile apply -f "${ROOT_DIR}/tests/mongodb-suite/helmfile.yaml" \
+  # Install RBAC + client + MongoDB instance first (needed for token creation)
+  helmfile apply -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" \
+    -l name=mongodb-rbac-a
+  helmfile apply -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" \
+    -l name=mongodb-client
+  helmfile apply -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" \
+    -l name=mongo-1
+
+  # Mint real tokens now that SAs exist
+  TOKEN_A=$(kubectl --context "$CTX_A" -n "$NS" create token kube-federated-auth-reader \
+    --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
+  TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
+    --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
+
+  # Install server components with real tokens
+  helmfile apply -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" \
+    -l name=mongodb-server \
     --set "federatedAuth.clusters.cluster-a.issuer=${ISSUER_A}" \
     --set "federatedAuth.clusters.cluster-a.apiServer=https://${CLUSTER_A_IP}:6443" \
     --set "federatedAuth.clusters.cluster-b.issuer=${ISSUER_B}" \
     --set "federatedAuth.clusters.cluster-b.apiServer=https://${CLUSTER_B_IP}:6443" \
     --set "federatedAuth.caCerts.cluster-a-ca\\.crt=${CA_A}" \
     --set "federatedAuth.caCerts.cluster-b-ca\\.crt=${CA_B}" \
-    --set "federatedAuth.tokens.cluster-a-token=placeholder" \
-    --set "federatedAuth.tokens.cluster-b-token=placeholder" \
+    --set "federatedAuth.tokens.cluster-a-token=${TOKEN_A}" \
+    --set "federatedAuth.tokens.cluster-b-token=${TOKEN_B}" \
     --set "federatedAuth.authorizedClients[0]=cluster-a/${NS}/kube-auth-proxy"
-
-  # Now SAs exist — create real tokens and patch the Secret
-  local TOKEN_A TOKEN_B
-  TOKEN_A=$(kubectl --context "$CTX_A" -n "$NS" create token kube-federated-auth-reader \
-    --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
-  TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
-    --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
-
-  kubectl --context "$CTX_A" -n "$NS" create secret generic kube-federated-auth-tokens \
-    --from-literal="cluster-a-token=${TOKEN_A}" \
-    --from-literal="cluster-b-token=${TOKEN_B}" \
-    --dry-run=client -o yaml | kubectl --context "$CTX_A" -n "$NS" apply -f -
-
-  kubectl --context "$CTX_A" -n "$NS" rollout restart deployment/kube-federated-auth
 
   # Wait for deployments
   echo "Waiting for kube-federated-auth..."
@@ -87,6 +88,6 @@ teardown_suite() {
     return 0
   fi
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  helmfile destroy -f "${ROOT_DIR}/tests/mongodb-suite/helmfile.yaml" || true
+  helmfile destroy -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" || true
   kubectl --context kind-cluster-a delete ns mongo-1 --ignore-not-found
 }

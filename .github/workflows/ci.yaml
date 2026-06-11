@@ -201,7 +201,7 @@ jobs:
         run: ./scripts/preflight.sh
 
       - name: Run mongodb test suite
-        run: bats tests/mongodb-suite/
+        run: bats tests/mongodb/
 
       - name: Tear down clusters
         if: always()

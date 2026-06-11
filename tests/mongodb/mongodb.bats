@@ -12,6 +12,7 @@ setup_file() {
   # Resolve test-client pod on cluster-b
   TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
     get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
 
   # Create a token from cluster-b SA
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
@@ -94,7 +95,7 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id" 180
 
   kubectl --context "$CTX_A" -n mongo-1 wait pod \
-    -l app=mongodb --for=condition=Ready --timeout=120s >/dev/null 2>&1
+    -l app=mongodb --for=condition=Ready --timeout=120s
 
   local after_generation ready replicas
   after_generation=$(kubectl --context "$CTX_A" -n mongo-1 \
@@ -105,6 +106,7 @@ wait_for_task() {
     get statefulset mongodb -o jsonpath='{.status.replicas}')
 
   echo "generation: ${before_generation} → ${after_generation}, ready: ${ready}/${replicas}"
+  [[ -n "$before_generation" && -n "$after_generation" ]] || { echo "could not read generation" >&2; return 1; }
   assert [ "$after_generation" -gt "$before_generation" ]
   assert_equal "$ready" "$replicas"
 }

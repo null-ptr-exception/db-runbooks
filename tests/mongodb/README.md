@@ -9,7 +9,7 @@ Validates MongoDB aqsh tasks: sanity-check and restart.
 
 ## Topology
 
-Built on top of the shared infra layer (`tests/infra/`).
+Built on top of the shared 2-cluster infra (`infra/deploy.sh`).
 
 - **cluster-a**:
   - `mongo-core` namespace: kube-federated-auth, kube-auth-proxy + aqsh-mongodb, Redis
@@ -21,7 +21,7 @@ Built on top of the shared infra layer (`tests/infra/`).
 ## Run
 
 ```bash
-bats tests/mongodb-suite/
+bats tests/mongodb/
 ```
 
-Teardown is opt-in: `TEARDOWN=true bats tests/mongodb-suite/`
+Teardown is opt-in: `TEARDOWN=true bats tests/mongodb/`

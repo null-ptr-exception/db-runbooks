@@ -42,7 +42,7 @@ aqsh:
 mongodb:
   enabled: false
   namespace: mongo-1
-  image: mongo:7
+  image: mongo:7.0.21
   storage: 1Gi
 
 # --- mongodb RBAC ---

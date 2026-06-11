@@ -4,10 +4,10 @@ ARG KUBECTL_VERSION=v1.30.0
 
 # Install base tools + mongosh + mariadb-client
 RUN apt-get update \
+    && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-       jq python3 curl ca-certificates gnupg libgnutls30=3.7.9-2+deb12u7 \
+       jq python3 curl ca-certificates gnupg libgnutls30 \
        mariadb-client \
-    && dpkg-query -W -f='${Version}\n' libgnutls30 | grep -qx '3.7.9-2+deb12u7' \
     # mongosh (MongoDB official apt repo for Debian)
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
        | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg \

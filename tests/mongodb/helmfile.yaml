@@ -33,6 +33,8 @@ releases:
           namespace: mongo-1
 
   # cluster-a: fedauth, aqsh-mongodb, redis, rbac, gateway
+  # Runtime-discovered values (issuers, CAs, tokens) are injected via
+  # a second helmfile apply with --values runtime-values.yaml.
   - name: mongodb-server
     chart: ../chart
     namespace: mongo-core
@@ -43,6 +45,8 @@ releases:
     values:
       - federatedAuth:
           enabled: true
+          authorizedClients:
+            - "cluster-a/mongo-core/kube-auth-proxy"
         redis:
           enabled: true
         aqsh:
@@ -55,11 +59,8 @@ releases:
           enabled: true
         gateway:
           enabled: true
-          hosts:
-            - "fedauth.kind-a.test"
-            - "aqsh-mongodb.kind-a.test"
           virtualServices:
-            - name: fedauth
+            - name: fedauth-mongodb
               host: "fedauth.kind-a.test"
               backendHost: kube-federated-auth.mongo-core.svc.cluster.local
               backendPort: 8080

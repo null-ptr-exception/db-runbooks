@@ -24,6 +24,13 @@ setup_suite() {
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
   docker push localhost:5005/db-runbooks:latest
 
+  local HELMFILE="${ROOT_DIR}/tests/aqsh/helmfile.yaml"
+
+  # First apply: deploy everything with default (empty) runtime values.
+  # This creates SAs, RBAC, and all workloads. Federated-auth starts
+  # without real tokens — that's fine, we fix it in the second apply.
+  helmfile apply -f "$HELMFILE"
+
   # Extract runtime credentials from live clusters
   local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B
 
@@ -37,26 +44,36 @@ setup_suite() {
   CA_B=$(kubectl --context "$CTX_B" config view --raw \
     -o jsonpath="{.clusters[?(@.name==\"kind-cluster-b\")].cluster.certificate-authority-data}" | base64 -d)
 
-  # Install RBAC first (needed for token creation)
-  helmfile apply -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" -l name=aqsh-rbac-a
-  helmfile apply -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" -l name=aqsh-client
-
   TOKEN_A=$(kubectl --context "$CTX_A" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
-  # Install server components with runtime credentials
-  helmfile apply -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" -l name=aqsh-server \
-    --set "federatedAuth.clusters.cluster-a.issuer=${ISSUER_A}" \
-    --set "federatedAuth.clusters.cluster-a.apiServer=https://${CLUSTER_A_IP}:6443" \
-    --set "federatedAuth.clusters.cluster-b.issuer=${ISSUER_B}" \
-    --set "federatedAuth.clusters.cluster-b.apiServer=https://${CLUSTER_B_IP}:6443" \
-    --set "federatedAuth.caCerts.cluster-a-ca\\.crt=${CA_A}" \
-    --set "federatedAuth.caCerts.cluster-b-ca\\.crt=${CA_B}" \
-    --set "federatedAuth.tokens.cluster-a-token=${TOKEN_A}" \
-    --set "federatedAuth.tokens.cluster-b-token=${TOKEN_B}" \
-    --set "federatedAuth.authorizedClients[0]=cluster-a/${NS}/kube-auth-proxy"
+  local RUNTIME_VALUES="${ROOT_DIR}/tests/aqsh/runtime-values.yaml"
+  cat > "$RUNTIME_VALUES" <<EOF
+federatedAuth:
+  clusters:
+    cluster-a:
+      issuer: "${ISSUER_A}"
+      apiServer: "https://${CLUSTER_A_IP}:6443"
+    cluster-b:
+      issuer: "${ISSUER_B}"
+      apiServer: "https://${CLUSTER_B_IP}:6443"
+  caCerts:
+    cluster-a-ca.crt: |
+$(echo "$CA_A" | sed 's/^/      /')
+    cluster-b-ca.crt: |
+$(echo "$CA_B" | sed 's/^/      /')
+  tokens:
+    cluster-a-token: "${TOKEN_A}"
+    cluster-b-token: "${TOKEN_B}"
+EOF
+
+  # Second apply: inject real runtime values. Helm updates only the
+  # resources whose values changed (Secret, ConfigMaps). Drift-free.
+  # The checksum annotation on the Deployment triggers a rollout automatically.
+  helmfile apply -f "$HELMFILE" --values "$RUNTIME_VALUES"
+  rm -f "$RUNTIME_VALUES"
 
   # Wait for deployments
   echo "Waiting for kube-federated-auth..."

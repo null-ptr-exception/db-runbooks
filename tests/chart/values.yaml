@@ -53,9 +53,8 @@ mongodbRbac:
 testClient:
   enabled: false
 
-# --- Istio Gateway + VirtualServices ---
+# --- Istio VirtualServices (route through shared-gateway) ---
 gateway:
   enabled: false
-  hosts: []
   # Each entry: { name, host, backendHost, backendPort }
   virtualServices: []

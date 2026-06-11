@@ -1,21 +1,4 @@
 {{- if .Values.gateway.enabled }}
-apiVersion: networking.istio.io/v1
-kind: Gateway
-metadata:
-  name: {{ .Release.Name }}-gateway
-  namespace: istio-ingress
-spec:
-  selector:
-    istio: ingressgateway
-  servers:
-    - port:
-        number: 80
-        name: http
-        protocol: HTTP
-      hosts:
-        {{- range .Values.gateway.hosts }}
-        - {{ . | quote }}
-        {{- end }}
 {{- range .Values.gateway.virtualServices }}
 ---
 apiVersion: networking.istio.io/v1
@@ -27,7 +10,7 @@ spec:
   hosts:
     - {{ .host | quote }}
   gateways:
-    - {{ $.Release.Name }}-gateway
+    - shared-gateway
   http:
     - route:
         - destination:

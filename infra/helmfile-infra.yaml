@@ -8,6 +8,17 @@ helmDefaults:
   skipSchemaValidation: true
 
 releases:
+  # --- Shared resources (cluster-scoped, used by all test suites) ---
+  - name: shared
+    namespace: default
+    chart: ./shared
+    kubeContext: kind-cluster-a
+
+  - name: shared
+    namespace: default
+    chart: ./shared
+    kubeContext: kind-cluster-b
+
   # --- Cilium CNI ---
   - name: cilium
     namespace: kube-system

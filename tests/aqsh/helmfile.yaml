@@ -22,8 +22,8 @@ releases:
           enabled: true
 
   # cluster-a: fedauth, aqsh, redis, gateway
-  # NOTE: federatedAuth.clusters, caCerts, tokens are set at runtime
-  # via setup_suite.bash --set flags (they require live cluster data)
+  # Runtime-discovered values (issuers, CAs, tokens) are injected via
+  # a second helmfile apply with --values runtime-values.yaml.
   - name: aqsh-server
     chart: ../chart
     namespace: aqsh-test
@@ -32,6 +32,8 @@ releases:
     values:
       - federatedAuth:
           enabled: true
+          authorizedClients:
+            - "cluster-a/aqsh-test/kube-auth-proxy"
         redis:
           enabled: true
         aqsh:
@@ -40,11 +42,8 @@ releases:
             tokenReviewURL: "http://fedauth.kind-a.test:30080"
         gateway:
           enabled: true
-          hosts:
-            - "fedauth.kind-a.test"
-            - "aqsh.kind-a.test"
           virtualServices:
-            - name: fedauth
+            - name: fedauth-aqsh
               host: "fedauth.kind-a.test"
               backendHost: kube-federated-auth.aqsh-test.svc.cluster.local
               backendPort: 8080

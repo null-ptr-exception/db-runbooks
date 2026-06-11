@@ -528,3 +528,176 @@ tasks:
         required: false
         type: string
         default: MONGO_ROOT_PASS
+  recovery/pre-check:
+    script: mongodb/recovery/pre-check.sh
+    description: "Run G1-G8 pre-flight gates for a target pod (read-only)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: target_pod
+        env: RECOVERY_TARGET_POD
+        required: true
+        type: string
+      - name: recovery_configmap
+        env: RECOVERY_CONFIGMAP
+        required: false
+        type: string
+        default: mongodb-recovery-config
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: force_wipe
+        env: FORCE_WIPE
+        required: false
+        type: string
+        default: "false"
+  recovery/wipe:
+    script: mongodb/recovery/wipe.sh
+    description: "Wipe corrupted pod data and trigger initial sync (runs G1-G8 gates first)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: target_pod
+        env: RECOVERY_TARGET_POD
+        required: true
+        type: string
+      - name: recovery_configmap
+        env: RECOVERY_CONFIGMAP
+        required: false
+        type: string
+        default: mongodb-recovery-config
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: force_wipe
+        env: FORCE_WIPE
+        required: false
+        type: string
+        default: "false"
+  recovery/reset:
+    script: mongodb/recovery/reset.sh
+    description: "Clear wipe-target and restore StatefulSet partition to locked state"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: recovery_configmap
+        env: RECOVERY_CONFIGMAP
+        required: false
+        type: string
+        default: mongodb-recovery-config
+  recovery/status:
+    script: mongodb/recovery/status.sh
+    description: "Show current recovery state (wipe-target, partition, pod phases)"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: recovery_configmap
+        env: RECOVERY_CONFIGMAP
+        required: false
+        type: string
+        default: mongodb-recovery-config
+  recovery/fix-no-primary:
+    script: mongodb/recovery/fix-no-primary.sh
+    description: "Restore primary when all RS members show SECONDARY (E1+E5 combined scenario)"
+    timeout: 8m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: level
+        env: RECOVERY_LEVEL
+        required: true
+        type: string
+        pattern: '^(diagnose|unfreeze|reconfig|force-primary)$'
+      - name: force_primary_pod
+        env: RECOVERY_FORCE_POD
+        required: false
+        type: string
+        default: ""

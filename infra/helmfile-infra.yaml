@@ -14,15 +14,17 @@ releases:
     namespace: default
     chart: ./shared
     kubeContext: kind-cluster-a
+    disableValidation: true
     needs:
-      - istio-system/istio-base
+      - kind-cluster-a/istio-ingress/istio-ingressgateway
 
   - name: shared
     namespace: default
     chart: ./shared
     kubeContext: kind-cluster-b
+    disableValidation: true
     needs:
-      - istio-system/istio-base
+      - kind-cluster-b/istio-ingress/istio-ingressgateway
 
   # --- Cilium CNI ---
   - name: cilium

@@ -91,9 +91,14 @@ curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fcreate" \
     "backup_bucket": "multi-cluster",
     "backup_prefix": "mariadb-bg/blue",
     "backup_endpoint": "'"${CLUSTER_MINIO_IP}"':30092",
+    "backup_region": "us-east-1",
     "confirm": "true"
   }'
 ```
+
+The `backup_*` fields describe the shared S3/MinIO location; the orchestrator
+forwards them (including `backup_region`, default `us-east-1`) to Green's
+bootstrap so both sides use the same backup descriptor.
 
 `green_image` is the image Green is bootstrapped with (match Blue's version so
 restore is compatible). `target_image`, if set and different, triggers an

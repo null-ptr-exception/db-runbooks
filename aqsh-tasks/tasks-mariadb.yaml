@@ -333,13 +333,15 @@ tasks:
         required: false
         type: string
         default: ""
+      # Required by the public contract; internal-step (peer orchestration)
+      # calls carry the orchestrator's own values to satisfy the schema.
       - name: peer_aqsh_url
         env: PEER_AQSH_URL
-        required: false
+        required: true
         type: string
       - name: peer_token
         env: PEER_TOKEN
-        required: false
+        required: true
         type: string
       - name: internal_step
         env: INTERNAL_STEP
@@ -477,13 +479,15 @@ tasks:
         required: false
         type: string
         default: ""
+      # Required by the public contract; internal-step (peer orchestration)
+      # calls carry the orchestrator's own values to satisfy the schema.
       - name: peer_aqsh_url
         env: PEER_AQSH_URL
-        required: false
+        required: true
         type: string
       - name: peer_token
         env: PEER_TOKEN
-        required: false
+        required: true
         type: string
       - name: internal_step
         env: INTERNAL_STEP

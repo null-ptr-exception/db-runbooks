@@ -296,6 +296,12 @@ bg_peer_call_task() {
   BG_PEER_ERR=""
   encoded="${task_path//\//%2F}"
 
+  # peer_aqsh_url / peer_token are required inputs on the public task contract.
+  # Internal steps never use them, but every peer (internal-step) call must
+  # still satisfy the schema — inject the orchestrator's own values.
+  payload="$(jq -c --arg purl "$peer_url" --arg ptok "$peer_token" \
+    '. + {peer_aqsh_url: $purl, peer_token: $ptok}' <<<"$payload")"
+
   curl_err="$(mktemp)"
   if submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
     -X POST "${peer_url}/tasks/${encoded}" \

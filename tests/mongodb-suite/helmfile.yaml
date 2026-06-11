@@ -47,7 +47,7 @@ releases:
           enabled: true
         aqsh:
           enabled: true
-          tasksConfig: /etc/aqsh/tasks-mongodb.yaml
+          tasksConfig: /etc/aqsh/task-mongodb.yaml
           workerQueues: mongodb
           authProxy:
             tokenReviewURL: "http://fedauth.kind-a.test:30080"

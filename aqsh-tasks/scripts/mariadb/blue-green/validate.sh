@@ -14,6 +14,7 @@ EXPECTED_VERSION="${EXPECTED_VERSION:-}"
 EXPECTED_PRIMARY="${EXPECTED_PRIMARY:-}"
 CHECK_REPLICATION="${CHECK_REPLICATION:-true}"
 LAG_THRESHOLD="${LAG_THRESHOLD:-0}"
+EXPECT_READ_ONLY="${EXPECT_READ_ONLY:-}"
 
 bg_init_target
 
@@ -34,6 +35,17 @@ if [[ -n "$EXPECTED_PRIMARY" ]]; then
   if [[ "$actual_primary" != "$EXPECTED_PRIMARY" ]]; then
     bg_fail "blue-green/validate" "currentMultiClusterPrimary did not match expected_primary" \
       "$(jq --arg expected "$EXPECTED_PRIMARY" '. + {expectedPrimary: $expected}' <<<"$status_data")"
+  fi
+fi
+
+# AWS-style "no active writes on green" guardrail: a multiCluster replica is
+# kept read_only=1 by the operator; anything else means writes could land on
+# green before promotion and diverge from blue.
+if [[ "$EXPECT_READ_ONLY" == "true" ]]; then
+  read_only="$(mariadb_sql "$primary" "$password" 'SELECT @@read_only')"
+  if [[ "$read_only" != "1" ]]; then
+    bg_fail "blue-green/validate" "expected read_only=1 on the target (writes must not land on green before switchover)" \
+      "$(jq --arg readOnly "$read_only" '. + {readOnly: $readOnly}' <<<"$status_data")"
   fi
 fi
 

@@ -52,6 +52,9 @@ BLUE_HOST="${BLUE_HOST:-peer-db-proxy.db-ops.svc.cluster.local}"
 GREEN_HOST="${GREEN_HOST:-}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 PEER_TIMEOUT="${PEER_TIMEOUT:-900}"
+# Allowed replica lag for the final replication validation (AWS create
+# completes with green replicating and in sync with blue).
+LAG_THRESHOLD="${LAG_THRESHOLD:-0}"
 
 case "$INTERNAL_STEP" in
   bootstrap)
@@ -122,7 +125,7 @@ bootstrap_payload="$(jq -n \
   --arg gtid "$GTID_DOMAIN_ID" --arg serverIdx "$SERVER_ID_START_INDEX" \
   --arg blueHost "$BLUE_HOST" --arg greenHost "$GREEN_HOST" --arg timeout "$WAIT_TIMEOUT" \
   '{
-    namespace: $ns, mdb: $mdb, blue_name: $blue, green_image: $image,
+    namespace: $ns, green_name: $mdb, blue_name: $blue, green_image: $image,
     root_secret_name: $rootSecret, root_secret_key: $rootKey,
     storage_size: $storage, replicas: $replicas,
     backup_bucket: $bucket, backup_prefix: $prefix, backup_endpoint: $endpoint,
@@ -158,14 +161,27 @@ if [[ -n "$TARGET_IMAGE" && "$TARGET_IMAGE" != "$GREEN_IMAGE" ]]; then
     || bg_fail "$OP" "upgrade of green failed" "$BG_PEER_ERR"
 fi
 
+# Step 4: final validation — create only succeeds when Green is a healthy
+# replica of Blue caught up within lag_threshold (AWS create completes with
+# green replicating and in sync). The validate internal step is hosted by the
+# blue-green/switchover task on the peer.
+final_validate="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+  "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
+    --arg lag "$LAG_THRESHOLD" \
+    '{namespace: $ns, green_name: $mdb, blue_name: $blue, expected_primary: $blue, check_replication: "true", lag_threshold: $lag, internal_step: "validate"}')" \
+  "$PEER_TIMEOUT")" \
+  || bg_fail "$OP" "green was provisioned but did not validate as a caught-up replica of blue" "$BG_PEER_ERR"
+
 data="$(jq -n \
   --arg blue "$BLUE_NAME" --arg green "$GREEN_NAME" \
   --arg blueNamespace "$BG_NAMESPACE" --arg greenNamespace "$GREEN_NAMESPACE" \
   --argjson backup "$backup" --argjson bootstrap "$bootstrap" --argjson upgrade "$upgrade" \
+  --argjson finalValidate "$final_validate" \
   '{
     blue: $blue, green: $green,
     blueNamespace: $blueNamespace, greenNamespace: $greenNamespace,
-    backup: $backup, bootstrap: $bootstrap, upgrade: $upgrade
+    backup: $backup, bootstrap: $bootstrap, upgrade: $upgrade,
+    replicationValidate: $finalValidate
   }')"
 
 bg_write_result "$(response_ok "$OP" "green provisioned from blue physical backup" "$data")"

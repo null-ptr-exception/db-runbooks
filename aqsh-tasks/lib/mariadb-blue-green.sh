@@ -193,6 +193,38 @@ bg_read_root_password() {
   mariadb_read_root_password "$primary" "${pods[@]}"
 }
 
+# bg_target_sql <sql>
+# Run a SQL statement on the local target's current primary pod. Echoes the
+# query result. Returns 1 (does NOT exit) when the primary pod or the root
+# password cannot be resolved, so orchestrators can roll back.
+bg_target_sql() {
+  local sql="$1" cr_json primary password
+  cr_json="$(bg_get_mariadb_json)" || return 1
+  primary="$(jq -r '.status.currentPrimary // empty' <<<"$cr_json")"
+  [[ -n "$primary" && "$primary" != "null" ]] || return 1
+  password="$(bg_read_root_password "$primary")" || return 1
+  mariadb_sql "$primary" "$password" "$sql"
+}
+
+# bg_long_running_count <threshold_seconds>
+# Count statements on the local target's primary that have been running for at
+# least <threshold_seconds> — long writes/DDL inflate replica lag and stretch
+# the switchover write-outage window (AWS runs the same guardrail on blue).
+# Echoes the count; returns non-zero if the query itself fails.
+bg_long_running_count() {
+  local threshold="$1"
+  bg_target_sql "SELECT COUNT(*) FROM information_schema.processlist WHERE COMMAND NOT IN ('Sleep','Binlog Dump','Slave_IO','Slave_SQL','Daemon') AND USER NOT IN ('system user','event_scheduler') AND ID <> CONNECTION_ID() AND TIME >= ${threshold}"
+}
+
+# bg_validate_gtid <name> <value> <op>
+# A MariaDB GTID list: domain-server-seq, comma-separated.
+bg_validate_gtid() {
+  local name="$1" value="$2" op="$3"
+  if [[ ! "$value" =~ ^[0-9]+-[0-9]+-[0-9]+(,[0-9]+-[0-9]+-[0-9]+)*$ ]]; then
+    bg_fail "$op" "${name} must be a MariaDB GTID list" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  fi
+}
+
 bg_replication_check() {
   local cr_json="$1" lag_threshold="$2"
   jq --argjson threshold "$lag_threshold" '

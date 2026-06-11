@@ -443,6 +443,11 @@ tasks:
         required: false
         type: string
         default: "900"
+      - name: lag_threshold
+        env: LAG_THRESHOLD
+        required: false
+        type: string
+        default: "0"
       - name: confirm
         env: CONFIRM
         required: false
@@ -545,6 +550,34 @@ tasks:
         required: false
         type: string
         default: "540"
+      - name: switchover_timeout
+        env: SWITCHOVER_TIMEOUT
+        required: false
+        type: string
+        default: "300"
+      - name: long_tx_threshold
+        env: LONG_TX_THRESHOLD
+        required: false
+        type: string
+        default: "60"
+      # Empty default on purpose: the orchestrator decides when the peer's
+      # internal validate must enforce read_only (pre-switchover only).
+      - name: expect_green_read_only
+        env: EXPECT_GREEN_READ_ONLY
+        required: false
+        type: string
+        default: ""
+      # gtid_target / gtid_timeout are peer-orchestration internals (gtid-wait).
+      - name: gtid_target
+        env: GTID_TARGET
+        required: false
+        type: string
+        default: ""
+      - name: gtid_timeout
+        env: GTID_TIMEOUT
+        required: false
+        type: string
+        default: "0"
       - name: confirm
         env: CONFIRM
         required: false

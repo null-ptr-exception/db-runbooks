@@ -248,10 +248,68 @@ teardown_file() {
   assert_equal "$partition" "3"
 }
 
+# ── recovery/recover (full end-to-end — wipes a secondary, verifies re-sync) ──
+
+@test "recovery/recover wipes secondary mongodb-2 and it rejoins as healthy SECONDARY" {
+  # Sanity: capture the secondary's pre-wipe UID so we can prove it restarted
+  before_uid=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+    get pod mongodb-2 -o jsonpath='{.metadata.uid}')
+
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery/recover" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id"
+
+  # Orchestrator reports success and a restart
+  local result
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result // empty')
+  reached=$(echo "$result" | jq -r '.reached_running // empty')
+  assert_equal "$reached" "true"
+
+  # The pod was genuinely recreated
+  after_uid=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+    get pod mongodb-2 -o jsonpath='{.metadata.uid}')
+  [ "$before_uid" != "$after_uid" ]
+
+  # wipe-targets was cleared (reset ran)
+  wipe_targets=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  assert_equal "$wipe_targets" ""
+
+  # Wait for mongodb-2 to finish initial sync and report SECONDARY/health=1
+  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 wait pod mongodb-2 \
+    --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
+
+  user=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+    get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
+  pass=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+    get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
+
+  local elapsed=0 state=""
+  while (( elapsed < 180 )); do
+    state=$(kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 \
+      exec mongodb-0 -- mongosh --quiet --norc \
+      "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" \
+      --eval "var m=rs.status().members.filter(function(x){return x.name.indexOf('mongodb-2')!==-1;})[0]; print(m?m.stateStr+','+m.health:'NONE,0');" 2>/dev/null | tail -1 | tr -d '\r')
+    [[ "$state" == "SECONDARY,1" || "$state" == "PRIMARY,1" ]] && break
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  echo "mongodb-2 final RS state: ${state}"
+  [[ "$state" == "SECONDARY,1" || "$state" == "PRIMARY,1" ]]
+}
+
 # ── Missing required parameters ───────────────────────────────────────────────
 
 @test "recovery/pre-check rejects request with missing target_pod" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery/pre-check" '{"namespace":"mongo-1"}'
+  [ "$HTTP_CODE" != "202" ]
+}
+
+@test "recovery/recover rejects request with missing target_pod" {
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery/recover" '{"namespace":"mongo-1"}'
   [ "$HTTP_CODE" != "202" ]
 }
 

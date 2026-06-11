@@ -701,3 +701,53 @@ tasks:
         required: false
         type: string
         default: ""
+  recovery/recover:
+    script: mongodb/recovery/recover.sh
+    description: "One-call orchestrated recovery: gates -> wipe -> wait -> reset"
+    timeout: 12m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^mongo-[0-9]+$'
+      - name: sts_name
+        env: MONGO_STS_NAME
+        required: false
+        type: string
+        default: mongodb
+      - name: target_pod
+        env: RECOVERY_TARGET_POD
+        required: true
+        type: string
+      - name: recovery_configmap
+        env: RECOVERY_CONFIGMAP
+        required: false
+        type: string
+        default: mongodb-recovery-config
+      - name: credential_secret
+        env: MONGO_CRED_SECRET
+        required: false
+        type: string
+        default: mongodb-credentials
+      - name: credential_user_key
+        env: MONGO_CRED_USER_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_USER
+      - name: credential_pass_key
+        env: MONGO_CRED_PASS_KEY
+        required: false
+        type: string
+        default: MONGO_ROOT_PASS
+      - name: force_wipe
+        env: FORCE_WIPE
+        required: false
+        type: string
+        default: "false"
+      - name: wait_timeout
+        env: RECOVERY_WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "300"

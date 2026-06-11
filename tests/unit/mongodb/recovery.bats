@@ -33,6 +33,8 @@ setup() {
   export MOCK_OPLOG_VERDICT="ok"
   export MOCK_PATCH_FAIL=0
   export MOCK_FREEZE_FAIL=0
+  export MOCK_POD_ABSENT=0
+  export RECOVERY_POLL_INTERVAL=0   # no real sleeping in unit tests
 
   mkdir -p "${TEST_TMPDIR}/bin"
 
@@ -88,6 +90,15 @@ case "$cmd" in
             mongodb-0) printf '%s' "${MOCK_POD0_PHASE:-Running}" ;;
             *) printf 'Running' ;;
           esac
+        elif [[ "$flags" == *"metadata.uid"* ]]; then
+          # Simulate pod restart: UID changes once a wipe patch has been applied
+          if [[ "${MOCK_POD_ABSENT:-0}" == "1" && ! -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]]; then
+            printf ''                       # pod was absent before wipe
+          elif [[ -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]]; then
+            printf 'uid-new-%s' "$name"     # post-wipe → recreated
+          else
+            printf 'uid-old-%s' "$name"     # pre-wipe
+          fi
         fi
         exit 0 ;;
       pvc) exit 1 ;;
@@ -409,4 +420,40 @@ KUBECTL_EOF
   [ "$(_recovery_pod_ordinal mongodb-0)" = "0" ]
   [ "$(_recovery_pod_ordinal mongodb-1)" = "1" ]
   [ "$(_recovery_pod_ordinal mongodb-12)" = "12" ]
+}
+
+# ── recovery_recover (orchestrator) ──────────────────────────────────────────
+
+@test "recovery_recover completes full flow: gates -> wipe -> wait -> reset" {
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  # both wipe (CM+STS) and reset patches happened
+  [ -f "${TEST_TMPDIR}/patched-configmap-mongodb-recovery-config" ]
+  [ -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]
+  printf '%s' "$result" | grep -q '"reached_running":true'
+  printf '%s' "$result" | grep -q '"partition_restored":3'
+}
+
+@test "recovery_recover aborts at gates when init container is missing (no wipe applied)" {
+  export MOCK_HAS_INIT_CONTAINER=0
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30") || true
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  phase=$(printf '%s' "$result" | grep -o '"phase":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "error" ]
+  [ "$phase" = "gates" ]
+  # no STS patch should have been applied
+  [ ! -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]
+}
+
+@test "recovery_recover handles a previously-absent pod (empty old UID)" {
+  export MOCK_POD_ABSENT=1
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+}
+
+@test "recovery_recover result includes a next_step pointer to monitor sync" {
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  printf '%s' "$result" | grep -q '"next_step"'
 }

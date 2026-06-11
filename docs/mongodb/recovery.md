@@ -154,6 +154,91 @@ EOF
 
 All tasks are available via `POST /tasks/<name>` on the aqsh-mongodb endpoint.
 
+There are two ways to drive recovery:
+
+- **`recovery/recover`** — the recommended **one-call orchestrator** that chains
+  gates → wipe → wait → reset automatically. Use this for normal recovery.
+- **The individual steps** (`pre-check`, `wipe`, `reset`, `status`,
+  `fix-no-primary`) — for manual, step-by-step control or for the no-primary
+  repair flow.
+
+```
+recovery/recover  ≡  pre-check(gate) ─→ wipe ─→ wait(restart+Running) ─→ reset
+                          │ blocks       │ patch    │ auto, no human       │ auto
+                          ▼              ▼          ▼                      ▼
+                       G1–G8        CM+STS      poll pod UID change    clear CM
+```
+
+### `recovery/recover`  ⭐ recommended
+
+**Destructive but fully automated.** Runs the entire workflow in a single call
+and automatically closes the dangerous "clear wipe-target the instant the pod
+is Running" race that you would otherwise have to hit by hand.
+
+Sequence:
+1. Capture the target pod's current UID
+2. Run G1–G8 gates (aborts here if any blocking gate fails — nothing is changed)
+3. `wipe`: patch ConfigMap `wipe-targets` + StatefulSet partition + annotation
+4. Poll until the pod is **recreated** (UID changes → init container has run and
+   wiped data) **and** reaches `Running`
+5. `reset`: clear `wipe-targets` + restore partition the instant the pod is Running
+
+Initial sync is **not** awaited (it can take a long time for large data) — the
+response tells you to monitor it with `recovery/status`.
+
+> On timeout (pod never restarts or never reaches Running) it **does not** reset
+> — it leaves `wipe-targets` in place and returns an error so you can
+> investigate, rather than silently skipping the wipe.
+
+**Input**
+
+| Name | Env | Required | Default |
+|---|---|---|---|
+| `namespace` | `DB_NAMESPACE` | yes | — |
+| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
+| `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
+| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
+| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
+| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
+| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
+| `force_wipe` | `FORCE_WIPE` | no | `"false"` |
+| `wait_timeout` | `RECOVERY_WAIT_TIMEOUT` | no | `"300"` (seconds) |
+
+**Output (success)**
+
+```json
+{
+  "target_pod": "mongodb-2",
+  "old_uid": "a1b2c3...",
+  "recreated": true,
+  "reached_running": true,
+  "partition_restored": 3,
+  "elapsed_seconds": 47,
+  "next_step": "Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)"
+}
+```
+
+**Output (gate abort)** — nothing was changed:
+
+```json
+{
+  "phase": "gates",
+  "gates": { "gates": [ ... ], "fail": 1, ... },
+  "target_pod": "mongodb-2"
+}
+```
+
+**Example**
+
+```bash
+curl -s -X POST "$URL/tasks/recovery/recover" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
+# → returns a task id; poll /executions/<id>; then monitor sync via recovery/status
+```
+
+---
+
 ### `recovery/status`
 
 Read-only.  Returns current recovery state: ConfigMap wipe-targets, StatefulSet
@@ -404,6 +489,19 @@ Check that all gates pass (or only G8 warns) before proceeding.
 ### Scenario A: Corrupted Secondary (pod-1 or pod-2)
 
 The simplest and safest scenario.
+
+**Option 1 — one call (recommended):**
+
+```bash
+# Gates, wipe, wait-for-restart, and reset are all handled automatically
+POST /tasks/recovery/recover  {"namespace":"mongo-1","target_pod":"mongodb-2"}
+
+# Then monitor initial sync until the pod catches up:
+POST /tasks/recovery/status   {"namespace":"mongo-1"}
+# or: kubectl -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
+```
+
+**Option 2 — manual step-by-step (full control):**
 
 ```bash
 # Step 1: verify pre-check passes

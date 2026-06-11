@@ -9,6 +9,7 @@
 #   recovery_reset       — clear wipe-target and restore partition
 #   recovery_get_status  — show current recovery state
 #   recovery_fix_diagnose / _unfreeze / _reconfig / _force_primary — E1+E5 fix
+#   recovery_recover     — orchestrator: gates → wipe → wait → reset (one call)
 #
 # Depends on: logging.sh, response.sh, k8s.sh, mongodb.sh (sourced by callers)
 # =============================================================================
@@ -795,5 +796,120 @@ try {
 
   response_ok "$op" "Force-primary complete: ${force_pod} should be PRIMARY; other members re-added" \
     "{\"force_pod\":\"${force_pod}\",\"shrink_result\":${shrink_out},\"re_add_results\":${re_add_json},\"note\":\"Verify with rs.status() — allow 15–30s for election to finalize\"}"
+  return 0
+}
+
+# ===========================================================================
+# Orchestrator
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# _recovery_pod_uid <pod_name>
+# Echo the pod's metadata.uid (empty string if the pod does not exist).
+# ---------------------------------------------------------------------------
+_recovery_pod_uid() {
+  _kubectl get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_pod_phase <pod_name>
+# Echo the pod's status.phase (empty string if the pod does not exist).
+# ---------------------------------------------------------------------------
+_recovery_pod_phase() {
+  _kubectl get pod "$1" -o jsonpath='{.status.phase}' 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# recovery_recover <sts> <target_pod> <cm> <user> <pass> <replicas> [timeout]
+#
+# Full automated recovery in a single call:
+#   1. Capture the target pod's current UID (to detect restart)
+#   2. Run G1–G8 gates (gate mode — aborts on first blocking failure)
+#   3. recovery_wipe_pod  (set wipe-target + partition + annotation bump)
+#   4. Poll until the pod is RECREATED (UID changes) AND reaches Running
+#      — this guarantees the init container actually ran and wiped data
+#   5. recovery_reset  (clear wipe-target + restore partition) the instant
+#      the pod is Running, closing the dangerous re-wipe race automatically
+#
+# On timeout (pod never restarts / never reaches Running) it deliberately
+# does NOT reset — leaving wipe-target in place so a manual investigation can
+# decide.  Initial sync is NOT awaited here; the response includes a pointer
+# to monitor it.
+#
+# Env knobs:
+#   RECOVERY_POLL_INTERVAL  seconds between polls (default 5)
+# ---------------------------------------------------------------------------
+recovery_recover() {
+  local sts="${1:?}" target_pod="${2:?}" cm="${3:?}"
+  local user="${4:?}" pass="${5:?}" replicas="${6:?}"
+  local timeout="${7:-300}"
+  local op="recovery_recover"
+  local poll_interval="${RECOVERY_POLL_INTERVAL:-5}"
+
+  log_info "$op" "Starting orchestrated recovery for pod ${target_pod}"
+
+  # 1. Capture pre-wipe UID (may be empty if pod is fully gone)
+  local old_uid
+  old_uid=$(_recovery_pod_uid "$target_pod")
+  log_info "$op" "Pre-wipe UID of ${target_pod}: '${old_uid:-<none>}'"
+
+  # 2. Gates (gate mode)
+  local gates_result
+  if ! gates_result=$(recovery_run_gates "$sts" "$target_pod" "$cm" "$user" "$pass" "gate"); then
+    local gdata
+    gdata=$(printf '%s' "$gates_result" | grep -o '"data":.*' | sed 's/^"data"://;s/,"timestamp".*//')
+    response_err "$op" "Recovery aborted at pre-flight gates" \
+      "{\"phase\":\"gates\",\"gates\":${gdata:-null},\"target_pod\":\"${target_pod}\"}" 1
+    return 1
+  fi
+
+  # 3. Wipe
+  local wipe_result
+  if ! wipe_result=$(recovery_wipe_pod "$sts" "$target_pod" "$cm"); then
+    response_err "$op" "Recovery aborted while applying wipe" \
+      "{\"phase\":\"wipe\",\"target_pod\":\"${target_pod}\"}" 1
+    return 1
+  fi
+
+  # 4. Wait for the pod to be RECREATED and reach Running
+  log_info "$op" "Waiting up to ${timeout}s for ${target_pod} to restart and reach Running"
+  local start now elapsed=0 recreated=false ran=false
+  start=$(date +%s)
+  while (( elapsed < timeout )); do
+    local cur_uid cur_phase
+    cur_uid=$(_recovery_pod_uid "$target_pod")
+    cur_phase=$(_recovery_pod_phase "$target_pod")
+
+    if [[ -n "$old_uid" ]]; then
+      # Pod existed before — require a NEW uid (init container has run) + Running
+      [[ -n "$cur_uid" && "$cur_uid" != "$old_uid" ]] && recreated=true
+      [[ "$recreated" == "true" && "$cur_phase" == "Running" ]] && { ran=true; break; }
+    else
+      # Pod was absent before — any Running pod with a uid means it came up
+      [[ -n "$cur_uid" && "$cur_phase" == "Running" ]] && { ran=true; break; }
+    fi
+
+    sleep "$poll_interval"
+    now=$(date +%s); elapsed=$(( now - start ))
+  done
+
+  # 5a. Timeout — do NOT reset; leave state for manual decision
+  if [[ "$ran" != "true" ]]; then
+    response_err "$op" "Pod ${target_pod} did not restart+reach Running within ${timeout}s — wipe-target left in place for manual review" \
+      "{\"phase\":\"wait\",\"target_pod\":\"${target_pod}\",\"recreated\":${recreated},\"timeout\":${timeout},\"action_required\":\"Inspect pod; run recovery/reset manually once it is Running, or recovery/status to diagnose\"}" 1
+    return 1
+  fi
+
+  # 5b. Reset immediately (closes the re-wipe race)
+  local reset_result
+  if ! reset_result=$(recovery_reset "$sts" "$cm" "$replicas"); then
+    response_err "$op" "Pod ${target_pod} is Running but recovery/reset failed — wipe-target may still be set" \
+      "{\"phase\":\"reset\",\"target_pod\":\"${target_pod}\",\"action_required\":\"Run recovery/reset manually NOW to prevent re-wipe on next restart\"}" 1
+    return 1
+  fi
+
+  log_info "$op" "Recovery orchestration complete for ${target_pod}; initial sync now in progress"
+  response_ok "$op" "Recovery complete for ${target_pod}: data wiped, pod restarted, recovery state cleared. Initial sync is now running." \
+    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
   return 0
 }

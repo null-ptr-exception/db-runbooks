@@ -126,12 +126,14 @@ case "$cmd" in
       printf 'Filesystem 1M Used Avail Use%% Mount\n/dev/sda1 50000 10000 %s 20%% /bitnami\n' "${MOCK_AVAIL_MB:-2000}"
     elif [[ "$js" == *"rs.freeze"* ]]; then
       [[ "${MOCK_FREEZE_FAIL:-0}" == "1" ]] && printf 'err:freeze failed' || printf 'ok'
-    elif [[ "$js" == *"rs.conf"* ]]; then
-      printf '{"_id":"rs0","version":5,"members":[{"_id":0,"host":"mongodb-0.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":1,"host":"mongodb-1.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":2,"host":"mongodb-2.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1}]}'
     elif [[ "$js" == *"rs.reconfig"* ]]; then
+      # Must precede rs.conf: reconfig scripts also call rs.conf() internally,
+      # but mongosh only outputs the final print (the reconfig result).
       printf '{"ok":1}'
     elif [[ "$js" == *"rs.add"* ]]; then
       printf '{"ok":1}'
+    elif [[ "$js" == *"rs.conf"* ]]; then
+      printf '{"_id":"rs0","version":5,"members":[{"_id":0,"host":"mongodb-0.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":1,"host":"mongodb-1.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":2,"host":"mongodb-2.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1}]}'
     elif [[ "$js" == *"RECOVERING"* ]]; then
       printf ''
     elif [[ "$js" == *"optime"* ]]; then

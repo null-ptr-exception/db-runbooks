@@ -12,7 +12,7 @@ Validates MongoDB aqsh tasks: sanity-check and restart.
 Built on top of the shared 2-cluster infra (`infra/deploy.sh`).
 
 - **cluster-a**:
-  - `mongo-core` namespace: kube-federated-auth, kube-auth-proxy + aqsh-mongodb, Redis
+  - `mongo-core` namespace: kube-federated-auth, aqsh-mongodb (with kube-auth-proxy sidecar), Redis
   - `mongo-1` namespace: MongoDB StatefulSet
 - **cluster-b**:
   - `mongo-core` namespace: test-client pod

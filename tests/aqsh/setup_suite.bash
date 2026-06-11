@@ -31,6 +31,9 @@ setup_suite() {
   # without real tokens — that's fine, we fix it in the second apply.
   helmfile apply -f "$HELMFILE"
 
+  [[ -n "${CLUSTER_A_IP:-}" ]] || { echo "CLUSTER_A_IP not set by setup_infra" >&2; return 1; }
+  [[ -n "${CLUSTER_B_IP:-}" ]] || { echo "CLUSTER_B_IP not set by setup_infra" >&2; return 1; }
+
   # Extract runtime credentials from live clusters
   local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B
 

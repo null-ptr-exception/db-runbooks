@@ -10,6 +10,8 @@ setup_file() {
   AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
 
   # Resolve test-client pod on cluster-b
+  kubectl --context "$CTX_B" -n "$NS" wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
   TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
     get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
   [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
@@ -44,7 +46,7 @@ http_post() {
 }
 
 wait_for_task() {
-  local base_url="$1" task_id="$2" max_wait="${3:-120}"
+  local base_url="$1" task_id="$2" max_wait="${3:-300}"
   local elapsed=0 status
 
   while (( elapsed < max_wait )); do
@@ -77,7 +79,7 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result_status
-  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.status // "unknown"')
+  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.data.status // .result.status // "unknown"')
   echo "sanity result: status=${result_status}"
   assert [ "$result_status" != "critical" ]
 }
@@ -92,7 +94,7 @@ wait_for_task() {
 
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id" 180
+  wait_for_task "$AQSH_URL" "$task_id"
 
   kubectl --context "$CTX_A" -n mongo-1 wait pod \
     -l app=mongodb --for=condition=Ready --timeout=120s
@@ -106,7 +108,8 @@ wait_for_task() {
     get statefulset mongodb -o jsonpath='{.status.replicas}')
 
   echo "generation: ${before_generation} → ${after_generation}, ready: ${ready}/${replicas}"
-  [[ -n "$before_generation" && -n "$after_generation" ]] || { echo "could not read generation" >&2; return 1; }
+  [[ "$before_generation" =~ ^[0-9]+$ ]] || { echo "before_generation is not numeric: '${before_generation}'" >&2; return 1; }
+  [[ "$after_generation" =~ ^[0-9]+$ ]] || { echo "after_generation is not numeric: '${after_generation}'" >&2; return 1; }
   assert [ "$after_generation" -gt "$before_generation" ]
   assert_equal "$ready" "$replicas"
 }

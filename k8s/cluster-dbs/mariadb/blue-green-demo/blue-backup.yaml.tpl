@@ -6,9 +6,7 @@ metadata:
 spec:
   mariaDbRef:
     name: mariadb-blue
-  schedule:
-    cron: "0 * * * *"
-    immediate: true
+  # No schedule: runs exactly once, immediately (a cron would fire indefinitely).
   target: PreferReplica
   compression: bzip2
   storage:

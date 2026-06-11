@@ -190,14 +190,16 @@ cutover_demo() {
     exit 1
   fi
 
+  # Demote Blue BEFORE promoting Green — the same order as blue-green/switchover.
+  # Promoting first opens a dual-primary window where both sides accept writes.
+  echo "== Demote Blue to follow Green =="
+  kubectl --context "$BLUE_CONTEXT" -n "$BG_NAMESPACE" patch mariadb mariadb-blue --type merge \
+    -p '{"spec":{"multiCluster":{"primary":"mariadb-green"}}}'
+
   echo "== Promote Green =="
   kubectl --context "$GREEN_CONTEXT" -n "$BG_NAMESPACE" patch mariadb mariadb-green --type merge \
     -p '{"spec":{"multiCluster":{"primary":"mariadb-green"}}}'
   wait_mariadb_ready "$GREEN_CONTEXT" mariadb-green 10m
-
-  echo "== Demote Blue to follow Green =="
-  kubectl --context "$BLUE_CONTEXT" -n "$BG_NAMESPACE" patch mariadb mariadb-blue --type merge \
-    -p '{"spec":{"multiCluster":{"primary":"mariadb-green"}}}'
 
   sql_exec "$GREEN_CONTEXT" mariadb-green-0 '
 INSERT INTO bgtest.events VALUES (2, "written-after-cutover")

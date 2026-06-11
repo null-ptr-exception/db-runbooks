@@ -77,15 +77,17 @@ task_result_data() {
   echo "$TASK_RESPONSE" | grep -qi "confirm"
 }
 
-@test "blue-green switchover guardrails block switchover when blue is not primary" {
+@test "blue-green switchover guardrails block before mutating anything" {
   require_blue_green_demo
 
-  # In the already-switched-over fixture, Green is primary. The switchover
-  # orchestrator must fail at the read-only guardrail phase (and mutate nothing)
-  # rather than attempting the cutover.
+  # Force a deterministic guardrail failure regardless of fixture state: the
+  # green validate (phase 1, read-only) must reject an impossible expected
+  # version before the orchestrator mutates anything. Without this pin, the
+  # payload would perform a REAL switchover on a fresh fixture where Blue is
+  # still primary.
   http_post "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fswitchover" \
     "$(jq -nc --arg url "$MARIADB_AQSH_B_URL" --arg tok "$TOKEN" \
-      '{namespace:"mariadb-bg",blue_name:"mariadb-blue",green_name:"mariadb-green",peer_aqsh_url:$url,peer_token:$tok,confirm:"true"}')"
+      '{namespace:"mariadb-bg",blue_name:"mariadb-blue",green_name:"mariadb-green",expected_green_version:"0.0-bats-guardrail-pin",peer_aqsh_url:$url,peer_token:$tok,confirm:"true"}')"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id

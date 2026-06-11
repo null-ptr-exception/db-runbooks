@@ -227,16 +227,22 @@ bg_validate_gtid() {
 
 bg_replication_check() {
   local cr_json="$1" lag_threshold="$2"
+  # Absent replica status is a FAILURE, not a pass: a just-bootstrapped Green
+  # (or an operator that has not reconciled yet) provides no evidence of
+  # replication health, and treating that as ok would let create/switchover
+  # proceed unchecked. Callers that genuinely tolerate a replication-less
+  # target must opt out via check_replication=false.
   jq --argjson threshold "$lag_threshold" '
     (.status.replication.replicas // {}) as $replicas
     | ($replicas | length) as $count
     | {
         checked: ($count > 0),
         ok: (
-          if $count == 0 then true
-          else all($replicas[]; .slaveIORunning == true and .slaveSQLRunning == true and ((.secondsBehindMaster // 0) <= $threshold))
+          if $count == 0 then false
+          else all($replicas[]; .slaveIORunning == true and .slaveSQLRunning == true and (.secondsBehindMaster != null) and (.secondsBehindMaster <= $threshold))
           end
         ),
+        reason: (if $count == 0 then "replication status absent from the CR" else null end),
         replicas: $replicas,
         roles: (.status.replication.roles // {})
       }
@@ -278,8 +284,15 @@ bg_local_step() {
     return 1
   fi
   # The granular script may emit non-JSON lines (e.g. `kubectl wait` output)
-  # before its single-line JSON result, so parse the last line.
-  jq -c '.data // {}' <<<"$(printf '%s\n' "$out" | tail -n1)" 2>/dev/null || printf '{}'
+  # around its single-line JSON result; take the last line that looks like a
+  # JSON object. No parseable result is a FAILURE — a silent `{}` would let
+  # the orchestrator carry on without evidence the step really succeeded.
+  local result_line
+  result_line="$(printf '%s\n' "$out" | grep '^{' | tail -n1)"
+  if [[ -z "$result_line" ]] || ! jq -c '.data // {}' <<<"$result_line" 2>/dev/null; then
+    BG_LOCAL_ERR="$(jq -n --arg out "$out" '{error: "step produced no parseable JSON result", stdout: $out}')"
+    return 1
+  fi
   return 0
 }
 
@@ -455,9 +468,8 @@ metadata:
 spec:
   mariaDbRef:
     name: ${BG_MDB}
-  schedule:
-    cron: "0 * * * *"
-    immediate: true
+  # No schedule: a PhysicalBackup without one runs exactly once, immediately.
+  # A recurring cron here would keep firing for as long as the CR exists.
   target: ${BACKUP_TARGET}
   compression: ${BACKUP_COMPRESSION}
   storage:

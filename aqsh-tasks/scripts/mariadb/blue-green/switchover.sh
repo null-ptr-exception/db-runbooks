@@ -137,25 +137,55 @@ green_promoted=0
 
 bg_rollback() {
   # Best-effort restoration of Blue as primary. Each step tolerates failure so
-  # the rollback always attempts every undo it can.
+  # the rollback always attempts every undo it can — but every outcome is
+  # recorded in ROLLBACK_STATUS so a partial rollback is visible to the caller
+  # instead of silently swallowed.
+  local undo_green="skipped" undo_demote="skipped" undo_maintenance="skipped"
   if (( green_promoted )); then
-    bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+    if bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
       "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" --arg primary "$BLUE_NAME" \
-        '{namespace: $ns, green_name: $mdb, blue_name: $blue, primary: $primary, internal_step: "set-primary", confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null || true
+        '{namespace: $ns, green_name: $mdb, blue_name: $blue, primary: $primary, internal_step: "set-primary", confirm: "true"}')" "$PEER_TIMEOUT" >/dev/null; then
+      undo_green="ok"
+    else
+      undo_green="FAILED"
+    fi
   fi
   if (( blue_demoted )); then
-    _kubectl patch "$BG_RESOURCE" "$BLUE_NAME" --type merge \
-      -p "{\"spec\":{\"multiCluster\":{\"primary\":$(bg_json_string "$BLUE_NAME")}}}" >/dev/null 2>&1 || true
+    if _kubectl patch "$BG_RESOURCE" "$BLUE_NAME" --type merge \
+      -p "{\"spec\":{\"multiCluster\":{\"primary\":$(bg_json_string "$BLUE_NAME")}}}" >/dev/null 2>&1; then
+      undo_demote="ok"
+    else
+      undo_demote="FAILED"
+    fi
   fi
   if (( blue_maintenance )); then
-    bg_set_maintenance false >/dev/null 2>&1 || true
+    if bg_set_maintenance false >/dev/null 2>&1; then
+      undo_maintenance="ok"
+    else
+      undo_maintenance="FAILED"
+    fi
   fi
+  ROLLBACK_COMPLETE=true
+  [[ "$undo_green" == "FAILED" || "$undo_demote" == "FAILED" || "$undo_maintenance" == "FAILED" ]] && ROLLBACK_COMPLETE=false
+  ROLLBACK_STATUS="$(jq -n \
+    --arg unpromoteGreen "$undo_green" \
+    --arg repromoteBlue "$undo_demote" \
+    --arg clearMaintenance "$undo_maintenance" \
+    --argjson complete "$ROLLBACK_COMPLETE" \
+    '{complete: $complete, unpromoteGreen: $unpromoteGreen, repromoteBlue: $repromoteBlue, clearMaintenance: $clearMaintenance}')"
 }
 
 fail_with_rollback() {
   local message="$1" detail="$2"
   bg_rollback
-  bg_fail "$OP" "$message (rolled back Blue)" "$detail"
+  local merged
+  merged="$(jq --argjson rollback "$ROLLBACK_STATUS" '. + {rollback: $rollback}' <<<"$detail" 2>/dev/null \
+    || jq -n --argjson rollback "$ROLLBACK_STATUS" '{rollback: $rollback}')"
+  if [[ "$ROLLBACK_COMPLETE" == "true" ]]; then
+    bg_fail "$OP" "$message (rolled back Blue)" "$merged"
+  else
+    bg_fail "$OP" "$message (ROLLBACK INCOMPLETE - manual intervention required)" "$merged"
+  fi
 }
 
 fail_after_promotion() {
@@ -227,9 +257,17 @@ blue_maintenance=1
 
 # The operator applies the maintenance patch asynchronously — wait until
 # read-only has actually taken effect before sampling the GTID, or writes could
-# still land after the position we wait on.
-until [[ "$(bg_target_sql 'SELECT @@read_only' || true)" == "1" ]]; do
-  check_deadline "blue becoming read-only"
+# still land after the position we wait on. The deadline failure carries the
+# last observed value so "operator never applied maintenance" is diagnosable
+# instead of a bare timeout.
+ro_value=""
+ro_attempts=0
+until ro_value="$(bg_target_sql 'SELECT @@read_only' || true)"; [[ "$ro_value" == "1" ]]; do
+  ro_attempts=$(( ro_attempts + 1 ))
+  (( SECONDS < deadline )) \
+    || fail_with_rollback "switchover timeout (${SWITCHOVER_TIMEOUT}s) exceeded waiting for blue to become read-only — the operator may not be applying spec.maintenance" \
+      "$(jq -n --arg readOnly "$ro_value" --argjson attempts "$ro_attempts" --argjson timeout "$SWITCHOVER_TIMEOUT" \
+        '{step: "blue becoming read-only", lastReadOnly: $readOnly, attempts: $attempts, timeoutSeconds: $timeout}')"
   sleep 2
 done
 

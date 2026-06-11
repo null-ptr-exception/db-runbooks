@@ -84,7 +84,9 @@ _build_response() {
   if [[ -z "$data" ]]; then
     json_data="null"
   elif _is_json "$data"; then
-    json_data="$data"
+    # Compact so the response is always a single line — callers (the blue/green
+    # orchestrators in particular) parse task output line-wise.
+    json_data="$(jq -c . <<<"$data")"
   else
     local escaped_data
     escaped_data=$(_escape_json_string "$data")

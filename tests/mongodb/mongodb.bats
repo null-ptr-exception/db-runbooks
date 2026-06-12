@@ -79,7 +79,7 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result_status
-  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.data.status? // .result.status // "unknown"')
+  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.status // "unknown"')
   echo "sanity result: status=${result_status}"
   assert [ "$result_status" != "critical" ]
 }

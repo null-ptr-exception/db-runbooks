@@ -12,6 +12,14 @@
 #   recovery_set_sync_source — direct pod to sync from secondary (or primary)
 #   recovery_recover     — orchestrator: gates → wipe → wait → reset → set-sync
 #
+# Cross-cluster RS support (e.g. cluster A = PSS, cluster B = SSS):
+#   G3 reads the FULL rs.status().members list from any local pod, so a PRIMARY
+#   in another cluster is visible and has_primary is correctly set.
+#   G4/G8 use _recovery_primary_host (reads members.name from any local probe pod)
+#   + _recovery_mongosh_host (directConnection to that host:port) so oplog stats
+#   and replSetResizeOplog reach the cross-cluster primary without requiring a
+#   local primary pod.
+#
 # Depends on: logging.sh, response.sh, k8s.sh, mongodb.sh (sourced by callers)
 # =============================================================================
 
@@ -65,25 +73,45 @@ _recovery_list_pods() {
 }
 
 # ---------------------------------------------------------------------------
-# _recovery_find_primary_pod <sts_name> <user> <pass>
-# Find the current PRIMARY pod name. Outputs name to stdout; returns 1 if none.
+# _recovery_primary_host <sts_name> <user> <pass>
+# Echo the host:port of the RS PRIMARY by reading the full rs.status().members
+# list from any reachable local pod. Cross-cluster aware: the PRIMARY may live
+# in a different cluster; its RS-registered member name (host:port) is returned.
+# Returns 1 if no PRIMARY is currently elected anywhere in the replica set.
 # ---------------------------------------------------------------------------
-_recovery_find_primary_pod() {
+_recovery_primary_host() {
   local sts_name="$1" user="$2" pass="$3"
-  local pods_raw
+  local pods_raw probe=""
   pods_raw=$(_recovery_list_pods "$sts_name") || return 1
   while IFS= read -r pod; do
     [[ -z "$pod" ]] && continue
     local phase
     phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$phase" != "Running" ]] && continue
-    local is_primary
-    is_primary=$(_recovery_mongosh_pod "$pod" "$user" "$pass" \
-      "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
-      2>/dev/null | tail -1) || continue
-    [[ "$is_primary" == "1" ]] && { printf '%s\n' "$pod"; return 0; }
+    [[ "$phase" == "Running" ]] && { probe="$pod"; break; }
   done <<< "$pods_raw"
-  return 1
+  [[ -z "$probe" ]] && return 1
+  local host
+  host=$(_recovery_mongosh_pod "$probe" "$user" "$pass" \
+    "try{var p=rs.status().members.filter(function(m){return m.stateStr==='PRIMARY'&&m.health===1;})[0];print(p?p.name:'');}catch(e){print('');}" \
+    2>/dev/null | tail -1 | tr -d '\r')
+  [[ -z "$host" ]] && return 1
+  printf '%s\n' "$host"
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_mongosh_host <from_pod> <host:port> <user> <pass> <js>
+# Run mongosh from inside <from_pod> connecting directly to <host:port>
+# (directConnection=true). Enables cross-cluster oplog queries and admin
+# commands when the PRIMARY lives in a different cluster.
+# ---------------------------------------------------------------------------
+_recovery_mongosh_host() {
+  local from_pod="$1" host="$2" user="$3" pass="$4" js="$5"
+  local enc_user enc_pass
+  enc_user=$(_mongo_uri_percent_encode "$user")
+  enc_pass=$(_mongo_uri_percent_encode "$pass")
+  _kubectl exec "$from_pod" -- mongosh --quiet --norc \
+    "mongodb://${enc_user}:${enc_pass}@${host}/admin?authSource=admin&directConnection=true&serverSelectionTimeoutMS=5000" \
+    --eval "$js" 2>&1
 }
 
 # ===========================================================================
@@ -137,14 +165,14 @@ _recovery_gate_g3() {
     local phase
     phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
     [[ "$phase" != "Running" ]] && continue
-    local rs_out
+    local rs_out rs_rest any_primary self_state health
     rs_out=$(_recovery_mongosh_pod "$pod" "$user" "$pass" \
-      "try{var s=rs.status();var m=s.members.filter(function(x){return x.self;})[0];print(m.stateStr+','+m.health);}catch(e){print('ERR,0');}" \
+      "try{var s=rs.status();var p=s.members.some(function(x){return x.stateStr==='PRIMARY'&&x.health===1;});var m=s.members.filter(function(x){return x.self;})[0];print((p?'1':'0')+','+m.stateStr+','+m.health);}catch(e){print('0,ERR,0');}" \
       2>/dev/null | tail -1) || continue
-    local state health
-    state="${rs_out%%,*}"; health="${rs_out##*,}"
-    [[ "$state" == "PRIMARY" ]] && has_primary=true && { [[ -z "$healthy_src" ]] && healthy_src="$pod"; }
-    [[ "$state" == "SECONDARY" && "$health" == "1" ]] && { [[ -z "$healthy_src" ]] && healthy_src="$pod"; }
+    any_primary="${rs_out%%,*}"; rs_rest="${rs_out#*,}"; self_state="${rs_rest%%,*}"; health="${rs_rest##*,}"
+    [[ "$any_primary" == "1" ]] && has_primary=true
+    [[ "$self_state" == "SECONDARY" && "$health" == "1" ]] && { [[ -z "$healthy_src" ]] && healthy_src="$pod"; }
+    [[ "$self_state" == "PRIMARY"   && "$health" == "1" ]] && { [[ -z "$healthy_src" ]] && healthy_src="$pod"; }
   done <<< "$pods_raw"
 
   if [[ "$has_primary" == "true" && -n "$healthy_src" ]]; then
@@ -210,15 +238,28 @@ _recovery_gate_g5() {
 # OPLOG_RESIZE_NEEDED as a warning instead of running replSetResizeOplog.
 _recovery_gate_g4() {
   local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}"
-  local primary_pod
-  if ! primary_pod=$(_recovery_find_primary_pod "$sts_name" "$user" "$pass"); then
+  local primary_host probe_pod
+  if ! primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass"); then
     printf '{"gate":"G4","pass":false,"code":"NO_PRIMARY_FOR_OPLOG","message":"Cannot find primary to query oplog — ensure primary is elected first","suggestion":"Run recovery/fix-no-primary level=diagnose"}'
+    return 1
+  fi
+  local g4_pods_raw g4_pod g4_phase
+  g4_pods_raw=$(_recovery_list_pods "$sts_name") || g4_pods_raw=""
+  probe_pod=""
+  while IFS= read -r g4_pod; do
+    [[ -z "$g4_pod" ]] && continue
+    g4_phase=$(_kubectl get pod "$g4_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+    [[ "$g4_phase" == "Running" ]] && { probe_pod="$g4_pod"; break; }
+  done <<< "$g4_pods_raw"
+  if [[ -z "$probe_pod" ]]; then
+    printf '{"gate":"G4","pass":false,"code":"NO_LOCAL_POD","message":"No local Running pod found to query oplog via primary %s","suggestion":"Check pod status in this cluster"}' \
+      "$primary_host"
     return 1
   fi
 
   # All arithmetic stays inside mongosh to avoid bash float issues
   local oplog_csv
-  oplog_csv=$(_recovery_mongosh_pod "$primary_pod" "$user" "$pass" "
+  oplog_csv=$(_recovery_mongosh_host "$probe_pod" "$primary_host" "$user" "$pass" "
 var l=db.getSiblingDB('local');
 var st=l.runCommand({collStats:'oplog.rs'});
 var curMB=Math.ceil(st.maxSize/1024/1024);
@@ -232,15 +273,15 @@ var reqWin=Math.max(4,syncH*2);
 var reqMB=Math.max(2048,Math.ceil(dataMB*0.05),Math.ceil(wRate*reqWin));
 print([curMB,Math.ceil(winHrs),wRate,syncH,reqWin,reqMB,curMB>=reqMB?'ok':'resize'].join(','));
 " 2>/dev/null | tail -1 | tr -d '\r') || {
-    printf '{"gate":"G4","pass":false,"code":"OPLOG_QUERY_FAILED","message":"Failed to query oplog stats from primary pod %s","suggestion":"Check MongoDB credentials and pod connectivity"}' \
-      "$primary_pod"
+    printf '{"gate":"G4","pass":false,"code":"OPLOG_QUERY_FAILED","message":"Failed to query oplog stats from primary %s","suggestion":"Check MongoDB credentials and connectivity"}' \
+      "$primary_host"
     return 1
   }
 
   IFS=',' read -r cur_mb win_hrs w_rate sync_h req_win req_mb verdict <<< "$oplog_csv"
   [[ -z "$verdict" ]] && {
     printf '{"gate":"G4","pass":false,"code":"OPLOG_PARSE_FAILED","message":"Unexpected oplog query output from %s: %s","suggestion":"Check MongoDB version (3.6+ required for replSetResizeOplog)"}' \
-      "$primary_pod" "$oplog_csv"
+      "$primary_host" "$oplog_csv"
     return 1
   }
 
@@ -259,12 +300,12 @@ print([curMB,Math.ceil(winHrs),wRate,syncH,reqWin,reqMB,curMB>=reqMB?'ok':'resiz
   # Attempt auto-resize on primary
   log_info "recovery-g4" "Oplog ${cur_mb}MB < required ${req_mb}MB — attempting auto-resize"
   local resize_out
-  resize_out=$(_recovery_mongosh_pod "$primary_pod" "$user" "$pass" \
+  resize_out=$(_recovery_mongosh_host "$probe_pod" "$primary_host" "$user" "$pass" \
     "JSON.stringify(db.adminCommand({replSetResizeOplog:1,size:${req_mb}}))" \
     2>/dev/null | tail -1) || resize_out='{}'
   if printf '%s' "$resize_out" | grep -q '"ok":1'; then
     printf '{"gate":"G4","pass":true,"warn":true,"message":"Oplog auto-resized: %sMB → %sMB on primary %s (window was %sh, required %sh for %sMB data)","old_mb":%s,"new_mb":%s}' \
-      "$cur_mb" "$req_mb" "$primary_pod" "$win_hrs" "$req_win" "$data_mb" "$cur_mb" "$req_mb"
+      "$cur_mb" "$req_mb" "$primary_host" "$win_hrs" "$req_win" "$data_mb" "$cur_mb" "$req_mb"
     return 0
   fi
 
@@ -357,15 +398,29 @@ _recovery_gate_g7() {
 
 _recovery_gate_g8() {
   local sts_name="$1" user="$2" pass="$3"
-  local primary_pod
-  primary_pod=$(_recovery_find_primary_pod "$sts_name" "$user" "$pass") || {
-    printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no primary to query RECOVERING state"}'
+  local primary_host g8_pods_raw g8_pod g8_phase probe_pod
+  primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || {
+    printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no primary found in RS to query RECOVERING state"}'
     return 0
   }
+  g8_pods_raw=$(_recovery_list_pods "$sts_name") || g8_pods_raw=""
+  probe_pod=""
+  while IFS= read -r g8_pod; do
+    [[ -z "$g8_pod" ]] && continue
+    g8_phase=$(_kubectl get pod "$g8_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+    [[ "$g8_phase" == "Running" ]] && { probe_pod="$g8_pod"; break; }
+  done <<< "$g8_pods_raw"
+  if [[ -z "$probe_pod" ]]; then
+    printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no local Running pod to query RECOVERING state"}'
+    return 0
+  fi
   local recovering
-  recovering=$(_recovery_mongosh_pod "$primary_pod" "$user" "$pass" \
+  recovering=$(_recovery_mongosh_host "$probe_pod" "$primary_host" "$user" "$pass" \
     "try{var s=rs.status();print(s.members.filter(function(m){return m.stateStr==='RECOVERING';}).map(function(m){return m.name;}).join(','));}catch(e){print('');}" \
-    2>/dev/null | tail -1) || recovering=""
+    2>/dev/null | tail -1) || {
+    printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: could not connect to primary %s to query RECOVERING state"}' "$primary_host"
+    return 0
+  }
   if [[ -n "$recovering" && "$recovering" != "undefined" ]]; then
     printf '{"gate":"G8","pass":true,"warn":true,"message":"Other member(s) currently RECOVERING: %s — concurrent sync may slow recovery. Consider waiting."}' \
       "$recovering"

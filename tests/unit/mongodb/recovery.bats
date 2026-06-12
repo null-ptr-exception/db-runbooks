@@ -39,6 +39,8 @@ setup() {
   export MOCK_ALL_PODS_PHASE=""
   export MOCK_NON_PRIMARY_STATE="SECONDARY,1"
   export MOCK_WIPE_TARGETS=""
+  export MOCK_CROSS_CLUSTER_PRIMARY=0        # 1 = primary lives in another cluster
+  export MOCK_CROSS_CLUSTER_PRIMARY_HOST="cluster-a-primary:27017"
   export RECOVERY_POLL_INTERVAL=0          # no real sleeping in unit tests
   export RECOVERY_SYNCFROM_RETRY_DELAY=0   # no sleep between syncFrom retries
 
@@ -122,6 +124,28 @@ case "$cmd" in
     js="${flags}"
     if [[ "$js" == *"isWritablePrimary"* || "$js" == *"ismaster"* ]]; then
       [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]] && printf '1' || printf '0'
+    elif [[ "$js" == *"p?p.name"* ]]; then
+      # _recovery_primary_host: return RS PRIMARY host:port from full members list
+      if [[ "${MOCK_CROSS_CLUSTER_PRIMARY:-0}" == "1" ]]; then
+        printf '%s' "${MOCK_CROSS_CLUSTER_PRIMARY_HOST:-cluster-a-primary:27017}"
+      elif [[ "${MOCK_PRIMARY_POD:-mongodb-0}" == "__none__" ]]; then
+        printf ''
+      else
+        printf '%s.mongodb.mongo-1.svc.cluster.local:27017' "${MOCK_PRIMARY_POD:-mongodb-0}"
+      fi
+    elif [[ "$js" == *"members.some"* ]]; then
+      # G3 new JS: returns any_primary_flag,self_stateStr,self_health
+      local g3_has_primary="0"
+      if [[ "${MOCK_CROSS_CLUSTER_PRIMARY:-0}" == "1" ]]; then
+        g3_has_primary="1"
+      elif [[ "${MOCK_PRIMARY_POD:-mongodb-0}" != "__none__" ]]; then
+        g3_has_primary="1"
+      fi
+      if [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" && "${MOCK_CROSS_CLUSTER_PRIMARY:-0}" != "1" ]]; then
+        printf '%s,PRIMARY,1' "$g3_has_primary"
+      else
+        printf '%s,%s' "$g3_has_primary" "${MOCK_NON_PRIMARY_STATE:-SECONDARY,1}"
+      fi
     elif [[ "$js" == *"print(m.name)"* ]]; then
       printf '%s.mongodb.mongo-1.svc.cluster.local:27017\n' "$pod"
     elif [[ "$js" == *"replSetSyncFrom"* ]]; then
@@ -704,4 +728,93 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
   [ -n "$pods" ]
   # should include at least one pod entry with phase
   printf '%s' "$pods" | grep -q '"phase"'
+}
+
+# ── Cross-cluster RS: primary in cluster A, all local pods SECONDARY (SSS) ───
+#
+# These tests cover the real-world topology: cluster A = PSS, cluster B = SSS.
+# When a secondary in cluster B breaks, G3/G4 must NOT block recovery — the RS
+# primary is reachable across clusters even though no local pod is PRIMARY.
+
+@test "G3 passes in cross-cluster RS: primary in cluster A, local pods all SECONDARY" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  out=$(_recovery_gate_g3 "mongodb" "mongodb-2" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "true" ]
+  [ -z "$code" ]
+}
+
+@test "G3 still fails NO_PRIMARY when no primary exists anywhere (cross-cluster aware)" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=0
+  export MOCK_PRIMARY_POD="__none__"
+  out=$(_recovery_gate_g3 "mongodb" "mongodb-2" "user" "pass") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "NO_PRIMARY" ]
+}
+
+@test "G4 passes in cross-cluster RS: oplog queried via probe pod to cluster A primary" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  export MOCK_OPLOG_VERDICT=ok
+  out=$(_recovery_gate_g4 "mongodb" "user" "pass" "1024")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G4 auto-resizes via cross-cluster primary when oplog is too small" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  export MOCK_OPLOG_VERDICT=resize
+  out=$(_recovery_gate_g4 "mongodb" "user" "pass" "10240")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+}
+
+@test "G4 fails NO_PRIMARY_FOR_OPLOG when no primary in RS (cross-cluster aware)" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=0
+  export MOCK_PRIMARY_POD="__none__"
+  out=$(_recovery_gate_g4 "mongodb" "user" "pass" "1024") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "NO_PRIMARY_FOR_OPLOG" ]
+}
+
+@test "G8 passes in cross-cluster RS: RECOVERING check goes via cluster A primary" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  export MOCK_RECOVERING_MEMBER=""
+  out=$(_recovery_gate_g8 "mongodb" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G8 warns in cross-cluster RS when another member is RECOVERING" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  export MOCK_RECOVERING_MEMBER="cluster-a-secondary-1:27017"
+  out=$(_recovery_gate_g8 "mongodb" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+}
+
+@test "recovery_run_gates passes in gate mode for cross-cluster RS (primary in A, secondary target in B)" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "gate")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  fail_count=$(printf '%s' "$(_d "$result")" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
+  [ "$status_val" = "success" ]
+  [ "${fail_count:-1}" = "0" ]
+}
+
+@test "recovery_recover completes full flow in cross-cluster RS (primary in cluster A)" {
+  export MOCK_CROSS_CLUSTER_PRIMARY=1
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  printf '%s' "$(_d "$result")" | grep -q '"reached_running":true'
+  printf '%s' "$(_d "$result")" | grep -q '"partition_restored":3'
 }

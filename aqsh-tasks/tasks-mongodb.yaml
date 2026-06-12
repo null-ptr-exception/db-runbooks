@@ -23,7 +23,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -40,7 +40,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -72,7 +72,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: minio_bucket
         env: MINIO_BUCKET
         required: false
@@ -88,7 +88,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -195,7 +195,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -242,7 +242,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -289,7 +289,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -340,7 +340,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -386,7 +386,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -438,7 +438,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -515,7 +515,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
         default: mongo-1
       - name: sts_name
         env: MONGO_STS_NAME
@@ -548,7 +548,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -608,7 +608,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -668,7 +668,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -691,7 +691,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -714,7 +714,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false
@@ -757,7 +757,7 @@ tasks:
         env: DB_NAMESPACE
         required: true
         type: string
-        pattern: '^mongo-[0-9]+$'
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: sts_name
         env: MONGO_STS_NAME
         required: false

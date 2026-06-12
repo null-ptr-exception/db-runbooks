@@ -38,13 +38,23 @@ aqsh:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     tokenReviewURL: ""
 
+# --- mongodb ---
+mongodb:
+  enabled: false
+  namespace: mongo-1
+  image: mongo:7.0.21
+  storage: 1Gi
+
+# --- mongodb RBAC ---
+mongodbRbac:
+  enabled: false
+
 # --- test-client (curl pod with projected SA token) ---
 testClient:
   enabled: false
 
-# --- Istio Gateway + VirtualServices ---
+# --- Istio VirtualServices (route through shared-gateway) ---
 gateway:
   enabled: false
-  hosts: []
   # Each entry: { name, host, backendHost, backendPort }
   virtualServices: []

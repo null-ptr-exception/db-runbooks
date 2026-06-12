@@ -1,15 +1,73 @@
+#!/usr/bin/env bats
+
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  deploy_mongodb "mongo-1"
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
+
+  CTX_A="kind-cluster-a"
+  CTX_B="kind-cluster-b"
+  NS="mongo-core"
+  AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
+
+  # Resolve test-client pod on cluster-b
+  kubectl --context "$CTX_B" -n "$NS" wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
+  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
+    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
+
+  # Create a token from cluster-b SA
+  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
+
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
 setup() {
-  load '../test_helper/common_setup'
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
 }
 
-teardown_file() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
+# --- Helpers ---
+
+kexec() {
+  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
+}
+
+http_post() {
+  local url="$1" body="$2"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X POST '${url}' \
+    -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Content-Type: application/json' \
+    -d '${body}'")
+
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+wait_for_task() {
+  local base_url="$1" task_id="$2" max_wait="${3:-300}"
+  local elapsed=0 status
+
+  while (( elapsed < max_wait )); do
+    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
+      -H 'Authorization: Bearer ${TOKEN}' \
+      '${base_url}/executions/${task_id}'")
+    export TASK_RESPONSE
+
+    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+    [[ "$status" == "completed" ]] && return 0
+    [[ "$status" == "failed" ]] && { echo "Task ${task_id} failed: ${TASK_RESPONSE}" >&2; return 1; }
+    [[ -z "$status" && -n "$TASK_RESPONSE" ]] && { echo "Task ${task_id} invalid response: ${TASK_RESPONSE}" >&2; return 1; }
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  echo "Task ${task_id} timed out after ${max_wait}s (status: ${status})" >&2
+  return 1
 }
 
 _task_result_data() {
@@ -20,11 +78,13 @@ _task_result_data() {
 }
 
 _root_user() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d
+  kubectl --context "$CTX_A" -n mongo-1 get secret mongodb-credentials \
+    -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d
 }
 
 _root_pass() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 get secret mongodb-credentials -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d
+  kubectl --context "$CTX_A" -n mongo-1 get secret mongodb-credentials \
+    -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d
 }
 
 _mongo_exec() {
@@ -32,7 +92,7 @@ _mongo_exec() {
   local user pass
   user="$(_root_user)"
   pass="$(_root_pass)"
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 exec mongodb-0 -- \
+  kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
     mongosh --quiet --norc "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" --eval "$js"
 }
 
@@ -42,7 +102,7 @@ _mongo_exec_as() {
   local password="$3"
   local js="$4"
 
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mongo-1 exec mongodb-0 -- \
+  kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
     mongosh --quiet --norc \
       --username "$username" \
       --password "$password" \
@@ -62,12 +122,12 @@ _submit_task() {
   local payload="$2"
   local task_id
 
-  http_post "${MONGODB_AQSH_URL}/tasks/${path}" "$payload"
+  http_post "${AQSH_URL}/tasks/${path}" "$payload"
   assert_equal "$HTTP_CODE" "202"
 
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [ -n "$task_id" ]
-  wait_for_task "$MONGODB_AQSH_URL" "$task_id"
+  wait_for_task "$AQSH_URL" "$task_id"
 }
 
 _submit_task_allow_failure() {
@@ -75,13 +135,15 @@ _submit_task_allow_failure() {
   local payload="$2"
   local task_id
 
-  http_post "${MONGODB_AQSH_URL}/tasks/${path}" "$payload"
+  http_post "${AQSH_URL}/tasks/${path}" "$payload"
   assert_equal "$HTTP_CODE" "202"
 
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [ -n "$task_id" ]
-  wait_for_task "$MONGODB_AQSH_URL" "$task_id" || true
+  wait_for_task "$AQSH_URL" "$task_id" || true
 }
+
+# --- Tests ---
 
 @test "create-account creates run user and policy" {
   _cleanup_account "qa_temp_user"
@@ -302,12 +364,12 @@ _submit_task_allow_failure() {
     delete_reason: "blocked-state-test"
   }')
 
-  http_post "${MONGODB_AQSH_URL}/tasks/delete-account" "$payload"
+  http_post "${AQSH_URL}/tasks/delete-account" "$payload"
   assert_equal "$HTTP_CODE" "202"
 
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [ -n "$task_id" ]
-  wait_for_task "$MONGODB_AQSH_URL" "$task_id" || true
+  wait_for_task "$AQSH_URL" "$task_id" || true
 
   local result reason
   result="$(_task_result_data)"
@@ -425,10 +487,6 @@ _submit_task_allow_failure() {
   }')
   _submit_task "create-account" "$create_payload"
 
-  # Manually change the password to trigger CHANGED state
-  local old_fp
-  old_fp=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_changed_user', auth_db:'admin'}); print(d ? d.initial_cred_fingerprint : 'missing');" | tail -1)
-
   _mongo_exec "db.getSiblingDB('admin').updateUser('qa_changed_user', {pwd:'different_password_123'});"
   _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateOne({username:'qa_changed_user', auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
 
@@ -445,7 +503,6 @@ _submit_task_allow_failure() {
 }
 
 @test "reconcile-expiry continues on partial errors" {
-  # Create two expired accounts
   _cleanup_account "qa_partial_1"
   _cleanup_account "qa_partial_2"
 
@@ -470,11 +527,8 @@ _submit_task_allow_failure() {
   }')
   _submit_task "create-account" "$create_payload"
 
-  # Set both as expired
   _mongo_exec "db.getSiblingDB('admin').getCollection('run_account_policies').updateMany({username:{\$in:['qa_partial_1', 'qa_partial_2']}, auth_db:'admin'}, {\$set:{expires_at:'2000-01-01T00:00:00Z', status:'ACTIVE'}});"
 
-  # Simulate error condition: drop first account's user but leave policy intact
-  # This creates a mismatch that should be handled gracefully during reconciliation
   _mongo_exec "db.getSiblingDB('admin').dropUser('qa_partial_1');"
 
   local reconcile_payload
@@ -486,19 +540,15 @@ _submit_task_allow_failure() {
   status=$(echo "$result" | jq -r '.status')
   [ "$status" = "OK" ]
 
-  # Should have processed both accounts (first failed gracefully, second succeeded)
   processed=$(echo "$result" | jq -r '.processed // 0')
   [ "$processed" -ge 2 ]
 
-  # Second account should be deleted (not in error state)
   local user_exists
   user_exists=$(_mongo_exec "const u=db.getSiblingDB('admin').getUser('qa_partial_2'); print(u ? 'yes' : 'no');" | tail -1)
   [ "$user_exists" = "no" ]
 
-  # First account should still have policy record (even though user was already deleted)
   local policy_status
   policy_status=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_partial_1', auth_db:'admin'}); print(d ? d.status : 'missing');" | tail -1)
-  # Status should be EXPIRED_DELETED (reconciliation continues despite error)
   [ "$policy_status" = "EXPIRED_DELETED" ]
 }
 

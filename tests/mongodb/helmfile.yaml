@@ -1,8 +1,8 @@
 releases:
-  # cluster-a: fedauth reader RBAC (needed for token creation)
-  - name: aqsh-rbac-a
+  # cluster-a: fedauth reader RBAC
+  - name: mongodb-rbac-a
     chart: ../chart
-    namespace: aqsh-test
+    namespace: mongo-core
     createNamespace: true
     kubeContext: kind-cluster-a
     values:
@@ -10,9 +10,9 @@ releases:
           enabled: true
 
   # cluster-b: fedauth reader RBAC + test-client
-  - name: aqsh-client
+  - name: mongodb-client
     chart: ../chart
-    namespace: aqsh-test
+    namespace: mongo-core
     createNamespace: true
     kubeContext: kind-cluster-b
     values:
@@ -21,33 +21,50 @@ releases:
         testClient:
           enabled: true
 
-  # cluster-a: fedauth, aqsh, redis, gateway
-  # Runtime-discovered values (issuers, CAs, tokens) are injected via
-  # a second helmfile apply with --values runtime-values.yaml.
-  - name: aqsh-server
+  # cluster-a: MongoDB instance (creates mongo-1 namespace)
+  - name: mongo-1
     chart: ../chart
-    namespace: aqsh-test
+    namespace: mongo-1
     createNamespace: true
     kubeContext: kind-cluster-a
+    values:
+      - mongodb:
+          enabled: true
+          namespace: mongo-1
+
+  # cluster-a: fedauth, aqsh-mongodb, redis, rbac, gateway
+  # Runtime-discovered values (issuers, CAs, tokens) are injected via
+  # a second helmfile apply with --values runtime-values.yaml.
+  - name: mongodb-server
+    chart: ../chart
+    namespace: mongo-core
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    needs:
+      - kind-cluster-a/mongo-1/mongo-1
     values:
       - federatedAuth:
           enabled: true
           authorizedClients:
-            - "cluster-a/aqsh-test/kube-auth-proxy"
+            - "cluster-a/mongo-core/kube-auth-proxy"
         redis:
           enabled: true
         aqsh:
           enabled: true
+          tasksConfig: /etc/aqsh/task-mongodb.yaml
+          workerQueues: mongodb
           authProxy:
             tokenReviewURL: "http://fedauth.kind-a.test:30080"
+        mongodbRbac:
+          enabled: true
         gateway:
           enabled: true
           virtualServices:
-            - name: fedauth-aqsh
+            - name: fedauth-mongodb
               host: "fedauth.kind-a.test"
-              backendHost: kube-federated-auth.aqsh-test.svc.cluster.local
+              backendHost: kube-federated-auth.mongo-core.svc.cluster.local
               backendPort: 8080
-            - name: aqsh
-              host: "aqsh.kind-a.test"
-              backendHost: aqsh.aqsh-test.svc.cluster.local
+            - name: aqsh-mongodb
+              host: "aqsh-mongodb.kind-a.test"
+              backendHost: aqsh.mongo-core.svc.cluster.local
               backendPort: 4180

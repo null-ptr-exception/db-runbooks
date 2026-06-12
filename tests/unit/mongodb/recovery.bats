@@ -34,7 +34,13 @@ setup() {
   export MOCK_PATCH_FAIL=0
   export MOCK_FREEZE_FAIL=0
   export MOCK_POD_ABSENT=0
-  export RECOVERY_POLL_INTERVAL=0   # no real sleeping in unit tests
+  export MOCK_SYNCFROM_FAIL=0
+  export MOCK_RECOVERING_MEMBER=""
+  export MOCK_ALL_PODS_PHASE=""
+  export MOCK_NON_PRIMARY_STATE="SECONDARY,1"
+  export MOCK_WIPE_TARGETS=""
+  export RECOVERY_POLL_INTERVAL=0          # no real sleeping in unit tests
+  export RECOVERY_SYNCFROM_RETRY_DELAY=0   # no sleep between syncFrom retries
 
   mkdir -p "${TEST_TMPDIR}/bin"
 
@@ -59,7 +65,11 @@ case "$cmd" in
   get)
     case "$sub" in
       statefulset|sts)
-        if [[ "$flags" == *"-o json"* || "$flags" == *"json"* ]]; then
+        # initContainers jsonpath must be matched before the generic json case
+        if [[ "$flags" == *"initContainers"* ]]; then
+          [[ "${MOCK_HAS_INIT_CONTAINER:-1}" == "1" ]] && printf 'data-recovery'
+          exit 0
+        elif [[ "$flags" == *"-o json"* || "$flags" == *"json"* ]]; then
           IC_BLOCK=""
           if [[ "${MOCK_HAS_INIT_CONTAINER:-1}" == "1" ]]; then
             IC_BLOCK='"initContainers":[{"name":"data-recovery"}],'
@@ -76,7 +86,7 @@ case "$cmd" in
       configmap|cm)
         [[ "${MOCK_HAS_CM:-1}" == "0" ]] && exit 1
         if [[ "$flags" == *"wipe-targets"* ]]; then
-          printf ''
+          printf '%s' "${MOCK_WIPE_TARGETS:-}"
         else
           printf '{"data":{"wipe-targets":"","recovery-version":"0"}}\n'
         fi
@@ -86,10 +96,14 @@ case "$cmd" in
         exit 0 ;;
       pod)
         if [[ "$flags" == *"phase"* ]]; then
-          case "$name" in
-            mongodb-0) printf '%s' "${MOCK_POD0_PHASE:-Running}" ;;
-            *) printf 'Running' ;;
-          esac
+          if [[ -n "${MOCK_ALL_PODS_PHASE:-}" ]]; then
+            printf '%s' "${MOCK_ALL_PODS_PHASE}"
+          else
+            case "$name" in
+              mongodb-0) printf '%s' "${MOCK_POD0_PHASE:-Running}" ;;
+              *) printf 'Running' ;;
+            esac
+          fi
         elif [[ "$flags" == *"metadata.uid"* ]]; then
           # Simulate pod restart: UID changes once a wipe patch has been applied
           if [[ "${MOCK_POD_ABSENT:-0}" == "1" && ! -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]]; then
@@ -108,8 +122,16 @@ case "$cmd" in
     js="${flags}"
     if [[ "$js" == *"isWritablePrimary"* || "$js" == *"ismaster"* ]]; then
       [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]] && printf '1' || printf '0'
+    elif [[ "$js" == *"print(m.name)"* ]]; then
+      printf '%s.mongodb.mongo-1.svc.cluster.local:27017\n' "$pod"
+    elif [[ "$js" == *"replSetSyncFrom"* ]]; then
+      [[ "${MOCK_SYNCFROM_FAIL:-0}" == "1" ]] && printf '{"ok":0,"errmsg":"syncFrom failed"}' || printf '{"ok":1}'
     elif [[ "$js" == *"stateStr"*"health"* ]]; then
-      [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]] && printf 'PRIMARY,1' || printf 'SECONDARY,1'
+      if [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]]; then
+        printf 'PRIMARY,1'
+      else
+        printf '%s' "${MOCK_NON_PRIMARY_STATE:-SECONDARY,1}"
+      fi
     elif [[ "$js" == *"stateStr"*"self"* || "$js" == *"stateStr"*"optime"* ]]; then
       [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]] && printf 'PRIMARY,1,1700000000' || printf 'SECONDARY,1,1699990000'
     elif [[ "$js" == *"replSetResizeOplog"* ]]; then
@@ -135,7 +157,7 @@ case "$cmd" in
     elif [[ "$js" == *"rs.conf"* ]]; then
       printf '{"_id":"rs0","version":5,"members":[{"_id":0,"host":"mongodb-0.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":1,"host":"mongodb-1.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1},{"_id":2,"host":"mongodb-2.mongodb.mongo-1.svc.cluster.local:27017","priority":1,"votes":1}]}'
     elif [[ "$js" == *"RECOVERING"* ]]; then
-      printf ''
+      printf '%s' "${MOCK_RECOVERING_MEMBER:-}"
     elif [[ "$js" == *"optime"* ]]; then
       [[ "$pod" == "${MOCK_PRIMARY_POD:-mongodb-0}" ]] && printf '1700000000' || printf '1699990000'
     fi
@@ -158,6 +180,9 @@ KUBECTL_EOF
   source "${LIB_DIR}/mongodb.sh"
   source "${LIB_DIR}/mongodb-recovery.sh"
 }
+
+# _d: unescape response_ok's double-encoded data field so grep can find inner keys
+_d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
 
 # ── G1 ────────────────────────────────────────────────────────────────────────
 
@@ -242,6 +267,17 @@ KUBECTL_EOF
   [ "$warn" = "true" ]
 }
 
+@test "G4 does not resize when allow_resize=false (report mode is read-only)" {
+  export MOCK_OPLOG_VERDICT=resize
+  out=$(_recovery_gate_g4 "mongodb" "user" "pass" "10240" "false")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+  [ "$code" = "OPLOG_RESIZE_NEEDED" ]
+}
+
 # ── G7 ────────────────────────────────────────────────────────────────────────
 
 @test "G7 passes for non-pod-0 target without primary check" {
@@ -294,13 +330,13 @@ KUBECTL_EOF
 
 @test "recovery_wipe_pod sets the correct partition ordinal (pod-2 → partition 2)" {
   result=$(recovery_wipe_pod "mongodb" "mongodb-2" "mongodb-recovery-config")
-  ordinal=$(printf '%s' "$result" | grep -o '"ordinal":[0-9]*' | cut -d':' -f2)
+  ordinal=$(printf '%s' "$(_d "$result")" | grep -o '"ordinal":[0-9]*' | cut -d':' -f2)
   [ "$ordinal" = "2" ]
 }
 
 @test "recovery_wipe_pod sets partition 0 for pod-0 target" {
   result=$(recovery_wipe_pod "mongodb" "mongodb-0" "mongodb-recovery-config")
-  ordinal=$(printf '%s' "$result" | grep -o '"ordinal":[0-9]*' | cut -d':' -f2)
+  ordinal=$(printf '%s' "$(_d "$result")" | grep -o '"ordinal":[0-9]*' | cut -d':' -f2)
   [ "$ordinal" = "0" ]
 }
 
@@ -309,7 +345,7 @@ KUBECTL_EOF
 @test "recovery_reset patches CM and STS with correct partition" {
   result=$(recovery_reset "mongodb" "mongodb-recovery-config" "3")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  partition=$(printf '%s' "$result" | grep -o '"partition":[0-9]*' | cut -d':' -f2)
+  partition=$(printf '%s' "$(_d "$result")" | grep -o '"partition":[0-9]*' | cut -d':' -f2)
   [ "$status_val" = "success" ]
   [ "$partition" = "3" ]
   [ -f "${TEST_TMPDIR}/patched-configmap-mongodb-recovery-config" ]
@@ -327,7 +363,7 @@ KUBECTL_EOF
 @test "recovery_run_gates passes in report mode when all checks are healthy" {
   result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "report")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  fail_count=$(printf '%s' "$result" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
+  fail_count=$(printf '%s' "$(_d "$result")" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
   [ "$status_val" = "success" ]
   [ "${fail_count:-1}" = "0" ]
 }
@@ -335,7 +371,7 @@ KUBECTL_EOF
 @test "recovery_run_gates report mode returns error status when G1 fails" {
   export MOCK_HAS_INIT_CONTAINER=0
   result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "report") || true
-  fail_count=$(printf '%s' "$result" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
+  fail_count=$(printf '%s' "$(_d "$result")" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
   [ "${fail_count:-0}" -ge "1" ]
 }
 
@@ -345,7 +381,7 @@ KUBECTL_EOF
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "error" ]
   # In gate mode only 1 gate result is emitted (G1)
-  gate_count=$(printf '%s' "$result" | grep -o '"gate":"G[0-9]"' | wc -l | tr -d ' ')
+  gate_count=$(printf '%s' "$(_d "$result")" | grep -o '"gate":"G[0-9]"' | wc -l | tr -d ' ')
   [ "$gate_count" -eq "1" ]
 }
 
@@ -354,6 +390,20 @@ KUBECTL_EOF
   result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "gate") || true
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "error" ]
+}
+
+@test "recovery_run_gates report mode emits valid gates JSON when data size is unknown" {
+  # data_mb=0 takes the G4/G6 "skipped" path — a regression here used to
+  # string-concatenate onto gate_results[0] and corrupt the gates array.
+  export MOCK_DATA_MB=0
+  result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "report")
+  # data must survive as a real JSON object (corrupt JSON degrades to a string)
+  echo "$result" | jq -e '.data | type == "object"' >/dev/null
+  gate_count=$(echo "$result" | jq '.data.gates | length')
+  [ "$gate_count" -eq 8 ]
+  # the skipped G4/G6 entries must be separate, parseable array elements
+  echo "$result" | jq -e '.data.gates[] | select(.gate=="G4") | .warn == true' >/dev/null
+  echo "$result" | jq -e '.data.gates[] | select(.gate=="G6") | .warn == true' >/dev/null
 }
 
 @test "recovery_run_gates gate mode exits on G5 when data exceeds 100GB" {
@@ -369,14 +419,14 @@ KUBECTL_EOF
 @test "fix_diagnose reports PRIMARY_EXISTS when primary pod is Running" {
   result=$(recovery_fix_diagnose "mongodb" "user" "pass")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  diagnosis=$(printf '%s' "$result" | grep -o '"diagnosis":"[^"]*"' | head -1 | cut -d'"' -f4)
+  diagnosis=$(printf '%s' "$(_d "$result")" | grep -o '"diagnosis":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "success" ]
   [ "$diagnosis" = "PRIMARY_EXISTS" ]
 }
 
 @test "fix_diagnose primary_count is at least 1 in a healthy cluster" {
   result=$(recovery_fix_diagnose "mongodb" "user" "pass")
-  primary_count=$(printf '%s' "$result" | grep -o '"primary_count":[0-9]*' | head -1 | cut -d':' -f2)
+  primary_count=$(printf '%s' "$(_d "$result")" | grep -o '"primary_count":[0-9]*' | head -1 | cut -d':' -f2)
   [ "${primary_count:-0}" -ge "1" ]
 }
 
@@ -385,7 +435,7 @@ KUBECTL_EOF
 @test "fix_unfreeze succeeds on all Running pods" {
   result=$(recovery_fix_unfreeze "mongodb" "user" "pass")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  success_count=$(printf '%s' "$result" | grep -o '"success_count":[0-9]*' | head -1 | cut -d':' -f2)
+  success_count=$(printf '%s' "$(_d "$result")" | grep -o '"success_count":[0-9]*' | head -1 | cut -d':' -f2)
   [ "$status_val" = "success" ]
   [ "${success_count:-0}" -ge "1" ]
 }
@@ -403,7 +453,7 @@ KUBECTL_EOF
   result=$(recovery_fix_reconfig "mongodb" "user" "pass")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "success" ]
-  printf '%s' "$result" | grep -q '"reconfig_pod"'
+  printf '%s' "$(_d "$result")" | grep -q '"reconfig_pod"'
 }
 
 # ── recovery_fix_force_primary ────────────────────────────────────────────────
@@ -412,8 +462,8 @@ KUBECTL_EOF
   result=$(recovery_fix_force_primary "mongodb" "mongodb-0" "user" "pass")
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "success" ]
-  printf '%s' "$result" | grep -q '"re_add_results"'
-  printf '%s' "$result" | grep -q '"force_pod"'
+  printf '%s' "$(_d "$result")" | grep -q '"re_add_results"'
+  printf '%s' "$(_d "$result")" | grep -q '"force_pod"'
 }
 
 # ── _recovery_pod_ordinal ─────────────────────────────────────────────────────
@@ -433,15 +483,15 @@ KUBECTL_EOF
   # both wipe (CM+STS) and reset patches happened
   [ -f "${TEST_TMPDIR}/patched-configmap-mongodb-recovery-config" ]
   [ -f "${TEST_TMPDIR}/patched-statefulset-mongodb" ]
-  printf '%s' "$result" | grep -q '"reached_running":true'
-  printf '%s' "$result" | grep -q '"partition_restored":3'
+  printf '%s' "$(_d "$result")" | grep -q '"reached_running":true'
+  printf '%s' "$(_d "$result")" | grep -q '"partition_restored":3'
 }
 
 @test "recovery_recover aborts at gates when init container is missing (no wipe applied)" {
   export MOCK_HAS_INIT_CONTAINER=0
   result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30") || true
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-  phase=$(printf '%s' "$result" | grep -o '"phase":"[^"]*"' | head -1 | cut -d'"' -f4)
+  phase=$(printf '%s' "$(_d "$result")" | grep -o '"phase":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "error" ]
   [ "$phase" = "gates" ]
   # no STS patch should have been applied
@@ -457,5 +507,201 @@ KUBECTL_EOF
 
 @test "recovery_recover result includes a next_step pointer to monitor sync" {
   result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
-  printf '%s' "$result" | grep -q '"next_step"'
+  printf '%s' "$(_d "$result")" | grep -q '"next_step"'
+}
+
+@test "recovery_recover result includes sync_source_set field" {
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  printf '%s' "$(_d "$result")" | grep -q '"sync_source_set"'
+}
+
+@test "recovery_recover succeeds even when replSetSyncFrom fails (non-fatal)" {
+  export MOCK_SYNCFROM_FAIL=1
+  result=$(recovery_recover "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "3" "30")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  sync_set=$(printf '%s' "$(_d "$result")" | grep -o '"sync_source_set":[a-z]*' | cut -d':' -f2)
+  [ "$sync_set" = "false" ]
+}
+
+# ── G3 ────────────────────────────────────────────────────────────────────────
+
+@test "G3 passes when primary exists and healthy secondary is available" {
+  out=$(_recovery_gate_g3 "mongodb" "mongodb-2" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "true" ]
+  [ -z "$code" ]
+}
+
+@test "G3 fails NO_PRIMARY when healthy secondary exists but no primary is elected" {
+  export MOCK_PRIMARY_POD="__none__"
+  out=$(_recovery_gate_g3 "mongodb" "mongodb-2" "user" "pass") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "NO_PRIMARY" ]
+}
+
+@test "G3 fails NO_HEALTHY_SOURCE when all non-target pods are non-Running" {
+  export MOCK_ALL_PODS_PHASE="Terminating"
+  out=$(_recovery_gate_g3 "mongodb" "mongodb-2" "user" "pass") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "NO_HEALTHY_SOURCE" ]
+}
+
+# ── G6 ────────────────────────────────────────────────────────────────────────
+
+@test "G6 passes when PVC available space exceeds requirement (data x 1.2)" {
+  export MOCK_DATA_MB=1024
+  export MOCK_AVAIL_MB=2000   # 2000 >= 1024*1.2=1229
+  out=$(_recovery_gate_g6 "mongodb" "mongodb-2" "1024")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G6 fails INSUFFICIENT_PVC_SPACE when available space is below requirement" {
+  export MOCK_DATA_MB=1024
+  export MOCK_AVAIL_MB=1000   # 1000 < 1024*1.2=1229
+  out=$(_recovery_gate_g6 "mongodb" "mongodb-2" "1024") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "INSUFFICIENT_PVC_SPACE" ]
+}
+
+@test "G6 passes with warn when available space cannot be determined" {
+  export MOCK_AVAIL_MB=0
+  out=$(_recovery_gate_g6 "mongodb" "mongodb-2" "1024")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+}
+
+# ── G8 ────────────────────────────────────────────────────────────────────────
+
+@test "G8 passes with no warn when no members are in RECOVERING state" {
+  export MOCK_RECOVERING_MEMBER=""
+  out=$(_recovery_gate_g8 "mongodb" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ -z "$warn" ]
+}
+
+@test "G8 passes with warn when another member is in RECOVERING state" {
+  export MOCK_RECOVERING_MEMBER="mongodb-2.mongodb.mongo-1.svc.cluster.local:27017"
+  out=$(_recovery_gate_g8 "mongodb" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+}
+
+# ── recovery_set_sync_source ──────────────────────────────────────────────────
+
+@test "set_sync_source picks secondary when primary and secondary both available" {
+  # Default: mongodb-0=PRIMARY, mongodb-1/2=SECONDARY; target=mongodb-2
+  result=$(recovery_set_sync_source "mongodb" "mongodb-2" "user" "pass")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  sync_type=$(printf '%s' "$(_d "$result")" | grep -o '"sync_source_type":"[^"]*"' | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  [ "$sync_type" = "SECONDARY" ]
+}
+
+@test "set_sync_source falls back to primary when no secondary is available" {
+  # Non-primary pods return UNKNOWN,0 so no secondary is found
+  export MOCK_NON_PRIMARY_STATE="UNKNOWN,0"
+  # target=mongodb-1 so mongodb-0(PRIMARY) and mongodb-2(UNKNOWN) are candidates
+  result=$(recovery_set_sync_source "mongodb" "mongodb-1" "user" "pass")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  sync_type=$(printf '%s' "$(_d "$result")" | grep -o '"sync_source_type":"[^"]*"' | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  [ "$sync_type" = "PRIMARY" ]
+}
+
+@test "set_sync_source returns error when no healthy source exists" {
+  export MOCK_ALL_PODS_PHASE="Terminating"
+  result=$(recovery_set_sync_source "mongodb" "mongodb-2" "user" "pass") || true
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "error" ]
+}
+
+@test "set_sync_source result includes sync_source_type and sync_host fields" {
+  result=$(recovery_set_sync_source "mongodb" "mongodb-2" "user" "pass")
+  printf '%s' "$(_d "$result")" | grep -q '"sync_source_type"'
+  printf '%s' "$(_d "$result")" | grep -q '"sync_host"'
+  sync_host=$(printf '%s' "$(_d "$result")" | grep -o '"sync_host":"[^"]*"' | cut -d'"' -f4)
+  # host must contain a port
+  printf '%s' "$sync_host" | grep -q ':27017'
+}
+
+@test "set_sync_source returns error when replSetSyncFrom fails after retries" {
+  export MOCK_SYNCFROM_FAIL=1
+  result=$(recovery_set_sync_source "mongodb" "mongodb-2" "user" "pass") || true
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "error" ]
+}
+
+# ── recovery_fix_diagnose (additional scenarios) ──────────────────────────────
+
+@test "fix_diagnose reports ALL_SECONDARY_NO_PRIMARY when no primary is elected" {
+  export MOCK_PRIMARY_POD="__none__"
+  result=$(recovery_fix_diagnose "mongodb" "user" "pass")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  diagnosis=$(printf '%s' "$(_d "$result")" | grep -o '"diagnosis":"[^"]*"' | head -1 | cut -d'"' -f4)
+  primary_count=$(printf '%s' "$(_d "$result")" | grep -o '"primary_count":[0-9]*' | head -1 | cut -d':' -f2)
+  secondary_count=$(printf '%s' "$(_d "$result")" | grep -o '"secondary_count":[0-9]*' | head -1 | cut -d':' -f2)
+  [ "$status_val" = "success" ]
+  [ "$diagnosis" = "ALL_SECONDARY_NO_PRIMARY" ]
+  [ "${primary_count:-1}" = "0" ]
+  [ "${secondary_count:-0}" -ge "1" ]
+}
+
+@test "fix_diagnose reports NO_HEALTHY_MEMBERS when all pods are non-Running" {
+  export MOCK_ALL_PODS_PHASE="CrashLoopBackOff"
+  result=$(recovery_fix_diagnose "mongodb" "user" "pass")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  diagnosis=$(printf '%s' "$(_d "$result")" | grep -o '"diagnosis":"[^"]*"' | head -1 | cut -d'"' -f4)
+  [ "$status_val" = "success" ]
+  [ "$diagnosis" = "NO_HEALTHY_MEMBERS" ]
+}
+
+# ── recovery_get_status ───────────────────────────────────────────────────────
+
+@test "recovery_get_status returns sts and configmap_found fields" {
+  result=$(recovery_get_status "mongodb" "mongodb-recovery-config")
+  status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+  sts=$(printf '%s' "$(_d "$result")" | grep -o '"sts":"[^"]*"' | head -1 | cut -d'"' -f4)
+  cm_found=$(printf '%s' "$(_d "$result")" | grep -o '"configmap_found":[a-z]*' | cut -d':' -f2)
+  [ "$status_val" = "success" ]
+  [ "$sts" = "mongodb" ]
+  [ "$cm_found" = "true" ]
+}
+
+@test "recovery_get_status returns active_recovery false when wipe-targets is empty" {
+  export MOCK_WIPE_TARGETS=""
+  result=$(recovery_get_status "mongodb" "mongodb-recovery-config")
+  active=$(printf '%s' "$(_d "$result")" | grep -o '"active_recovery":[a-z]*' | cut -d':' -f2)
+  [ "$active" = "false" ]
+}
+
+@test "recovery_get_status returns active_recovery true when wipe-targets is set" {
+  export MOCK_WIPE_TARGETS="mongodb-2"
+  result=$(recovery_get_status "mongodb" "mongodb-recovery-config")
+  active=$(printf '%s' "$(_d "$result")" | grep -o '"active_recovery":[a-z]*' | cut -d':' -f2)
+  [ "$active" = "true" ]
+}
+
+@test "recovery_get_status returns pods array with phase info" {
+  result=$(recovery_get_status "mongodb" "mongodb-recovery-config")
+  pods=$(printf '%s' "$(_d "$result")" | grep -o '"pods":\[.*\]' | head -1)
+  [ -n "$pods" ]
+  # should include at least one pod entry with phase
+  printf '%s' "$pods" | grep -q '"phase"'
 }

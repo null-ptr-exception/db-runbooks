@@ -9,7 +9,8 @@
 #   recovery_reset       — clear wipe-target and restore partition
 #   recovery_get_status  — show current recovery state
 #   recovery_fix_diagnose / _unfreeze / _reconfig / _force_primary — E1+E5 fix
-#   recovery_recover     — orchestrator: gates → wipe → wait → reset (one call)
+#   recovery_set_sync_source — direct pod to sync from secondary (or primary)
+#   recovery_recover     — orchestrator: gates → wipe → wait → reset → set-sync
 #
 # Depends on: logging.sh, response.sh, k8s.sh, mongodb.sh (sourced by callers)
 # =============================================================================
@@ -17,8 +18,11 @@
 [[ -n "${_MONGODB_RECOVERY_LIB_LOADED:-}" ]] && return 0
 _MONGODB_RECOVERY_LIB_LOADED=1
 
-readonly _RECOVERY_DATA_PATH="/bitnami/mongodb/data/db"
-readonly _RECOVERY_MOUNT_PATH="/bitnami/mongodb"
+# Data paths vary by MongoDB deployment type; override via API params or env:
+#   Bitnami helm chart (default): /bitnami/mongodb/data/db  /bitnami/mongodb
+#   Standard mongo:N image:       /data/db                  /data
+_RECOVERY_DATA_PATH="${RECOVERY_DATA_PATH:-/bitnami/mongodb/data/db}"
+_RECOVERY_MOUNT_PATH="${RECOVERY_MOUNT_PATH:-/bitnami/mongodb}"
 readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 
@@ -91,12 +95,15 @@ _recovery_find_primary_pod() {
 
 _recovery_gate_g1() {
   local sts_name="$1"
-  local sts_json
-  sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>/dev/null) || {
+  # jsonpath, not `-o json | grep`: real kubectl pretty-prints JSON with a
+  # space after the colon, so a compact-JSON grep never matches.
+  local ic_names
+  ic_names=$(_kubectl get statefulset "$sts_name" \
+    -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null) || {
     printf '{"gate":"G1","pass":false,"code":"STS_NOT_FOUND","message":"StatefulSet %s not found","suggestion":"Verify namespace and sts_name inputs"}' \
       "$sts_name"; return 1
   }
-  if printf '%s' "$sts_json" | grep -q "\"name\":\"${_RECOVERY_INIT_CONTAINER_NAME}\""; then
+  if printf '%s' "$ic_names" | tr ' ' '\n' | grep -qx "$_RECOVERY_INIT_CONTAINER_NAME"; then
     printf '{"gate":"G1","pass":true,"message":"Init container %s present in StatefulSet %s"}' \
       "$_RECOVERY_INIT_CONTAINER_NAME" "$sts_name"
     return 0
@@ -199,8 +206,10 @@ _recovery_gate_g5() {
   return 0
 }
 
+# allow_resize=false (report mode): never mutate the cluster — report
+# OPLOG_RESIZE_NEEDED as a warning instead of running replSetResizeOplog.
 _recovery_gate_g4() {
-  local sts_name="$1" user="$2" pass="$3" data_mb="$4"
+  local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}"
   local primary_pod
   if ! primary_pod=$(_recovery_find_primary_pod "$sts_name" "$user" "$pass"); then
     printf '{"gate":"G4","pass":false,"code":"NO_PRIMARY_FOR_OPLOG","message":"Cannot find primary to query oplog — ensure primary is elected first","suggestion":"Run recovery/fix-no-primary level=diagnose"}'
@@ -238,6 +247,12 @@ print([curMB,Math.ceil(winHrs),wRate,syncH,reqWin,reqMB,curMB>=reqMB?'ok':'resiz
   if [[ "$verdict" == "ok" ]]; then
     printf '{"gate":"G4","pass":true,"message":"Oplog window sufficient: %sMB (window %sh) >= required %sMB (est. sync %sh for %sMB data)","current_mb":%s,"required_mb":%s,"window_hours":%s}' \
       "$cur_mb" "$win_hrs" "$req_mb" "$sync_h" "$data_mb" "$cur_mb" "$req_mb" "$win_hrs"
+    return 0
+  fi
+
+  if [[ "$allow_resize" != "true" ]]; then
+    printf '{"gate":"G4","pass":true,"warn":true,"code":"OPLOG_RESIZE_NEEDED","message":"Oplog %sMB < required %sMB (data %sMB, est. sync %sh) — auto-resize will run during wipe/recover; pre-check is read-only","current_mb":%s,"required_mb":%s,"window_hours":%s}' \
+      "$cur_mb" "$req_mb" "$data_mb" "$sync_h" "$cur_mb" "$req_mb" "$win_hrs"
     return 0
   fi
 
@@ -416,11 +431,14 @@ recovery_run_gates() {
   # G3: healthy sync source + primary
   _run_gate _recovery_gate_g3 true "$sts_name" "$target_pod" "$user" "$pass" || return 1
 
-  # G4: oplog window (uses data_mb; skip if unknown)
+  # G4: oplog window (uses data_mb; skip if unknown).
+  # Auto-resize only in gate mode — report mode (pre-check) must stay read-only.
+  local g4_resize="false"
+  [[ "$mode" == "gate" ]] && g4_resize="true"
   if [[ "$data_mb" -gt 0 ]]; then
-    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" || return 1
+    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" "$g4_resize" || return 1
   else
-    gate_results+='{"gate":"G4","pass":true,"warn":true,"message":"Oplog check skipped: data size unknown"}'
+    gate_results+=('{"gate":"G4","pass":true,"warn":true,"message":"Oplog check skipped: data size unknown"}')
     (( warn_count++ )) || true
   fi
 
@@ -439,7 +457,7 @@ recovery_run_gates() {
   if [[ "$data_mb" -gt 0 ]]; then
     _run_gate _recovery_gate_g6 true "$sts_name" "$target_pod" "$data_mb" || return 1
   else
-    gate_results+='{"gate":"G6","pass":true,"warn":true,"message":"PVC space check skipped: data size unknown"}'
+    gate_results+=('{"gate":"G6","pass":true,"warn":true,"message":"PVC space check skipped: data size unknown"}')
     (( warn_count++ )) || true
   fi
 
@@ -800,6 +818,91 @@ try {
 }
 
 # ===========================================================================
+# Sync source
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# recovery_set_sync_source <sts_name> <target_pod> <user> <pass>
+#
+# Direct target_pod to sync from the best available member:
+#   - Prefers a healthy SECONDARY to avoid burdening the primary
+#   - Falls back to PRIMARY when no healthy secondary is found
+#
+# Retries up to 6 × 5 s (30 s) waiting for mongod to accept connections
+# after a fresh restart before giving up.  Failure is non-fatal to the
+# overall recovery — MongoDB will still sync; it just picks its own source.
+# ---------------------------------------------------------------------------
+recovery_set_sync_source() {
+  local sts_name="${1:?}" target_pod="${2:?}" user="${3:?}" pass="${4:?}"
+  local op="recovery_set_sync_source"
+
+  # Walk all non-target Running pods; prefer SECONDARY, note PRIMARY as fallback
+  local pods_raw
+  pods_raw=$(_recovery_list_pods "$sts_name") || pods_raw=""
+
+  local primary_pod="" secondary_pod=""
+  while IFS= read -r pod; do
+    [[ -z "$pod" || "$pod" == "$target_pod" ]] && continue
+    local phase
+    phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+    [[ "$phase" != "Running" ]] && continue
+    local rs_out state health
+    rs_out=$(_recovery_mongosh_pod "$pod" "$user" "$pass" \
+      "try{var s=rs.status();var m=s.members.filter(function(x){return x.self;})[0];print(m.stateStr+','+m.health);}catch(e){print('ERR,0');}" \
+      2>/dev/null | tail -1) || continue
+    state="${rs_out%%,*}"; health="${rs_out##*,}"
+    [[ "$state" == "SECONDARY" && "$health" == "1" && -z "$secondary_pod" ]] && secondary_pod="$pod"
+    [[ "$state" == "PRIMARY"   && "$health" == "1" && -z "$primary_pod"   ]] && primary_pod="$pod"
+  done <<< "$pods_raw"
+
+  local sync_pod="" sync_type=""
+  if [[ -n "$secondary_pod" ]]; then
+    sync_pod="$secondary_pod"; sync_type="SECONDARY"
+  elif [[ -n "$primary_pod" ]]; then
+    sync_pod="$primary_pod";   sync_type="PRIMARY"
+  else
+    response_err "$op" "No healthy sync source found for ${target_pod} — skipping replSetSyncFrom" \
+      "{\"target_pod\":\"${target_pod}\"}" 1
+    return 1
+  fi
+
+  # Resolve the RS-registered host:port for the chosen pod
+  local sync_host
+  sync_host=$(_recovery_mongosh_pod "$sync_pod" "$user" "$pass" \
+    "try{var s=rs.status();var m=s.members.filter(function(x){return x.self;})[0];print(m.name);}catch(e){print('');}" \
+    2>/dev/null | tail -1) || sync_host=""
+  if [[ -z "$sync_host" ]]; then
+    response_err "$op" "Cannot resolve RS host:port for pod ${sync_pod}" \
+      "{\"sync_pod\":\"${sync_pod}\"}" 1
+    return 1
+  fi
+
+  log_info "$op" "Directing ${target_pod} to sync from ${sync_type} ${sync_pod} (${sync_host})"
+
+  # Retry: mongod may need a moment after restart before accepting connections
+  local retry_delay="${RECOVERY_SYNCFROM_RETRY_DELAY:-5}"
+  local sync_out="" attempt
+  for attempt in 1 2 3 4 5 6; do
+    sync_out=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
+      "try{print(JSON.stringify(db.adminCommand({replSetSyncFrom:'${sync_host}'})));}catch(e){print(JSON.stringify({ok:0,errmsg:e.message}));}" \
+      2>/dev/null | tail -1) || sync_out='{}'
+    printf '%s' "$sync_out" | grep -q '"ok":1' && break
+    log_info "$op" "replSetSyncFrom attempt ${attempt}/6 failed — retrying in ${retry_delay}s"
+    sleep "$retry_delay"
+  done
+
+  if printf '%s' "$sync_out" | grep -q '"ok":1'; then
+    response_ok "$op" "Sync source set: ${target_pod} → ${sync_type} ${sync_pod} (${sync_host})" \
+      "{\"target_pod\":\"${target_pod}\",\"sync_source_pod\":\"${sync_pod}\",\"sync_source_type\":\"${sync_type}\",\"sync_host\":\"${sync_host}\"}"
+    return 0
+  fi
+
+  response_err "$op" "replSetSyncFrom failed after 6 attempts on pod ${target_pod} — MongoDB will choose its own sync source" \
+    "{\"target_pod\":\"${target_pod}\",\"sync_pod\":\"${sync_pod}\",\"sync_host\":\"${sync_host}\",\"last_result\":${sync_out:-\{\}}}" 1
+  return 1
+}
+
+# ===========================================================================
 # Orchestrator
 # ===========================================================================
 
@@ -829,7 +932,9 @@ _recovery_pod_phase() {
 #   4. Poll until the pod is RECREATED (UID changes) AND reaches Running
 #      — this guarantees the init container actually ran and wiped data
 #   5. recovery_reset  (clear wipe-target + restore partition) the instant
-#      the pod is Running, closing the dangerous re-wipe race automatically
+#      the pod is Running, closing the dangerous re-wipe race automatically.
+#      Only THEN attempt set-sync-source (best-effort, can take ~30s of
+#      retries) — it must never delay the reset.
 #
 # On timeout (pod never restarts / never reaches Running) it deliberately
 # does NOT reset — leaving wipe-target in place so a manual investigation can
@@ -900,7 +1005,8 @@ recovery_recover() {
     return 1
   fi
 
-  # 5b. Reset immediately (closes the re-wipe race)
+  # 5b. Reset immediately (closes the re-wipe race) — before anything else,
+  # including set-sync-source which may retry for ~30s.
   local reset_result
   if ! reset_result=$(recovery_reset "$sts" "$cm" "$replicas"); then
     response_err "$op" "Pod ${target_pod} is Running but recovery/reset failed — wipe-target may still be set" \
@@ -908,8 +1014,16 @@ recovery_recover() {
     return 1
   fi
 
+  # 5c. Direct sync source: prefer secondary, fall back to primary (non-fatal)
+  local sync_src_ok="false"
+  if recovery_set_sync_source "$sts" "$target_pod" "$user" "$pass" >/dev/null 2>&1; then
+    sync_src_ok="true"
+  else
+    log_info "$op" "Warning: could not set sync source — MongoDB will pick automatically"
+  fi
+
   log_info "$op" "Recovery orchestration complete for ${target_pod}; initial sync now in progress"
   response_ok "$op" "Recovery complete for ${target_pod}: data wiped, pod restarted, recovery state cleared. Initial sync is now running." \
-    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
+    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"sync_source_set\":${sync_src_ok},\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
   return 0
 }

@@ -1,8 +1,10 @@
 # MongoDB Data Recovery (aqsh-mongodb)
 
-Automated recovery workflow for corrupted or out-of-sync Bitnami MongoDB
-StatefulSet replicas.  Works without `kubectl delete pod`, `kubectl delete pvc`,
-or node cordon — only ConfigMap and StatefulSet `patch` permissions are needed.
+Automated recovery workflow for corrupted or out-of-sync MongoDB StatefulSet
+replicas (Bitnami helm chart by default; standard `mongo:N` images via the
+`data_path` / `mount_path` inputs).  Works without `kubectl delete pod`,
+`kubectl delete pvc`, or node cordon — only ConfigMap and StatefulSet `patch`
+permissions are needed.
 
 ---
 
@@ -17,6 +19,7 @@ or node cordon — only ConfigMap and StatefulSet `patch` permissions are needed
 7. [Exception Scenarios](#exception-scenarios)
 8. [RBAC Requirements](#rbac-requirements)
 9. [API Examples](#api-examples)
+10. [Test Coverage Notes](#test-coverage-notes)
 
 ---
 
@@ -30,7 +33,7 @@ or node cordon — only ConfigMap and StatefulSet `patch` permissions are needed
 │  2. POST /tasks/recovery/wipe       ──→  patch CM + patch STS  │
 │  3. <pod restarts>                                              │
 │     └─ init container checks wipe-targets                       │
-│         └─ hostname match → rm -rf /bitnami/mongodb/data/db     │
+│         └─ hostname match → delete data dir contents            │
 │         └─ MongoDB starts empty → initial sync from primary     │
 │  4. POST /tasks/recovery/reset      ──→  clear CM + partition   │
 └─────────────────────────────────────────────────────────────────┘
@@ -68,8 +71,24 @@ or node cordon — only ConfigMap and StatefulSet `patch` permissions are needed
 The `data-recovery` init container runs on every pod start.  It reads
 `/recovery-config/wipe-targets` from the ConfigMap:
 
-- **Hostname matches**: wipe `/bitnami/mongodb/data/db` → MongoDB starts empty → auto initial-sync
+- **Hostname matches**: wipe the data directory → MongoDB starts empty → auto initial-sync
 - **Hostname not in list**: skip, proceed normally
+
+### Data Paths per Deployment Type
+
+The gates (`du` for G5, `df` for G6) and the init container must agree on
+where the data lives.  The tasks default to Bitnami paths; override per call
+with the `data_path` / `mount_path` inputs:
+
+| Deployment | `data_path` (du target) | `mount_path` (df target) |
+|---|---|---|
+| Bitnami helm chart (default) | `/bitnami/mongodb/data/db` | `/bitnami/mongodb` |
+| Standard `mongo:N` image | `/data/db` | `/data` |
+
+> If `data_path` points at the wrong location, `du` returns nothing and the
+> size gates **silently degrade**: G5 passes with a warn ("size unknown") and
+> G4/G6 are skipped.  A pre-check that passes with `warn > 0` may not have
+> actually verified oplog or disk space — read the per-gate messages.
 
 ### StatefulSet Partition for Targeted Restart
 
@@ -82,6 +101,14 @@ ordinal ≥ N restart when the pod template changes.
 | Restart only pod-1 (pod-2 restarts too but has no wipe-target — safe) | `1` |
 | Restart only pod-0 (verify no primary first via G7) | `0` |
 | Locked — no auto-restart | replica count (e.g. `3`) |
+
+> **Quorum warning for lower-ordinal targets**: pods above the partition that
+> sit on an older controller revision restart **at the same time** as the
+> target. Wiping pod-1 in a 3-member RS therefore restarts pod-1 *and* pod-2
+> together — 2 of 3 members down means the replica set loses its majority and
+> the primary steps down until one of them rejoins. Prefer recovering the
+> highest ordinal first, or accept a brief write outage. (The integration
+> tests only exercise the highest-ordinal case, mongodb-2.)
 
 ### Critical: Clear wipe-targets Immediately After Pod Enters Running
 
@@ -146,13 +173,26 @@ EOF
 
 > **Note**: The StatefulSet patch triggers a rolling update.  With `partition=3`
 > (for a 3-replica cluster) no pods restart automatically — the partition is
-> the lock.
+> the lock.  The running pods therefore do **not** have the init container yet;
+> it materialises on the target pod the first time a wipe lowers the partition.
+
+> **Non-Bitnami (standard `mongo:N` image) adaptation** — three things change
+> in the patch above (see `tests/mongodb/recovery.bats` setup for a working
+> example): the wipe path becomes `/data/db` (mount the volume at `/data`),
+> the data volume is usually named `data` instead of `datadir`, and the
+> container user is `999` instead of `1001`.  Then pass
+> `"data_path":"/data/db","mount_path":"/data"` on every pre-check / wipe /
+> recover call.
 
 ---
 
 ## API Reference
 
 All tasks are available via `POST /tasks/<name>` on the aqsh-mongodb endpoint.
+
+Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
+`fix-no-primary` 8m, `pre-check` 5m, `reset` 3m, `status` 2m.  All tasks
+require `namespace` matching `^mongo-[0-9]+$`.
 
 There are two ways to drive recovery:
 
@@ -163,10 +203,10 @@ There are two ways to drive recovery:
   repair flow.
 
 ```
-recovery/recover  ≡  pre-check(gate) ─→ wipe ─→ wait(restart+Running) ─→ reset
-                          │ blocks       │ patch    │ auto, no human       │ auto
-                          ▼              ▼          ▼                      ▼
-                       G1–G8        CM+STS      poll pod UID change    clear CM
+recovery/recover  ≡  pre-check(gate) ─→ wipe ─→ wait(restart+Running) ─→ reset ─→ set-sync
+                          │ blocks       │ patch    │ auto, no human       │ auto     │ best-effort
+                          ▼              ▼          ▼                      ▼          ▼
+                       G1–G8        CM+STS      poll pod UID change    clear CM   replSetSyncFrom
 ```
 
 ### `recovery/recover`  ⭐ recommended
@@ -182,6 +222,10 @@ Sequence:
 4. Poll until the pod is **recreated** (UID changes → init container has run and
    wiped data) **and** reaches `Running`
 5. `reset`: clear `wipe-targets` + restore partition the instant the pod is Running
+6. Best-effort `replSetSyncFrom` to point the pod at a healthy secondary
+   (non-fatal: on a freshly wiped member authentication only works once
+   initial sync has cloned `admin.system.users`, so this often fails and
+   MongoDB picks its own sync source — `sync_source_set: false` in the result)
 
 Initial sync is **not** awaited (it can take a long time for large data) — the
 response tells you to monitor it with `recovery/status`.
@@ -203,6 +247,13 @@ response tells you to monitor it with `recovery/status`.
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
 | `wait_timeout` | `RECOVERY_WAIT_TIMEOUT` | no | `"300"` (seconds) |
+| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
+| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
+
+> `wait_timeout` only covers the restart-and-reach-Running poll. Keep it well
+> under the aqsh task timeout (12m for `recovery/recover`) so the gates and
+> reset still fit — otherwise aqsh kills the task mid-flight with
+> `wipe-targets` still set.
 
 **Output (success)**
 
@@ -212,6 +263,7 @@ response tells you to monitor it with `recovery/status`.
   "old_uid": "a1b2c3...",
   "recreated": true,
   "reached_running": true,
+  "sync_source_set": false,
   "partition_restored": 3,
   "elapsed_seconds": 47,
   "next_step": "Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)"
@@ -243,6 +295,11 @@ curl -s -X POST "$URL/tasks/recovery/recover" \
 
 Read-only.  Returns current recovery state: ConfigMap wipe-targets, StatefulSet
 partition, and pod phases.
+
+> Pod `phase` is Kubernetes-level only — a pod mid-initial-sync still shows
+> `Running`.  To see replication progress (`STARTUP2` → `SECONDARY`, optime
+> catch-up) use `rs.status()` inside a healthy member, e.g.
+> `kubectl -n <ns> exec <sts>-0 -- mongosh ... --eval "rs.status()"`.
 
 **Input**
 
@@ -289,6 +346,13 @@ full report without making any changes.
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
+| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
+| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
+
+> The credentials in `credential_secret` must be a **real MongoDB user**
+> (root role) present in `admin.system.users` — the gates authenticate via
+> mongosh even when the deployment runs without `--auth`, and MongoDB rejects
+> authentication for nonexistent users regardless of the authorization mode.
 
 **Output**
 
@@ -311,15 +375,45 @@ full report without making any changes.
 }
 ```
 
+**Output (with a blocking gate)** — the aqsh task still finishes as
+`completed` in report mode; failure is expressed in the payload, so always
+check `fail` (and per-gate `code`) rather than the task status:
+
+```json
+{
+  "gates": [
+    {"gate": "G1", "pass": true,  "message": "..."},
+    {"gate": "G7", "pass": false, "code": "POD0_IS_PRIMARY",
+     "message": "Target pod-0 is currently PRIMARY — wiping will cause an election and brief write unavailability",
+     "suggestion": "Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}
+  ],
+  "pass": 7,
+  "fail": 1,
+  "warn": 0,
+  "target_pod": "mongodb-0"
+}
+```
+
+Failing gates carry a machine-readable `code` (e.g. `STS_NOT_FOUND`,
+`INIT_CONTAINER_MISSING`, `CONFIGMAP_MISSING`, `NO_PRIMARY`,
+`NO_HEALTHY_SOURCE`, `OPLOG_TOO_SMALL`, `DATA_TOO_LARGE`,
+`INSUFFICIENT_PVC_SPACE`, `POD0_IS_PRIMARY`) plus a `suggestion`; warn-only
+results may carry `OPLOG_RESIZE_NEEDED` or size-unknown skip messages.
+
 ---
 
 ### `recovery/wipe`
 
-**Destructive**.  Runs G1–G8 gates (blocking), then patches the ConfigMap and
+**Destructive**.  Runs G1–G8 gates (blocking — the task **fails** on the
+first blocking gate, unlike pre-check), then patches the ConfigMap and
 StatefulSet to trigger a targeted pod restart where the init container wipes
 the data directory.
 
-**Input**: same as `recovery/pre-check` plus `force_wipe`.
+If the StatefulSet patch fails after the ConfigMap was already updated, the
+ConfigMap is rolled back automatically so no stale wipe-target is left behind.
+
+**Input**: same as `recovery/pre-check` (including `force_wipe`,
+`data_path`, `mount_path`).
 
 **Output**
 
@@ -344,7 +438,16 @@ the data directory.
 ### `recovery/reset`
 
 Clears `wipe-targets` in the ConfigMap and restores the StatefulSet partition
-to the replica count (locked state).
+to the replica count (locked state).  Idempotent — safe to run when no
+recovery is active.
+
+The partition value is read live from `spec.replicas`; if the StatefulSet
+cannot be read it falls back to `3` — verify with `recovery/status` if your
+replica set is not 3 members.
+
+The two steps are deliberately ordered: `wipe-targets` is cleared **first**
+(stops any further re-wipe), then the partition is restored — so even a
+partial failure cannot leave a wipe armed.
 
 > Run this **immediately after** the target pod enters `Running` state.
 
@@ -372,6 +475,11 @@ to the replica count (locked state).
 
 Restores a primary when all RS members show `SECONDARY` with no `PRIMARY`
 (E1+E5 combined scenario).  Use the four escalation levels in order.
+
+On failure the task is marked **failed** and the result contains an
+`{"error": ...}` payload (e.g. `unfreeze` errors only when `rs.freeze(0)`
+failed on *every* reachable pod — partial success still counts as success
+with per-pod `results`).
 
 **Input**
 
@@ -438,7 +546,7 @@ first blocking failure).
 | **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Apply `02-sts-patch.yaml` |
 | **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Apply `01-recovery-configmap.yaml` |
 | **G3** | ≥1 healthy sync source (health=1) and a PRIMARY is elected | BLOCK | Run `recovery/fix-no-primary level=diagnose` |
-| **G4** | Oplog window ≥ estimated sync time (auto-resize attempted first) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
+| **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
 | **G5** | Data size < 100 GB (overridable with `force_wipe=true`) | BLOCK | Use VolumeSnapshot or mongodump for large datasets |
 | **G6** | PVC available space ≥ data × 1.2 | BLOCK | Expand PVC or free space |
 | **G7** | If target is pod-0, it must NOT be the current PRIMARY | BLOCK | Wait for step-down or run `rs.stepDown(60)` |
@@ -456,8 +564,11 @@ required_MB  = max(2048, data_MB × 5%, write_rate × required_win)
 ```
 
 If `current_oplog_MB < required_MB`:
-1. Attempts `replSetResizeOplog` on the primary automatically → **WARN** (pass)
-2. If resize fails → **BLOCK** with exact manual command
+1. In `recovery/pre-check` (report mode): **no resize** — pre-check is strictly
+   read-only and reports `OPLOG_RESIZE_NEEDED` as a **WARN** (pass)
+2. In `recovery/wipe` / `recovery/recover` (gate mode): attempts
+   `replSetResizeOplog` on the primary automatically → **WARN** (pass)
+3. If the gate-mode resize fails → **BLOCK** with exact manual command
 
 Example output for G4:
 ```
@@ -658,3 +769,19 @@ curl -s -X POST "$URL/tasks/recovery/fix-no-primary" \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"namespace":"mongo-1","level":"diagnose"}' | jq .
 ```
+
+---
+
+## Test Coverage Notes
+
+Integration tests (`tests/mongodb/recovery.bats`) exercise the full
+`recovery/recover` path twice against a real 3-member RS, always targeting
+the **highest ordinal** (mongodb-2). The following paths are deliberately
+**not** covered by integration tests and rely on unit tests + this runbook:
+
+- `recovery/wipe` followed by a manual `recovery/reset` (the split flow)
+- Wiping a lower-ordinal pod (see the quorum warning above)
+- `fix-no-primary` levels `unfreeze` / `reconfig` / `force-primary`
+  (require deliberately breaking the cluster)
+- The recover timeout path where `wipe-targets` is intentionally left in
+  place for manual investigation

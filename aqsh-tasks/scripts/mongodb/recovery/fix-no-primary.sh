@@ -53,20 +53,32 @@ _MONGO_PASS=$(kubectl -n "${DB_NAMESPACE}" get secret "${_SECRET}" \
 
 case "$_LEVEL" in
   diagnose)
-    result=$(recovery_fix_diagnose "$_STS" "$_MONGO_USER" "$_MONGO_PASS")
+    result=$(recovery_fix_diagnose "$_STS" "$_MONGO_USER" "$_MONGO_PASS") || {
+      printf '%s\n' "$result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
+      exit 1
+    }
     ;;
   unfreeze)
-    result=$(recovery_fix_unfreeze "$_STS" "$_MONGO_USER" "$_MONGO_PASS")
+    result=$(recovery_fix_unfreeze "$_STS" "$_MONGO_USER" "$_MONGO_PASS") || {
+      printf '%s\n' "$result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
+      exit 1
+    }
     ;;
   reconfig)
-    result=$(recovery_fix_reconfig "$_STS" "$_MONGO_USER" "$_MONGO_PASS")
+    result=$(recovery_fix_reconfig "$_STS" "$_MONGO_USER" "$_MONGO_PASS") || {
+      printf '%s\n' "$result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
+      exit 1
+    }
     ;;
   force-primary)
     [[ -z "$_FORCE_POD" ]] && {
       jq -n '{"status":"error","message":"RECOVERY_FORCE_POD is required when level=force-primary"}' \
         > "$AQSH_RESULT_FILE"; exit 1
     }
-    result=$(recovery_fix_force_primary "$_STS" "$_FORCE_POD" "$_MONGO_USER" "$_MONGO_PASS")
+    result=$(recovery_fix_force_primary "$_STS" "$_FORCE_POD" "$_MONGO_USER" "$_MONGO_PASS") || {
+      printf '%s\n' "$result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
+      exit 1
+    }
     ;;
   *)
     jq -n --arg lvl "$_LEVEL" \
@@ -75,6 +87,4 @@ case "$_LEVEL" in
     ;;
 esac
 
-exit_code=$?
 printf '%s\n' "$result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
-exit $exit_code

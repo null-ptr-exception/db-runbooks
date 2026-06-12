@@ -573,6 +573,16 @@ tasks:
         required: false
         type: string
         default: "false"
+      - name: data_path
+        env: RECOVERY_DATA_PATH
+        required: false
+        type: string
+        default: ""
+      - name: mount_path
+        env: RECOVERY_MOUNT_PATH
+        required: false
+        type: string
+        default: ""
   recovery/wipe:
     script: mongodb/recovery/wipe.sh
     description: "Wipe corrupted pod data and trigger initial sync (runs G1-G8 gates first)"
@@ -618,6 +628,16 @@ tasks:
         required: false
         type: string
         default: "false"
+      - name: data_path
+        env: RECOVERY_DATA_PATH
+        required: false
+        type: string
+        default: ""
+      - name: mount_path
+        env: RECOVERY_MOUNT_PATH
+        required: false
+        type: string
+        default: ""
   recovery/reset:
     script: mongodb/recovery/reset.sh
     description: "Clear wipe-target and restore StatefulSet partition to locked state"
@@ -751,3 +771,13 @@ tasks:
         required: false
         type: string
         default: "300"
+      - name: data_path
+        env: RECOVERY_DATA_PATH
+        required: false
+        type: string
+        default: ""
+      - name: mount_path
+        env: RECOVERY_MOUNT_PATH
+        required: false
+        type: string
+        default: ""

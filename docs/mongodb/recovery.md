@@ -139,13 +139,14 @@ data:
 
 ```bash
 # Patch the StatefulSet to add the init container and set partition=3 (locked)
+CONTEXT=kind-cluster-dbs          # always target an explicit cluster
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
-IMAGE=$(kubectl -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
+IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-kubectl -n $NAMESPACE apply -f 01-recovery-configmap.yaml
+kubectl --context $CONTEXT -n $NAMESPACE apply -f 01-recovery-configmap.yaml
 
-kubectl -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
+kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
 {
   "spec": {
     "updateStrategy": {"rollingUpdate": {"partition": 3}},
@@ -178,10 +179,12 @@ EOF
 
 > **Non-Bitnami (standard `mongo:N` image) adaptation** — three things change
 > in the patch above (see `tests/mongodb/recovery.bats` setup for a working
-> example): the wipe path becomes `/data/db` (mount the volume at `/data`),
-> the data volume is usually named `data` instead of `datadir`, and the
-> container user is `999` instead of `1001`.  Then pass
-> `"data_path":"/data/db","mount_path":"/data"` on every pre-check / wipe /
+> example): the wipe path becomes `/data/db` and the init container must mount
+> the data volume at that **same** path the main container uses (`/data/db`) —
+> mounting it elsewhere makes `find /data/db` hit an empty subdir and silently
+> skip the wipe; the data volume is usually named `data` instead of `datadir`;
+> and the container user is `999` instead of `1001`.  Then pass
+> `"data_path":"/data/db","mount_path":"/data/db"` on every pre-check / wipe /
 > recover call.
 
 ---
@@ -299,7 +302,7 @@ partition, and pod phases.
 > Pod `phase` is Kubernetes-level only — a pod mid-initial-sync still shows
 > `Running`.  To see replication progress (`STARTUP2` → `SECONDARY`, optime
 > catch-up) use `rs.status()` inside a healthy member, e.g.
-> `kubectl -n <ns> exec <sts>-0 -- mongosh ... --eval "rs.status()"`.
+> `kubectl --context <ctx> -n <ns> exec <sts>-0 -- mongosh ... --eval "rs.status()"`.
 
 **Input**
 
@@ -429,7 +432,7 @@ ConfigMap is rolled back automatically so no stale wipe-target is left behind.
 
 **Post-wipe workflow**:
 
-1. Monitor: `kubectl -n <ns> get pods -w`
+1. Monitor: `kubectl --context <ctx> -n <ns> get pods -w`
 2. When target pod enters `Running`: immediately run `recovery/reset`
 3. Monitor sync: watch `rs.status()` until target pod's `optimeDate` catches up to primary
 
@@ -609,7 +612,7 @@ POST /tasks/recovery/recover  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Then monitor initial sync until the pod catches up:
 POST /tasks/recovery/status   {"namespace":"mongo-1"}
-# or: kubectl -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
+# or: kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
 ```
 
 **Option 2 — manual step-by-step (full control):**
@@ -622,14 +625,14 @@ POST /tasks/recovery/pre-check  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 POST /tasks/recovery/wipe       {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Step 3: monitor pod restart
-kubectl -n mongo-1 get pods -w
+kubectl --context kind-cluster-dbs -n mongo-1 get pods -w
 # When mongodb-2 shows Running (not Terminating/Init):
 
 # Step 4: clear recovery state IMMEDIATELY
 POST /tasks/recovery/reset      {"namespace":"mongo-1"}
 
 # Step 5: verify sync (run repeatedly until optimeDate matches primary)
-kubectl -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
+kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
 ```
 
 ---
@@ -705,31 +708,48 @@ with corrupted data.
 
 ## RBAC Requirements
 
-The `aqsh-mongo-manager` ClusterRole must include:
+The `aqsh-mongo-manager` ClusterRole must include (mirrors
+`k8s/cluster-dbs/mongodb/rbac.yaml`):
 
 ```yaml
 rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "list", "patch", "update", "create"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
-    verbs: ["get", "list", "patch", "update"]
+    resourceNames: ["mongodb"]   # named get/patch
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["list", "watch"]      # list ignores resourceNames, so a separate rule
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]            # for mongosh exec inside pods
   - apiGroups: [""]
     resources: ["secrets"]
+    resourceNames: ["mongodb-credentials"]
     verbs: ["get"]               # for reading MongoDB credentials
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["mongodb-recovery-config"]
+    verbs: ["get", "patch"]      # only get/patch — see note below
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list"]       # for G6 PVC space check
 ```
 
-**Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access.
+> **`resourceNames` caveat**: an RBAC `resourceNames` restriction only applies
+> to verbs that act on an existing named object (`get`, `patch`, `update`,
+> `delete`). It is **ignored by `list`, `watch`, and `create`**. The recovery
+> tasks never create the ConfigMap (it is applied once during setup by an
+> admin) and never list it by name, so `get`/`patch` is the exact set needed.
+> Because the name is pinned here, a task invoked with a non-default
+> `recovery_configmap` or `sts_name` is denied by RBAC — these inputs exist for
+> future per-namespace customization where this ClusterRole is also widened.
+
+**Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
+`configmaps` create/update/list.
 
 ---
 

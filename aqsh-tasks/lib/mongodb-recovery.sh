@@ -972,9 +972,8 @@ recovery_recover() {
     return 1
   fi
 
-  # 3. Wipe
-  local wipe_result
-  if ! wipe_result=$(recovery_wipe_pod "$sts" "$target_pod" "$cm"); then
+  # 3. Wipe — discard the inner JSON response (we emit our own); keep exit status
+  if ! recovery_wipe_pod "$sts" "$target_pod" "$cm" >/dev/null; then
     response_err "$op" "Recovery aborted while applying wipe" \
       "{\"phase\":\"wipe\",\"target_pod\":\"${target_pod}\"}" 1
     return 1
@@ -1010,9 +1009,8 @@ recovery_recover() {
   fi
 
   # 5b. Reset immediately (closes the re-wipe race) — before anything else,
-  # including set-sync-source which may retry for ~30s.
-  local reset_result
-  if ! reset_result=$(recovery_reset "$sts" "$cm" "$replicas"); then
+  # including set-sync-source which may retry for ~30s. Discard the inner JSON.
+  if ! recovery_reset "$sts" "$cm" "$replicas" >/dev/null; then
     response_err "$op" "Pod ${target_pod} is Running but recovery/reset failed — wipe-target may still be set" \
       "{\"phase\":\"reset\",\"target_pod\":\"${target_pod}\",\"action_required\":\"Run recovery/reset manually NOW to prevent re-wipe on next restart\"}" 1
     return 1

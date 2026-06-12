@@ -300,8 +300,12 @@ _recovery_gate_g6() {
     if [[ -n "$pvc_name" ]]; then
       local cap_str
       cap_str=$(_kubectl get pvc "$pvc_name" -o jsonpath='{.status.capacity.storage}' 2>/dev/null) || cap_str=""
-      if [[ "$cap_str" == *Gi ]]; then
-        avail_mb=$(( ${cap_str%Gi} * 1024 * 85 / 100 ))  # 85% of total as conservative free
+      # 85% of total as conservative free space. Cover Ti/Gi/Mi so a large PVC
+      # is not misread as 0 (which would silently skip the space gate below).
+      if [[ "$cap_str" == *Ti ]]; then
+        avail_mb=$(( ${cap_str%Ti} * 1024 * 1024 * 85 / 100 ))
+      elif [[ "$cap_str" == *Gi ]]; then
+        avail_mb=$(( ${cap_str%Gi} * 1024 * 85 / 100 ))
       elif [[ "$cap_str" == *Mi ]]; then
         avail_mb=$(( ${cap_str%Mi} * 85 / 100 ))
       fi

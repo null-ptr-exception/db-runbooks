@@ -148,7 +148,7 @@ CM_EOF
           "command": ["/bin/bash", "-c"],
           "args": ["WIPE_TARGETS=$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=$(hostname); if [ -n \"$WIPE_TARGETS\" ] && echo \"$WIPE_TARGETS\" | grep -qw \"$MY_NAME\"; then echo \"[RECOVERY] Wiping data for $MY_NAME\"; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo \"[RECOVERY] Wipe complete.\"; else echo \"[RECOVERY] $MY_NAME not in wipe targets, skip.\"; fi"],
           "volumeMounts": [
-            {"name": "data", "mountPath": "/data"},
+            {"name": "data", "mountPath": "/data/db"},
             {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
           ],
           "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
@@ -228,7 +228,7 @@ teardown_file() {
 
 @test "recovery/pre-check returns 202 for a secondary pod" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -238,7 +238,7 @@ teardown_file() {
 
 @test "recovery/pre-check result contains 8 gates" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -254,7 +254,7 @@ teardown_file() {
 
 @test "recovery/pre-check G1 reports init container present after STS patch" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -270,7 +270,7 @@ teardown_file() {
 
 @test "recovery/pre-check G2 reports ConfigMap present" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -286,7 +286,7 @@ teardown_file() {
 
 @test "recovery/pre-check G3 reports healthy sync source and primary available" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -302,7 +302,7 @@ teardown_file() {
 
 @test "recovery/pre-check G4 reports oplog window sufficient" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -320,7 +320,7 @@ teardown_file() {
 
 @test "recovery/pre-check G5 reports data size within limit" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -336,7 +336,7 @@ teardown_file() {
 
 @test "recovery/pre-check G6 reports PVC space sufficient" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -355,7 +355,7 @@ teardown_file() {
   # mongodb-0 is deterministically primary (priority 2 set in _init_mongodb_rs).
   # G7 should detect this and return pass=false with code POD0_IS_PRIMARY.
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -373,7 +373,7 @@ teardown_file() {
 
 @test "recovery/pre-check G7 passes when target is a secondary (mongodb-2)" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -389,7 +389,7 @@ teardown_file() {
 
 @test "recovery/pre-check G8 reports no RECOVERING members on healthy cluster" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -487,7 +487,7 @@ teardown_file() {
     get pod mongodb-2 -o jsonpath='{.metadata.uid}')
 
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -544,7 +544,7 @@ teardown_file() {
 @test "recovery/recover result includes sync_source_set as boolean" {
   # This test runs a second recover on mongodb-2 (idempotent — G-gates will re-pass)
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id

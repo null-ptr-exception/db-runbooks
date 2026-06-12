@@ -23,10 +23,13 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]
+  # The recovery workflow only does `get` (by name) and `patch` on the recovery
+  # ConfigMap. list/watch ignore resourceNames in RBAC, and create/update are
+  # unused (the ConfigMap is created during one-time setup, not by tasks).
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["mongodb-recovery-config"]
-    verbs: ["get", "list", "patch", "create", "update"]
+    verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list"]

@@ -55,6 +55,13 @@ _MONGO_PASS=$(kubectl -n "${DB_NAMESPACE}" get secret "${_SECRET}" \
     '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
     > "$AQSH_RESULT_FILE"; exit 1
 }
+# A present-but-empty secret key decodes to "" with exit 0, so the traps above
+# do not fire — validate explicitly to avoid opaque downstream auth failures.
+if [[ -z "${_MONGO_USER}" || -z "${_MONGO_PASS}" ]]; then
+  jq -n --arg ns "${DB_NAMESPACE}" --arg s "${_SECRET}" --arg uk "${_USER_KEY}" --arg pk "${_PASS_KEY}" \
+    '{"status":"error","message":"Credentials secret is missing required key(s) or values are empty","namespace":$ns,"secret":$s,"user_key":$uk,"pass_key":$pk}' \
+    > "$AQSH_RESULT_FILE"; exit 1
+fi
 
 # Determine replica count for partition restore
 _REPLICAS=$(kubectl -n "${DB_NAMESPACE}" get statefulset "${_STS}" \

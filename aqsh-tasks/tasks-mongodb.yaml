@@ -29,6 +29,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
   sanity-check:
     script: mongodb/sanity-check.sh
     description: "3-layer health check: K8s infrastructure, MongoDB connectivity, MongoDB internals"
@@ -45,6 +46,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -93,6 +95,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -199,6 +202,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -245,6 +249,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -291,6 +296,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -341,6 +347,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -386,6 +393,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -437,6 +445,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -513,6 +522,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -544,15 +554,18 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
         type: string
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
         default: mongodb-recovery-config
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -578,11 +591,13 @@ tasks:
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'
   recovery/wipe:
     script: mongodb/recovery/wipe.sh
     description: "Wipe corrupted pod data and trigger initial sync (runs G1-G8 gates first)"
@@ -599,15 +614,18 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
         type: string
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
         default: mongodb-recovery-config
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -633,11 +651,13 @@ tasks:
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'
   recovery/reset:
     script: mongodb/recovery/reset.sh
     description: "Clear wipe-target and restore StatefulSet partition to locked state"
@@ -654,11 +674,13 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
         default: mongodb-recovery-config
+        pattern: '^[a-z0-9][a-z0-9-]*$'
   recovery/status:
     script: mongodb/recovery/status.sh
     description: "Show current recovery state (wipe-target, partition, pod phases)"
@@ -675,11 +697,13 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
         default: mongodb-recovery-config
+        pattern: '^[a-z0-9][a-z0-9-]*$'
   recovery/fix-no-primary:
     script: mongodb/recovery/fix-no-primary.sh
     description: "Restore primary when all RS members show SECONDARY (E1+E5 combined scenario)"
@@ -696,6 +720,7 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -721,6 +746,7 @@ tasks:
         required: false
         type: string
         default: ""
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
   recovery/recover:
     script: mongodb/recovery/recover.sh
     description: "One-call orchestrated recovery: gates -> wipe -> wait -> reset"
@@ -737,15 +763,18 @@ tasks:
         required: false
         type: string
         default: mongodb
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
         type: string
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
         default: mongodb-recovery-config
+        pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
@@ -776,8 +805,10 @@ tasks:
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
         default: ""
+        pattern: '^(/[A-Za-z0-9._-]+)*$'

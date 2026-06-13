@@ -527,7 +527,7 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
   result=$(recovery_fix_force_primary "mongodb" "mongo'db-0" "user" "pass") || true
   status_val=$(printf '%s' "$result" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
   [ "$status_val" = "error" ]
-  printf '%s' "$result" | grep -q '"Invalid force_pod"'
+  printf '%s' "$result" | grep -q 'Invalid force_pod'
 }
 
 @test "fix_force_primary rejects force_pod starting with a hyphen" {

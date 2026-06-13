@@ -194,8 +194,7 @@ EOF
 All tasks are available via `POST /tasks/<name>` on the aqsh-mongodb endpoint.
 
 Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
-`fix-no-primary` 8m, `pre-check` 5m, `reset` 3m, `status` 2m.  All tasks
-require `namespace` matching `^mongo-[0-9]+$`.
+`fix-no-primary` 8m, `pre-check` 5m, `reset` 3m, `status` 2m.
 
 There are two ways to drive recovery:
 
@@ -368,7 +367,7 @@ full report without making any changes.
     {"gate": "G4", "pass": true, "message": "Oplog window sufficient: 4096MB (window 24h) >= required 2048MB"},
     {"gate": "G5", "pass": true, "message": "Data size 20480MB (20GB) is within the 100GB limit", "data_mb": 20480},
     {"gate": "G6", "pass": true, "message": "PVC available space 50000MB >= required 24576MB"},
-    {"gate": "G7", "pass": true, "message": "Target pod-0 is not pod-0 — primary safety check skipped"},
+    {"gate": "G7", "pass": true, "message": "Target mongodb-2 is not PRIMARY — safe to wipe"},
     {"gate": "G8", "pass": true, "message": "No members in RECOVERING state"}
   ],
   "pass": 8,
@@ -386,8 +385,8 @@ check `fail` (and per-gate `code`) rather than the task status:
 {
   "gates": [
     {"gate": "G1", "pass": true,  "message": "..."},
-    {"gate": "G7", "pass": false, "code": "POD0_IS_PRIMARY",
-     "message": "Target pod-0 is currently PRIMARY — wiping will cause an election and brief write unavailability",
+    {"gate": "G7", "pass": false, "code": "TARGET_IS_PRIMARY",
+     "message": "Target mongodb-0 is currently PRIMARY — wiping will cause an election and brief write unavailability",
      "suggestion": "Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}
   ],
   "pass": 7,
@@ -400,7 +399,7 @@ check `fail` (and per-gate `code`) rather than the task status:
 Failing gates carry a machine-readable `code` (e.g. `STS_NOT_FOUND`,
 `INIT_CONTAINER_MISSING`, `CONFIGMAP_MISSING`, `NO_PRIMARY`,
 `NO_HEALTHY_SOURCE`, `OPLOG_TOO_SMALL`, `DATA_TOO_LARGE`,
-`INSUFFICIENT_PVC_SPACE`, `POD0_IS_PRIMARY`) plus a `suggestion`; warn-only
+`INSUFFICIENT_PVC_SPACE`, `TARGET_IS_PRIMARY`) plus a `suggestion`; warn-only
 results may carry `OPLOG_RESIZE_NEEDED` or size-unknown skip messages.
 
 ---
@@ -552,7 +551,7 @@ first blocking failure).
 | **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
 | **G5** | Data size < 100 GB (overridable with `force_wipe=true`) | BLOCK | Use VolumeSnapshot or mongodump for large datasets |
 | **G6** | PVC available space ≥ data × 1.2 | BLOCK | Expand PVC or free space |
-| **G7** | If target is pod-0, it must NOT be the current PRIMARY | BLOCK | Wait for step-down or run `rs.stepDown(60)` |
+| **G7** | Target pod must NOT be the current PRIMARY (checked regardless of ordinal — any pod can become primary after `recovery_fix_reconfig`) | BLOCK | Wait for step-down or run `rs.stepDown(60)` |
 | **G8** | No other pod is currently RECOVERING | **WARN only** | Wait for prior sync to complete |
 
 ### G4: Oplog Window Auto-Calculation
@@ -600,11 +599,11 @@ Check that all gates pass (or only G8 warns) before proceeding.
 
 ---
 
-### Scenario A: Corrupted Secondary (pod-1 or pod-2)
+### Scenario A: Corrupted Secondary (any non-primary pod)
 
 The simplest and safest scenario.
 
-**Option 1 — one call (recommended):**
+**`recovery/recover` — one-call automated API (recommended):**
 
 ```bash
 # Gates, wipe, wait-for-restart, and reset are all handled automatically
@@ -615,7 +614,7 @@ POST /tasks/recovery/status   {"namespace":"mongo-1"}
 # or: kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
 ```
 
-**Option 2 — manual step-by-step (full control):**
+**Manual step-by-step (for special cases or debugging):**
 
 ```bash
 # Step 1: verify pre-check passes
@@ -637,10 +636,12 @@ kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --ev
 
 ---
 
-### Scenario B: Corrupted Primary (pod-0)
+### Scenario B: Corrupted Primary (pod-0 or whichever pod holds PRIMARY)
 
-Pod-0 is the Bitnami default primary.  G7 gate blocks if pod-0 is still
-PRIMARY.  Wait for automatic election after pod-0 crash, or trigger stepDown.
+Pod-0 is the Bitnami default primary, but after `recovery_fix_reconfig` resets
+member priorities all pods become equal candidates.  G7 checks `db.hello()`
+on the target pod regardless of its ordinal and blocks if it is currently
+PRIMARY.  Wait for automatic election after a crash, or trigger stepDown.
 
 ```bash
 # Step 1: check if election happened

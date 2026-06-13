@@ -35,6 +35,35 @@ readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 
 # ---------------------------------------------------------------------------
+# _mongo_load_credentials <namespace> <secret> <user_key> <pass_key>
+# Read MongoDB credentials from a Kubernetes Secret and export them as
+# _MONGO_USER / _MONGO_PASS in the calling script's scope.
+# Writes a JSON error to $AQSH_RESULT_FILE and calls exit 1 on any failure.
+# ---------------------------------------------------------------------------
+_mongo_load_credentials() {
+  local namespace="$1" secret="$2" user_key="$3" pass_key="$4"
+  _MONGO_USER=$(kubectl -n "$namespace" get secret "$secret" \
+    -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
+    jq -n --arg ns "$namespace" --arg s "$secret" \
+      '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
+      > "$AQSH_RESULT_FILE"; exit 1
+  }
+  _MONGO_PASS=$(kubectl -n "$namespace" get secret "$secret" \
+    -o jsonpath="{.data.${pass_key}}" 2>/dev/null | base64 -d) || {
+    jq -n --arg ns "$namespace" --arg s "$secret" \
+      '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
+      > "$AQSH_RESULT_FILE"; exit 1
+  }
+  # A present-but-empty secret key decodes to "" with exit 0, so the traps above
+  # do not fire — validate explicitly to avoid opaque downstream auth failures.
+  if [[ -z "${_MONGO_USER}" || -z "${_MONGO_PASS}" ]]; then
+    jq -n --arg ns "$namespace" --arg s "$secret" --arg uk "$user_key" --arg pk "$pass_key" \
+      '{"status":"error","message":"Credentials secret is missing required key(s) or values are empty","namespace":$ns,"secret":$s,"user_key":$uk,"pass_key":$pk}' \
+      > "$AQSH_RESULT_FILE"; exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # _recovery_mongosh_pod <pod_name> <user> <pass> <js>
 # Execute a mongosh JS snippet inside a specific pod via kubectl exec.
 # Outputs raw mongosh stdout; caller inspects last line.
@@ -813,6 +842,14 @@ try {
 recovery_fix_force_primary() {
   local sts_name="${1:?}" force_pod="${2:?}" user="${3:?}" pass="${4:?}"
   local op="recovery_fix_force_primary"
+
+  # Validate before interpolating into JS — pod names must be safe DNS labels.
+  [[ "$force_pod" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
+    response_err "$op" "Invalid force_pod: must match ^[a-z0-9][a-z0-9-]*\$" \
+      "{\"force_pod\":\"$(_escape_json_string "$force_pod")\"}" 1
+    return 1
+  }
+
   log_info "$op" "Force-primary: shrinking RS to single member ${force_pod}"
 
   # Get current RS config to know member hosts for re-add

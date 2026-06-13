@@ -178,6 +178,122 @@ teardown_file() {
   kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mongo-1 --ignore-not-found
 }
 
+# ---------------------------------------------------------------------------
+# _mongo_creds <namespace> [context]
+# Echo "user pass" for the mongodb-credentials secret.
+# ---------------------------------------------------------------------------
+_mongo_creds() {
+  local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local user pass
+  user=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+    -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
+  pass=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+    -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
+  printf '%s %s' "$user" "$pass"
+}
+
+# ---------------------------------------------------------------------------
+# _stepdown_pod0 <namespace> [context] [stepdown_seconds]
+# Force pod-0 to yield PRIMARY and wait until it transitions to SECONDARY.
+# rs.stepDown drops the connection — suppress the exit error.
+# ---------------------------------------------------------------------------
+_stepdown_pod0() {
+  local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local stepdown_secs="${3:-120}"
+  local creds user pass
+  creds=$(_mongo_creds "$namespace" "$ctx")
+  user="${creds%% *}"; pass="${creds##* }"
+  kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" \
+    --eval "rs.stepDown(${stepdown_secs})" 2>/dev/null || true
+  # Wait until pod-0 reports itself as non-primary
+  local elapsed=0
+  while (( elapsed < 60 )); do
+    local role
+    role=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+      "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=3000" \
+      --eval "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'PRIMARY':'SECONDARY');}catch(e){print('ERR');}" \
+      2>/dev/null | tail -1 | tr -d '\r') || role="ERR"
+    [[ "$role" == "SECONDARY" ]] && return 0
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  echo "_stepdown_pod0: pod-0 did not yield primary within 60s" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _wait_for_pod0_primary <namespace> [context] [max_wait]
+# Wait until pod-0 specifically re-elects as primary (priority=2 wins back).
+# ---------------------------------------------------------------------------
+_wait_for_pod0_primary() {
+  local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" max_wait="${3:-120}"
+  local creds user pass
+  creds=$(_mongo_creds "$namespace" "$ctx")
+  user="${creds%% *}"; pass="${creds##* }"
+  local elapsed=0
+  while (( elapsed < max_wait )); do
+    local role
+    role=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+      "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=3000" \
+      --eval "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'PRIMARY':'SECONDARY');}catch(e){print('ERR');}" \
+      2>/dev/null | tail -1 | tr -d '\r') || role="ERR"
+    [[ "$role" == "PRIMARY" ]] && return 0
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  echo "_wait_for_pod0_primary: pod-0 did not become primary within ${max_wait}s" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _find_primary_pod <namespace> [context]
+# Return the name of the pod that is currently the RS primary.
+# ---------------------------------------------------------------------------
+_find_primary_pod() {
+  local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local creds user pass
+  creds=$(_mongo_creds "$namespace" "$ctx")
+  user="${creds%% *}"; pass="${creds##* }"
+  local pod
+  for pod in mongodb-0 mongodb-1 mongodb-2; do
+    local is_primary
+    is_primary=$(kubectl --context "$ctx" -n "$namespace" exec "$pod" -- mongosh --quiet --norc \
+      "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=3000" \
+      --eval "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
+      2>/dev/null | tail -1 | tr -d '\r') || is_primary="0"
+    [[ "$is_primary" == "1" ]] && { echo "$pod"; return 0; }
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _wait_for_rs_healthy <namespace> <target_pod> [context] [max_wait]
+# Wait until target_pod appears in rs.status() as SECONDARY,1 or PRIMARY,1.
+# Queries from a sibling pod so the check works even while target is restarting.
+# ---------------------------------------------------------------------------
+_wait_for_rs_healthy() {
+  local namespace="$1" target_pod="$2"
+  local ctx="${3:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" max_wait="${4:-180}"
+  local creds user pass
+  creds=$(_mongo_creds "$namespace" "$ctx")
+  user="${creds%% *}"; pass="${creds##* }"
+  local probe_pod
+  for p in mongodb-0 mongodb-1 mongodb-2; do
+    [[ "$p" != "$target_pod" ]] && { probe_pod="$p"; break; }
+  done
+  local elapsed=0 state=""
+  while (( elapsed < max_wait )); do
+    state=$(kubectl --context "$ctx" -n "$namespace" exec "$probe_pod" -- mongosh --quiet --norc \
+      "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=5000" \
+      --eval "try{var m=rs.status().members.filter(function(x){return x.name.indexOf('${target_pod}')!==-1;})[0];print(m?m.stateStr+','+m.health:'NONE,0');}catch(e){print('ERR,0');}" \
+      2>/dev/null | tail -1 | tr -d '\r') || state="ERR,0"
+    echo "_wait_for_rs_healthy: ${target_pod} state=${state} elapsed=${elapsed}s" >&2
+    [[ "$state" == "SECONDARY,1" || "$state" == "PRIMARY,1" ]] && return 0
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  echo "_wait_for_rs_healthy: ${target_pod} did not become healthy within ${max_wait}s (last: ${state})" >&2
+  return 1
+}
+
 # ── recovery/status ───────────────────────────────────────────────────────────
 
 @test "recovery/status returns 202 and completes successfully" {
@@ -353,7 +469,7 @@ teardown_file() {
 
 @test "recovery/pre-check G7 blocks when target is mongodb-0 (primary)" {
   # mongodb-0 is deterministically primary (priority 2 set in _init_mongodb_rs).
-  # G7 should detect this and return pass=false with code POD0_IS_PRIMARY.
+  # G7 checks db.hello().isWritablePrimary regardless of ordinal → TARGET_IS_PRIMARY.
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
     '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
   assert_equal "$HTTP_CODE" "202"
@@ -368,7 +484,7 @@ teardown_file() {
   g7_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "null")
   g7_code=$(echo "$result" | jq -r '.gates[] | select(.gate=="G7") | .code' 2>/dev/null || echo "null")
   assert_equal "$g7_pass" "false"
-  assert_equal "$g7_code" "POD0_IS_PRIMARY"
+  assert_equal "$g7_code" "TARGET_IS_PRIMARY"
 }
 
 @test "recovery/pre-check G7 passes when target is a secondary (mongodb-2)" {
@@ -608,4 +724,181 @@ teardown_file() {
 @test "recovery/fix-no-primary rejects request with missing level" {
   http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Ffix-no-primary" '{"namespace":"mongo-1"}'
   [ "$HTTP_CODE" != "202" ]
+}
+
+# ── recovery/recover — secondary pod-1 (Bitnami any-secondary scenario) ──────
+#
+# Complements the existing mongodb-2 test: exercises the same recovery path on
+# pod-1 to confirm both non-primary ordinals are supported end-to-end.
+
+@test "recovery/recover wipes secondary mongodb-1 and it rejoins as healthy member" {
+  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+
+  local before_uid
+  before_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod mongodb-1 -o jsonpath='{.metadata.uid}')
+
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Frecover" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-1","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 540
+
+  local result reached
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  reached=$(echo "$result" | jq -r '.reached_running // empty')
+  assert_equal "$reached" "true"
+
+  # Pod genuinely recreated
+  local after_uid
+  after_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod mongodb-1 -o jsonpath='{.metadata.uid}')
+  [ "$before_uid" != "$after_uid" ]
+
+  # wipe-targets cleared
+  local wipe_targets
+  wipe_targets=$(kubectl --context "$ctx" -n mongo-1 \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  assert_equal "$wipe_targets" ""
+
+  # Wait for mongodb-1 to rejoin RS
+  kubectl --context "$ctx" -n mongo-1 \
+    wait pod mongodb-1 --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
+  _wait_for_rs_healthy "mongo-1" "mongodb-1" "$ctx" 180
+}
+
+# ── G7: primary detection is ordinal-agnostic (post-reconfig scenario) ────────
+#
+# Before the G7 fix, the gate short-circuited on non-pod-0 targets ("not pod-0,
+# skip"). After the fix it always calls db.hello().isWritablePrimary.
+#
+# These two tests exercise the scenario where pod-0 has stepped down and another
+# pod holds the PRIMARY role — the situation that arises after recovery_fix_reconfig
+# resets all member priorities to 1.
+
+@test "G7 blocks with TARGET_IS_PRIMARY when a non-pod-0 pod is the current primary" {
+  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+
+  # Force pod-0 to step down; pod-1 or pod-2 will be elected primary.
+  _stepdown_pod0 "mongo-1" "$ctx" 120
+
+  local primary_pod
+  primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+  # If the election hasn't settled yet, give it a few more seconds.
+  if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
+    sleep 10
+    primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+  fi
+  if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
+    skip "Could not elect a non-pod-0 primary within stepdown window"
+  fi
+  echo "New primary after stepdown: ${primary_pod}" >&2
+
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${primary_pod}\",\"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 120 || true
+
+  local result g7_pass g7_code
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  g7_pass=$(echo "$result"  | jq -r '.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "null")
+  g7_code=$(echo "$result"  | jq -r '.gates[] | select(.gate=="G7") | .code' 2>/dev/null || echo "null")
+  echo "G7 targeting ${primary_pod} (non-pod-0 primary): pass=${g7_pass} code=${g7_code}" >&2
+  assert_equal "$g7_pass"  "false"
+  assert_equal "$g7_code"  "TARGET_IS_PRIMARY"
+}
+
+@test "G7 passes for pod-0 when it is not the current primary (stepped down)" {
+  # pod-0 should still be secondary from the previous test's stepdown.
+  # G7 must return pass=true: Running but not PRIMARY → safe to wipe.
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 120
+
+  local result g7_pass
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  g7_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "null")
+  assert_equal "$g7_pass" "true"
+}
+
+# ── recovery/recover — primary pod-0 (Bitnami default primary scenario) ───────
+#
+# Bitnami MongoDB Helm chart gives pod-0 priority=2, making it the permanent
+# primary.  When pod-0 itself is corrupted, the operator must:
+#   1. Step it down so another pod wins the election.
+#   2. Run recovery/recover on pod-0 while it is secondary (G7 passes).
+#   3. Verify pod-0 restarts, re-syncs, and rejoins RS as a healthy member.
+#
+# After the wipe, pod-0 eventually re-elects as primary (priority=2) once its
+# initial sync completes and the stepdown timer expires.
+
+@test "recovery/recover wipes pod-0 (Bitnami primary) after stepdown and it rejoins RS" {
+  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+
+  # Wait for pod-0 to reclaim primary after the previous test's stepdown expires.
+  # (priority=2 wins back once the stepdown lock expires.)
+  _wait_for_pod0_primary "mongo-1" "$ctx" 150
+  echo "pod-0 is primary — confirmed pre-condition for primary-recovery test" >&2
+
+  # Run pre-check to confirm G7 currently BLOCKS on pod-0 (it is primary).
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Fpre-check" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
+  local precheck_id
+  precheck_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$precheck_id" 120 || true
+  local g7_pre
+  g7_pre=$(echo "$TASK_RESPONSE" \
+    | jq -r '.result.data.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "?")
+  echo "G7 before stepdown (pod-0 is primary): ${g7_pre}" >&2
+  assert_equal "$g7_pre" "false"
+
+  # Capture pod-0 UID before wipe.
+  local before_uid
+  before_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod mongodb-0 -o jsonpath='{.metadata.uid}')
+
+  # Step down pod-0 so G7 passes, then immediately submit the recovery task.
+  # The 120s stepdown window is long enough for G7 to run and the wipe to fire
+  # before pod-0 can re-elect (it is down/restarting during the wipe).
+  _stepdown_pod0 "mongo-1" "$ctx" 120
+
+  http_post "${MONGODB_AQSH_URL}/tasks/recovery%2Frecover" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-0","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$MONGODB_AQSH_URL" "$task_id" 600
+
+  local result reached
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  reached=$(echo "$result" | jq -r '.reached_running // empty')
+  assert_equal "$reached" "true"
+
+  # Pod was genuinely recreated (UID changed — init container fired)
+  local after_uid
+  after_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod mongodb-0 -o jsonpath='{.metadata.uid}')
+  [ "$before_uid" != "$after_uid" ]
+
+  # wipe-targets cleared by reset phase
+  local wipe_targets
+  wipe_targets=$(kubectl --context "$ctx" -n mongo-1 \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  assert_equal "$wipe_targets" ""
+
+  # Wait for pod-0 to finish initial sync and appear healthy in RS.
+  # After re-sync, pod-0 will eventually re-elect as primary (priority=2).
+  kubectl --context "$ctx" -n mongo-1 \
+    wait pod mongodb-0 --for=condition=Ready --timeout=300s >/dev/null 2>&1 || true
+  _wait_for_rs_healthy "mongo-1" "mongodb-0" "$ctx" 300
 }

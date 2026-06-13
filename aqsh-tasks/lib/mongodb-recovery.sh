@@ -204,6 +204,20 @@ _recovery_gate_g3() {
     [[ "$self_state" == "PRIMARY"   && "$health" == "1" ]] && { [[ -z "$healthy_src" ]] && healthy_src="$pod"; }
   done <<< "$pods_raw"
 
+  # If a cross-cluster PRIMARY exists but every local non-target pod is an
+  # ARBITER/STARTUP2 (neither SECONDARY nor PRIMARY), healthy_src may still be
+  # empty.  In that case use any Running local pod as the probe — the primary
+  # is reachable via _recovery_mongosh_host in G4/G8 even if no local SECONDARY
+  # is available.
+  if [[ "$has_primary" == "true" && -z "$healthy_src" ]]; then
+    while IFS= read -r pod; do
+      [[ -z "$pod" || "$pod" == "$target_pod" ]] && continue
+      local phase
+      phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+      [[ "$phase" == "Running" ]] && { healthy_src="$pod"; break; }
+    done <<< "$pods_raw"
+  fi
+
   if [[ "$has_primary" == "true" && -n "$healthy_src" ]]; then
     printf '{"gate":"G3","pass":true,"message":"Primary elected and healthy sync source available: %s","source_pod":"%s"}' \
       "$healthy_src" "$healthy_src"
@@ -411,7 +425,7 @@ _recovery_gate_g7() {
   local is_primary
   is_primary=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
     "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
-    2>/dev/null | tail -1) || is_primary="0"
+    2>/dev/null | tail -1 | tr -d '\r') || is_primary="0"
   if [[ "$is_primary" == "1" ]]; then
     printf '{"gate":"G7","pass":false,"code":"TARGET_IS_PRIMARY","message":"Target %s is currently PRIMARY — wiping will cause an election and brief write unavailability","suggestion":"Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}' \
       "$target_pod"

@@ -183,13 +183,16 @@ teardown_file() {
 # Echo "user pass" for the mongodb-credentials secret.
 # ---------------------------------------------------------------------------
 _mongo_creds() {
+  # Outputs user on line 1, pass on line 2.  Callers must use:
+  #   { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds ns ctx)
+  # so passwords containing spaces are handled correctly.
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
   local user pass
   user=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
     -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
   pass=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
     -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
-  printf '%s %s' "$user" "$pass"
+  printf '%s\n%s\n' "$user" "$pass"
 }
 
 # ---------------------------------------------------------------------------
@@ -200,9 +203,8 @@ _mongo_creds() {
 _stepdown_pod0() {
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
   local stepdown_secs="${3:-120}"
-  local creds user pass
-  creds=$(_mongo_creds "$namespace" "$ctx")
-  user="${creds%% *}"; pass="${creds##* }"
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "$namespace" "$ctx")
   kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
     "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" \
     --eval "rs.stepDown(${stepdown_secs})" 2>/dev/null || true
@@ -227,9 +229,8 @@ _stepdown_pod0() {
 # ---------------------------------------------------------------------------
 _wait_for_pod0_primary() {
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" max_wait="${3:-120}"
-  local creds user pass
-  creds=$(_mongo_creds "$namespace" "$ctx")
-  user="${creds%% *}"; pass="${creds##* }"
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "$namespace" "$ctx")
   local elapsed=0
   while (( elapsed < max_wait )); do
     local role
@@ -250,9 +251,8 @@ _wait_for_pod0_primary() {
 # ---------------------------------------------------------------------------
 _find_primary_pod() {
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
-  local creds user pass
-  creds=$(_mongo_creds "$namespace" "$ctx")
-  user="${creds%% *}"; pass="${creds##* }"
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "$namespace" "$ctx")
   local pod
   for pod in mongodb-0 mongodb-1 mongodb-2; do
     local is_primary
@@ -273,9 +273,8 @@ _find_primary_pod() {
 _wait_for_rs_healthy() {
   local namespace="$1" target_pod="$2"
   local ctx="${3:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" max_wait="${4:-180}"
-  local creds user pass
-  creds=$(_mongo_creds "$namespace" "$ctx")
-  user="${creds%% *}"; pass="${creds##* }"
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "$namespace" "$ctx")
   local probe_pod
   for p in mongodb-0 mongodb-1 mongodb-2; do
     [[ "$p" != "$target_pod" ]] && { probe_pod="$p"; break; }

@@ -304,12 +304,6 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
 
 # ── G7 ────────────────────────────────────────────────────────────────────────
 
-@test "G7 passes for non-pod-0 target without primary check" {
-  out=$(_recovery_gate_g7 "mongodb" "mongodb-2" "user" "pass")
-  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
-  [ "$pass" = "true" ]
-}
-
 @test "G7 blocks when pod-0 is Running and is the current primary" {
   export MOCK_PRIMARY_POD=mongodb-0
   export MOCK_POD0_PHASE=Running
@@ -317,10 +311,10 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
   pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
   code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
   [ "$pass" = "false" ]
-  [ "$code" = "POD0_IS_PRIMARY" ]
+  [ "$code" = "TARGET_IS_PRIMARY" ]
 }
 
-@test "G7 passes when pod-0 is not Running" {
+@test "G7 passes when pod-0 is not Running (CrashLoopBackOff)" {
   export MOCK_POD0_PHASE=CrashLoopBackOff
   out=$(_recovery_gate_g7 "mongodb" "mongodb-0" "user" "pass")
   pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
@@ -333,6 +327,45 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
   out=$(_recovery_gate_g7 "mongodb" "mongodb-0" "user" "pass")
   pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
   [ "$pass" = "true" ]
+}
+
+@test "G7 blocks when pod-1 is Running and is primary (post-reconfig, any pod can be primary)" {
+  export MOCK_PRIMARY_POD=mongodb-1
+  out=$(_recovery_gate_g7 "mongodb" "mongodb-1" "user" "pass") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "TARGET_IS_PRIMARY" ]
+}
+
+@test "G7 blocks when pod-2 is Running and is primary (post-reconfig)" {
+  export MOCK_PRIMARY_POD=mongodb-2
+  out=$(_recovery_gate_g7 "mongodb" "mongodb-2" "user" "pass") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "TARGET_IS_PRIMARY" ]
+}
+
+@test "G7 passes when pod-1 is Running but is secondary" {
+  export MOCK_PRIMARY_POD=mongodb-0
+  out=$(_recovery_gate_g7 "mongodb" "mongodb-1" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G7 passes when pod-2 is CrashLoopBackOff (pod-0 crashed, wipe pod-2 is safe)" {
+  export MOCK_ALL_PODS_PHASE=CrashLoopBackOff
+  out=$(_recovery_gate_g7 "mongodb" "mongodb-2" "user" "pass")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G7 error code is TARGET_IS_PRIMARY not POD0_IS_PRIMARY" {
+  export MOCK_PRIMARY_POD=mongodb-1
+  out=$(_recovery_gate_g7 "mongodb" "mongodb-1" "user" "pass") || true
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$code" = "TARGET_IS_PRIMARY" ]
 }
 
 # ── recovery_wipe_pod ─────────────────────────────────────────────────────────

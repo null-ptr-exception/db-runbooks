@@ -372,16 +372,11 @@ _recovery_gate_g6() {
 
 _recovery_gate_g7() {
   local sts_name="$1" target_pod="$2" user="$3" pass="$4"
-  local ordinal
-  ordinal=$(_recovery_pod_ordinal "$target_pod")
-  if [[ "$ordinal" != "0" ]]; then
-    printf '{"gate":"G7","pass":true,"message":"Target %s is not pod-0 — primary safety check skipped"}' "$target_pod"
-    return 0
-  fi
   local phase
   phase=$(_kubectl get pod "$target_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || phase="Unknown"
   if [[ "$phase" != "Running" ]]; then
-    printf '{"gate":"G7","pass":true,"message":"Target pod-0 is not Running (%s) — safe to wipe (it cannot be the current primary)"}' "$phase"
+    printf '{"gate":"G7","pass":true,"message":"Target %s is not Running (%s) — cannot hold primary lease, safe to wipe"}' \
+      "$target_pod" "$phase"
     return 0
   fi
   local is_primary
@@ -389,10 +384,11 @@ _recovery_gate_g7() {
     "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
     2>/dev/null | tail -1) || is_primary="0"
   if [[ "$is_primary" == "1" ]]; then
-    printf '{"gate":"G7","pass":false,"code":"POD0_IS_PRIMARY","message":"Target pod-0 is currently PRIMARY — wiping will cause an election and brief write unavailability","suggestion":"Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}'
+    printf '{"gate":"G7","pass":false,"code":"TARGET_IS_PRIMARY","message":"Target %s is currently PRIMARY — wiping will cause an election and brief write unavailability","suggestion":"Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}' \
+      "$target_pod"
     return 1
   fi
-  printf '{"gate":"G7","pass":true,"message":"Target pod-0 is SECONDARY — safe to wipe"}'
+  printf '{"gate":"G7","pass":true,"message":"Target %s is not PRIMARY — safe to wipe"}' "$target_pod"
   return 0
 }
 

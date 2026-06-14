@@ -142,9 +142,11 @@ mdbt_validate_uint() {
 # mdbt_validate_rfc3339 <name> <value> <op>
 # An RFC3339 / ISO-8601 instant, e.g. 2026-06-14T03:21:00Z or
 # 2026-06-14T11:21:00+08:00. Used for point-in-time recovery targets.
+# Range-checked (rejects month 13, day 32, hour 24, minute/second 60, bad
+# offsets); calendar edge cases like 2026-02-30 are left to the operator.
 mdbt_validate_rfc3339() {
   local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$ ]]; then
+  if [[ ! "$value" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$ ]]; then
     mdbt_fail "$op" "${name} must be an RFC3339 timestamp (e.g. 2026-06-14T03:21:00Z)" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
   fi
 }
@@ -162,6 +164,6 @@ mdbt_validate_enum() {
 }
 
 mdbt_wait_mariadb_ready() {
-  local name="$1" timeout="${2:-10m}"
-  _kubectl wait --for=condition=Ready "mariadb/${name}" --timeout="$timeout"
+  local name="$1" timeout="${2:-10m}" resource="${3:-${MARIADB_RESOURCE:-mariadb}}"
+  _kubectl wait --for=condition=Ready "${resource}/${name}" --timeout="$timeout"
 }

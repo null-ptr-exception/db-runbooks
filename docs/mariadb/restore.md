@@ -66,6 +66,7 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
     "backup_bucket": "multi-cluster",
     "backup_prefix": "blue",
     "backup_endpoint": "minio.db-ops.svc.cluster.local:9000",
+    "dry_run": "false",
     "confirm": "true"
   }'
 ```
@@ -83,6 +84,7 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
     "backup_prefix": "blue",
     "backup_endpoint": "minio.db-ops.svc.cluster.local:9000",
     "target_time": "2026-06-14T03:21:00Z",
+    "dry_run": "false",
     "confirm": "true"
   }'
 ```

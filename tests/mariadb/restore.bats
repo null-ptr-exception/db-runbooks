@@ -87,6 +87,13 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
+@test "restore rejects an out-of-range target_time" {
+  run_restore TARGET_TIME="2026-99-99T25:61:61Z"
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"RFC3339"* ]]
+}
+
 @test "restore rejects replicas greater than one" {
   run_restore REPLICAS=2
   [ "$status" -ne 0 ]

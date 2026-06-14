@@ -9,12 +9,8 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$SCRIPT_DIR"
 fi
 
-# shellcheck source=aqsh-tasks/lib/logging.sh
-source "${LIB_DIR}/logging.sh"
-# shellcheck source=aqsh-tasks/lib/response.sh
-source "${LIB_DIR}/response.sh"
-# shellcheck source=aqsh-tasks/lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"
+# shellcheck source=aqsh-tasks/lib/mariadb-task-common.sh
+source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
 # shellcheck source=aqsh-tasks/lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
 
@@ -24,7 +20,6 @@ BG_RESOURCE="${MARIADB_RESOURCE:-mariadb}"
 BG_MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
 BG_CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 BG_CONFIRM="${CONFIRM:-false}"
-BG_RESULT_FILE="${AQSH_RESULT_FILE:-}"
 
 bg_init_target() {
   K8S_CONTEXT="$BG_CONTEXT"
@@ -33,21 +28,28 @@ bg_init_target() {
   mariadb_set_target "$BG_CONTEXT" "$BG_NAMESPACE" "$BG_RESOURCE" "$BG_MDB" "$BG_CONTAINER"
 }
 
-bg_write_result() {
-  local payload="$1"
-  if [[ -n "$BG_RESULT_FILE" ]]; then
-    printf '%s\n' "$payload" > "$BG_RESULT_FILE"
-  else
-    printf '%s\n' "$payload"
-  fi
-}
+# --- Generic task helpers ---------------------------------------------------
+# Input validators, the JSON/result writers, and the bool helper now live in
+# mariadb-task-common.sh (sourced above) so non-blue/green tasks (restore, …)
+# can reuse them. Thin bg_* aliases keep the blue/green task scripts unchanged.
+bg_write_result() { mdbt_write_result "$@"; }
+bg_fail() { mdbt_fail "$@"; }
+bg_bool_json() { mdbt_bool_json "$@"; }
+bg_json_string() { mdbt_json_string "$@"; }
+bg_required() { mdbt_required "$@"; }
+bg_validate_dns_label() { mdbt_validate_dns_label "$@"; }
+bg_validate_secret_key() { mdbt_validate_secret_key "$@"; }
+bg_validate_s3_bucket() { mdbt_validate_s3_bucket "$@"; }
+bg_validate_s3_prefix() { mdbt_validate_s3_prefix "$@"; }
+bg_validate_endpoint() { mdbt_validate_endpoint "$@"; }
+bg_validate_region() { mdbt_validate_region "$@"; }
+bg_validate_image() { mdbt_validate_image "$@"; }
+bg_validate_storage_size() { mdbt_validate_storage_size "$@"; }
+bg_validate_uint() { mdbt_validate_uint "$@"; }
+bg_validate_enum() { mdbt_validate_enum "$@"; }
+bg_wait_mariadb_ready() { mdbt_wait_mariadb_ready "$@"; }
 
-bg_fail() {
-  local op="$1" message="$2" data="${3:-{}}" code="${4:-1}"
-  bg_write_result "$(response_err "$op" "$message" "$data" "$code")"
-  exit "$code"
-}
-
+# Blue/green-specific helpers (kept local).
 bg_require_confirm() {
   local op="$1"
   case "$BG_CONFIRM" in
@@ -56,112 +58,14 @@ bg_require_confirm() {
   esac
 }
 
-bg_bool_json() {
-  case "$1" in
-    true | TRUE | yes | YES | 1) printf 'true' ;;
-    *) printf 'false' ;;
-  esac
-}
-
-bg_json_string() {
-  jq -Rn --arg value "$1" '$value'
-}
-
 bg_sql_string() {
   local escaped
   escaped="$(printf '%s' "$1" | sed "s/\\\\/\\\\\\\\/g; s/'/''/g")"
   printf "'%s'" "$escaped"
 }
 
-bg_required() {
-  local name="$1" value="$2" op="$3"
-  if [[ -z "$value" ]]; then
-    bg_fail "$op" "${name} is required" "{}" 2
-  fi
-}
-
-bg_validate_dns_label() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
-    bg_fail "$op" "${name} must be a DNS label" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_secret_key() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._-]+$ ]]; then
-    bg_fail "$op" "${name} must match ^[A-Za-z0-9._-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_s3_bucket() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
-    bg_fail "$op" "${name} must be an S3 bucket-style token" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_s3_prefix() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-    bg_fail "$op" "${name} must match ^[A-Za-z0-9._/-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_endpoint() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    bg_fail "$op" "${name} must match ^[A-Za-z0-9._:-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_region() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9-]+$ ]]; then
-    bg_fail "$op" "${name} must match ^[A-Za-z0-9-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_image() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._:/@-]+$ ]]; then
-    bg_fail "$op" "${name} must be a container image reference token" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_storage_size() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[0-9]+(Mi|Gi|Ti)$ ]]; then
-    bg_fail "$op" "${name} must match ^[0-9]+(Mi|Gi|Ti)$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_uint() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
-    bg_fail "$op" "${name} must be an unsigned integer" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
-
-bg_validate_enum() {
-  local name="$1" value="$2" op="$3"
-  shift 3
-  local allowed
-  for allowed in "$@"; do
-    if [[ "$value" == "$allowed" ]]; then
-      return 0
-    fi
-  done
-  bg_fail "$op" "${name} is not an allowed value" "$(jq -n --arg field "$name" --arg value "$value" --arg allowed "$*" '{field: $field, value: $value, allowed: $allowed}')" 2
-}
-
 bg_get_mariadb_json() {
   _kubectl get "$BG_RESOURCE" "$BG_MDB" -o json
-}
-
-bg_wait_mariadb_ready() {
-  local name="$1" timeout="${2:-10m}"
-  _kubectl wait --for=condition=Ready "mariadb/${name}" --timeout="$timeout"
 }
 
 bg_status_data() {

@@ -646,3 +646,94 @@ tasks:
         required: false
         type: string
         default: --all-databases
+  restore:
+    script: mariadb/restore.sh
+    description: "Restore a physical backup into a NEW MariaDB instance (optionally point-in-time)"
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target
+        env: RESTORE_TARGET
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: image
+        env: RESTORE_IMAGE
+        required: true
+        type: string
+      - name: target_time
+        env: TARGET_TIME
+        required: false
+        type: string
+      - name: root_secret_name
+        env: ROOT_SECRET_NAME
+        required: false
+        type: string
+        default: mariadb
+      - name: root_secret_key
+        env: ROOT_SECRET_KEY
+        required: false
+        type: string
+        default: password
+      - name: storage_size
+        env: STORAGE_SIZE
+        required: false
+        type: string
+        default: 1Gi
+      - name: replicas
+        env: REPLICAS
+        required: false
+        type: string
+        default: "1"
+      - name: backup_bucket
+        env: BACKUP_BUCKET
+        required: true
+        type: string
+      - name: backup_prefix
+        env: BACKUP_PREFIX
+        required: true
+        type: string
+      - name: backup_endpoint
+        env: BACKUP_ENDPOINT
+        required: true
+        type: string
+      - name: backup_region
+        env: BACKUP_REGION
+        required: false
+        type: string
+        default: us-east-1
+      - name: backup_access_secret
+        env: BACKUP_ACCESS_SECRET
+        required: false
+        type: string
+        default: minio
+      - name: backup_access_key
+        env: BACKUP_ACCESS_KEY
+        required: false
+        type: string
+        default: access-key-id
+      - name: backup_secret_key
+        env: BACKUP_SECRET_KEY
+        required: false
+        type: string
+        default: secret-access-key
+      - name: wait_ready
+        env: WAIT_READY
+        required: false
+        type: string
+        default: "true"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"

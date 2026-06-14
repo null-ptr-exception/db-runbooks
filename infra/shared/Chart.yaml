@@ -1,0 +1,4 @@
+apiVersion: v2
+name: shared
+version: 0.1.0
+description: Cluster-scoped resources shared by all test suites

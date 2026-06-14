@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# aqsh test suite setup
+# MongoDB test suite setup
 #
-# Deploys the aqsh framework layer on top of the shared infra (2 Kind clusters
-# with Cilium + Istio).
+# Deploys the MongoDB control plane + a test instance on the 2-cluster infra.
 #
-# cluster-a (server): kube-federated-auth, kube-auth-proxy + aqsh, Redis
-# cluster-b (client): test-client pod
-#
-# All cross-component traffic goes through Istio Gateway.
+# cluster-a (server):
+#   mongo-core: kube-federated-auth, kube-auth-proxy + aqsh-mongodb, Redis
+#   mongo-1:   MongoDB StatefulSet
+# cluster-b (client):
+#   mongo-core: test-client pod
 
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -15,7 +15,7 @@ setup_suite() {
 
   local CTX_A="kind-cluster-a"
   local CTX_B="kind-cluster-b"
-  local NS="aqsh-test"
+  local NS="mongo-core"
 
   # Layer 0: shared infra (idempotent)
   setup_infra
@@ -24,7 +24,7 @@ setup_suite() {
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
   docker push localhost:5005/db-runbooks:latest
 
-  local HELMFILE="${ROOT_DIR}/tests/aqsh/helmfile.yaml"
+  local HELMFILE="${ROOT_DIR}/tests/mongodb/helmfile.yaml"
 
   # First apply: deploy everything with default (empty) runtime values.
   # This creates SAs, RBAC, and all workloads. Federated-auth starts
@@ -52,7 +52,8 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
-  local RUNTIME_VALUES="${ROOT_DIR}/tests/aqsh/runtime-values.yaml"
+  # Write runtime-discovered values to a temp file
+  local RUNTIME_VALUES="${ROOT_DIR}/tests/mongodb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
 federatedAuth:
   clusters:
@@ -88,10 +89,13 @@ EOF
   echo "Waiting for aqsh..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/aqsh --timeout=120s
 
+  echo "Waiting for mongodb..."
+  kubectl --context "$CTX_A" -n mongo-1 rollout status statefulset/mongodb --timeout=120s
+
   echo "Waiting for test-client..."
   kubectl --context "$CTX_B" -n "$NS" rollout status deployment/test-client --timeout=60s
 
-  echo "=== aqsh test suite setup complete ==="
+  echo "=== mongodb test suite setup complete ==="
 }
 
 teardown_suite() {
@@ -99,5 +103,6 @@ teardown_suite() {
     return 0
   fi
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  helmfile destroy -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" || true
+  helmfile destroy -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" || true
+  kubectl --context kind-cluster-a delete ns mongo-1 --ignore-not-found
 }

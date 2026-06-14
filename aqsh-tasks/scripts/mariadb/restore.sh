@@ -59,7 +59,7 @@ TARGET_TIME="${TARGET_TIME:-}"
 WAIT_READY="${WAIT_READY:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 CONFIRM="${CONFIRM:-false}"
-DRY_RUN="${DRY_RUN:-false}"
+DRY_RUN="${DRY_RUN:-true}"
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
   mdbt_require_confirm "$OP" "$CONFIRM"

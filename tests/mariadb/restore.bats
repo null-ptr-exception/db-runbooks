@@ -67,14 +67,14 @@ run_restore() {
 result_field() { jq -r "$1" "${RESULT}"; }
 
 @test "restore requires confirm=true" {
-  run_restore CONFIRM=false
+  run_restore DRY_RUN=false CONFIRM=false
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"confirm=true is required"* ]]
 }
 
 @test "restore refuses to overwrite an existing target" {
-  run_restore MOCK_TARGET_EXISTS=1
+  run_restore DRY_RUN=false MOCK_TARGET_EXISTS=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"already exists"* ]]
@@ -106,7 +106,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore of latest backup renders Physical bootstrapFrom and no PITR" {
-  run_restore MOCK_TARGET_EXISTS=0
+  run_restore DRY_RUN=false MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.restored')" = "true" ]
@@ -123,7 +123,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore with target_time injects point-in-time recovery" {
-  run_restore TARGET_TIME="2026-06-14T03:21:00Z"
+  run_restore DRY_RUN=false TARGET_TIME="2026-06-14T03:21:00Z"
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "true" ]

@@ -21,8 +21,8 @@ the latest backup under the prefix is restored.
 
 | Step | Detail |
 |------|--------|
-| Guard | `confirm=true` is mandatory (mutating). |
-| Plan | `dry_run=true` renders the MariaDB manifest and returns without applying it; `confirm=true` is not required for dry runs. |
+| Plan (default) | With `dry_run=true` (the default) the task renders the MariaDB manifest and returns without applying it; `confirm` is not required. |
+| Guard | To apply, set `dry_run=false` **and** `confirm=true` (mutating). |
 | Guard | If a MariaDB named `target` already exists, the task fails — restore never overwrites in place. |
 | Validate | `target_time`, when given, must be an RFC3339 instant (e.g. `2026-06-14T03:21:00Z`). |
 | Apply | Creates a standalone `MariaDB` CR with `bootstrapFrom.s3` (`backupContentType: Physical`), `replicas=1`, no replication/multiCluster. |
@@ -48,7 +48,7 @@ the latest backup under the prefix is restored.
 | `backup_access_key` | `BACKUP_ACCESS_KEY` | | `access-key-id` | Access-key-id key within the secret. |
 | `backup_secret_key` | `BACKUP_SECRET_KEY` | | `secret-access-key` | Secret-access-key key within the secret. |
 | `wait_ready` | `WAIT_READY` | | `true` | Set `false` to return without waiting for Ready. |
-| `dry_run` | `DRY_RUN` | | `false` | Set `true` to render the manifest without applying it. |
+| `dry_run` | `DRY_RUN` | | `true` | Plan-only by default: renders the manifest without applying. Set `false` (with `confirm=true`) to apply. |
 | `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Ready wait timeout. |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |
 

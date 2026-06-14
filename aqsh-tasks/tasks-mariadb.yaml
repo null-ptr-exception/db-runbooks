@@ -731,7 +731,7 @@ tasks:
         env: DRY_RUN
         required: false
         type: string
-        default: "false"
+        default: "true"
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false

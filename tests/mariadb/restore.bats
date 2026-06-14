@@ -87,6 +87,24 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
+@test "restore rejects replicas greater than one" {
+  run_restore REPLICAS=2
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"replicas must be 1"* ]]
+}
+
+@test "restore dry_run renders the manifest without confirm or apply" {
+  run_restore CONFIRM=false DRY_RUN=true
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
+  [ "$(result_field '.data.dryRun')" = "true" ]
+  [ "$(result_field '.data.restored')" = "false" ]
+  [ ! -f "${CAPTURE}" ]
+  [[ "$(result_field '.data.manifest')" == *"kind: MariaDB"* ]]
+  [[ "$(result_field '.data.manifest')" == *"backupContentType: Physical"* ]]
+}
+
 @test "restore of latest backup renders Physical bootstrapFrom and no PITR" {
   run_restore MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]

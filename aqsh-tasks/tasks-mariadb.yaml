@@ -727,6 +727,11 @@ tasks:
         required: false
         type: string
         default: "true"
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "false"
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false

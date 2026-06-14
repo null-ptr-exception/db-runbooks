@@ -47,8 +47,11 @@ common_setup() {
   export TEST_POD
 
   if [[ "${1:-}" == "--create-token" ]]; then
+    # Long-running suites (e.g. recovery.bats: rollouts + 2 full recovers +
+    # initial-sync waits) can exceed 30m — override via TOKEN_DURATION.
     export TOKEN
-    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
+    TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client \
+      --duration="${TOKEN_DURATION:-30m}")
   fi
 }
 
@@ -121,12 +124,13 @@ wait_for_task() {
 # ---------------------------------------------------------------------------
 # _wait_for_ns_deleted <namespace>
 #
-# If the namespace exists and is Terminating, wait up to 60s for it to be
-# fully removed before proceeding.
+# If the namespace exists and is Terminating, wait up to 180s for it to be
+# fully removed before proceeding (deleting a namespace with several PVCs
+# routinely takes more than 60s).
 # ---------------------------------------------------------------------------
 _wait_for_ns_deleted() {
   local namespace="$1" ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}" elapsed=0
-  while (( elapsed < 60 )); do
+  while (( elapsed < 180 )); do
     local phase
     phase=$(kubectl --context "$ctx" get ns "$namespace" -o jsonpath='{.status.phase}' 2>/dev/null || true)
     if [[ -z "$phase" ]]; then
@@ -139,7 +143,7 @@ _wait_for_ns_deleted() {
     sleep 3
     elapsed=$((elapsed + 3))
   done
-  echo "Namespace ${namespace} still Terminating after 60s" >&2
+  echo "Namespace ${namespace} still Terminating after 180s" >&2
   return 1
 }
 
@@ -147,7 +151,8 @@ _wait_for_ns_deleted() {
 # _wait_for_mongodb_primary <namespace> [context] [max_wait_seconds]
 #
 # Waits until MongoDB responds as writable primary from inside the pod.
-# This avoids transient flakiness right after StatefulSet rollout.
+# Tries without credentials first (RS test clusters with no auth), then
+# with credentials (auth-enabled deployments).
 # ---------------------------------------------------------------------------
 _wait_for_mongodb_primary() {
   local namespace="$1"
@@ -156,20 +161,42 @@ _wait_for_mongodb_primary() {
   local elapsed=0
 
   while (( elapsed < max_wait )); do
-    local user pass pod
-    user=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
-      -o jsonpath='{.data.MONGO_ROOT_USER}' 2>/dev/null | base64 -d || true)
-    pass=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
-      -o jsonpath='{.data.MONGO_ROOT_PASS}' 2>/dev/null | base64 -d || true)
+    local pod
     pod=$(kubectl --context "$ctx" -n "$namespace" get pod -l app=mongodb \
       -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 
-    if [[ -n "$user" && -n "$pass" && -n "$pod" ]]; then
+    if [[ -n "$pod" ]]; then
+      # Check via rs.status() first — works even when connected to a secondary.
+      # Falls back to db.hello() for standalone (no RS).
+      local rs_check='try {
+        var s = rs.status();
+        var p = s.members && s.members.find(function(m){ return m.state===1 && m.health===1; });
+        if (p) { quit(0); }
+      } catch(e) {}
+      var h = db.hello();
+      if (h && (h.isWritablePrimary || h.ismaster)) { quit(0); }
+      quit(1);'
+
+      # Try without auth first (RS test clusters with --bind_ip_all, no --auth)
       if kubectl --context "$ctx" -n "$namespace" exec "$pod" -- mongosh --quiet --norc \
-        "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=2000" \
-        --eval 'const h=db.hello(); if (h && (h.isWritablePrimary || h.ismaster)) { quit(0); } quit(1);' \
+        "mongodb://localhost:27017/admin?serverSelectionTimeoutMS=2000" \
+        --eval "$rs_check" \
         >/dev/null 2>&1; then
         return 0
+      fi
+      # Fallback: try with credentials (auth-enabled deployments)
+      local user pass
+      user=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+        -o jsonpath='{.data.MONGO_ROOT_USER}' 2>/dev/null | base64 -d || true)
+      pass=$(kubectl --context "$ctx" -n "$namespace" get secret mongodb-credentials \
+        -o jsonpath='{.data.MONGO_ROOT_PASS}' 2>/dev/null | base64 -d || true)
+      if [[ -n "$user" && -n "$pass" ]]; then
+        if kubectl --context "$ctx" -n "$namespace" exec "$pod" -- mongosh --quiet --norc \
+          "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=2000" \
+          --eval "$rs_check" \
+          >/dev/null 2>&1; then
+          return 0
+        fi
       fi
     fi
 
@@ -179,6 +206,57 @@ _wait_for_mongodb_primary() {
 
   echo "MongoDB primary not ready in namespace ${namespace} after ${max_wait}s" >&2
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# _init_mongodb_rs <namespace> [context] [replicas]
+#
+# Initializes a MongoDB replica set named rs0 using rs.initiate().
+# Idempotent: AlreadyInitialized is treated as success.
+# ---------------------------------------------------------------------------
+_init_mongodb_rs() {
+  local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local replicas="${3:-3}"
+
+  echo "Initializing MongoDB replica set rs0 in ${namespace} (${replicas} members)..."
+
+  # Wait for mongodb-0 to be reachable before initiating
+  kubectl --context "$ctx" -n "$namespace" wait pod mongodb-0 \
+    --for=condition=Ready --timeout=120s || {
+    echo "mongodb-0 not ready after 120s" >&2
+    return 1
+  }
+
+  # Member 0 gets priority 2 so the primary lands deterministically on
+  # mongodb-0 — tests (e.g. recovery G7) depend on knowing who is primary.
+  local members="" prio
+  for i in $(seq 0 $((replicas - 1))); do
+    prio=1; [[ "$i" -eq 0 ]] && prio=2
+    members+="{_id:${i},host:'mongodb-${i}.mongodb.${namespace}.svc.cluster.local:27017',priority:${prio}},"
+  done
+  members="${members%,}"
+
+  kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://localhost:27017/admin" \
+    --eval "
+      try {
+        var r = rs.initiate({_id: 'rs0', members: [${members}]});
+        print('RS initiate: ' + JSON.stringify(r));
+      } catch(e) {
+        if (e.codeName === 'AlreadyInitialized') {
+          print('RS already initialized');
+        } else {
+          print('RS init error: ' + e.message);
+          quit(1);
+        }
+      }
+    " || {
+    echo "RS initiate failed" >&2
+    return 1
+  }
+  echo "RS initiated — allowing time for primary election..."
+  sleep 8
 }
 
 # ---------------------------------------------------------------------------
@@ -285,7 +363,7 @@ EOF
   kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
-  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=240s 2>/dev/null; then
+  if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=300s 2>/dev/null; then
     echo "Rollout status timed out, falling back to wait pod..."
     kubectl --context "$ctx" -n "$namespace" wait pod \
       -l app=mongodb --for=condition=Ready --timeout=60s || {
@@ -294,6 +372,14 @@ EOF
       kubectl --context "$ctx" -n "$namespace" describe pod -l app=mongodb | tail -30
       return 1
     }
+  fi
+
+  # Initialize replica set if this is a multi-member deployment
+  local replicas
+  replicas=$(kubectl --context "$ctx" -n "$namespace" \
+    get statefulset mongodb -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "1")
+  if [[ "${replicas:-1}" -gt 1 ]]; then
+    _init_mongodb_rs "$namespace" "$ctx" "$replicas"
   fi
 
   echo "Waiting for MongoDB primary election in ${namespace}..."

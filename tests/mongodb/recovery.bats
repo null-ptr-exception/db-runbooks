@@ -184,10 +184,34 @@ setup() {
 }
 
 teardown_file() {
-  # Reset mongo-1 back to single-replica for other test files in the suite.
+  # Revert all setup_file STS mutations so other test files see a clean state.
   # Do NOT delete the namespace — setup_suite owns that lifecycle.
-  kubectl --context kind-cluster-a -n mongo-1 \
-    patch statefulset mongodb --type=merge -p '{"spec":{"replicas":1}}' 2>/dev/null || true
+  local ctx="kind-cluster-a"
+  kubectl --context "$ctx" -n mongo-1 \
+    patch statefulset mongodb --type=merge -p \
+    '{"spec":{"replicas":1,"updateStrategy":{"rollingUpdate":{"partition":0}}}}' \
+    2>/dev/null || true
+  # Remove init container and recovery-config volume added by setup_file.
+  # Use JSON patch to target by name so index doesn't matter.
+  local ic_idx vol_idx
+  ic_idx=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
+    -o jsonpath='{range .spec.template.spec.initContainers[*]}{.name}{"\n"}{end}' 2>/dev/null \
+    | grep -n '^data-recovery$' | cut -d: -f1)
+  if [[ -n "$ic_idx" ]]; then
+    kubectl --context "$ctx" -n mongo-1 patch statefulset mongodb --type=json \
+      -p "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/initContainers/$((ic_idx-1))\"}]" \
+      2>/dev/null || true
+  fi
+  vol_idx=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
+    -o jsonpath='{range .spec.template.spec.volumes[*]}{.name}{"\n"}{end}' 2>/dev/null \
+    | grep -n '^recovery-config-vol$' | cut -d: -f1)
+  if [[ -n "$vol_idx" ]]; then
+    kubectl --context "$ctx" -n mongo-1 patch statefulset mongodb --type=json \
+      -p "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/volumes/$((vol_idx-1))\"}]" \
+      2>/dev/null || true
+  fi
+  kubectl --context "$ctx" -n mongo-1 \
+    delete configmap mongodb-recovery-config --ignore-not-found 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

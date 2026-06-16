@@ -53,6 +53,13 @@ mongodbRbac:
 testClient:
   enabled: false
 
+# --- minio ---
+minio:
+  enabled: false
+  image: minio/minio:latest
+  rootUser: minioadmin
+  rootPassword: minioadmin-changeme-prod
+
 # --- Istio VirtualServices (route through shared-gateway) ---
 gateway:
   enabled: false

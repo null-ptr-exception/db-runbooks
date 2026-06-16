@@ -854,10 +854,14 @@ _wait_for_rs_healthy() {
   local precheck_id
   precheck_id=$(echo "$HTTP_BODY" | jq -r '.id')
   wait_for_task "$MONGODB_AQSH_URL" "$precheck_id" 120 || true
-  local g7_pre
-  g7_pre=$(echo "$TASK_RESPONSE" \
-    | jq -r '.result.data.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "?")
+  local _precheck_data g7_pre
+  _precheck_data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  g7_pre=$(echo "$_precheck_data" | jq -r '.gates[] | select(.gate=="G7") | .pass' 2>/dev/null || echo "?")
   echo "G7 before stepdown (pod-0 is primary): ${g7_pre}" >&2
+  if [[ "$g7_pre" == "?" ]]; then
+    echo "DEBUG task status: $(echo "$TASK_RESPONSE" | jq -r '.status // "?"')" >&2
+    echo "DEBUG task data: $(echo "$_precheck_data" | jq -c . 2>/dev/null || echo "${_precheck_data:0:400}")" >&2
+  fi
   assert_equal "$g7_pre" "false"
 
   # Capture pod-0 UID before wipe.

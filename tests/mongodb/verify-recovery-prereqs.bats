@@ -22,6 +22,49 @@
 setup_file() {
   load '../test_helper/common_setup'
   common_setup
+
+  local ctx="${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
+
+  # recovery.bats teardown_file may delete mongo-1 before this suite runs.
+  # Re-deploy any missing namespaces so prereq checks have something to inspect.
+  for ns in mongo-1 mongo-2 mongo-3; do
+    if ! kubectl --context "$ctx" get ns "$ns" &>/dev/null; then
+      echo "Namespace ${ns} missing — re-deploying..."
+      deploy_mongodb "$ns" "$ctx"
+      kubectl --context "$ctx" -n "$ns" apply \
+        -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/recovery-configmap.yaml"
+      local replicas img
+      replicas=$(kubectl --context "$ctx" -n "$ns" \
+        get statefulset mongodb -o jsonpath='{.spec.replicas}')
+      img=$(kubectl --context "$ctx" -n "$ns" \
+        get statefulset mongodb -o jsonpath='{.spec.template.spec.containers[0].image}')
+      kubectl --context "$ctx" -n "$ns" \
+        patch statefulset mongodb --type=strategic -p "$(cat <<PATCH
+{
+  "spec": {
+    "updateStrategy": {"rollingUpdate": {"partition": ${replicas}}},
+    "template": {
+      "spec": {
+        "initContainers": [{
+          "name": "data-recovery",
+          "image": "${img}",
+          "command": ["/bin/bash", "-c"],
+          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
+          "volumeMounts": [
+            {"name": "data", "mountPath": "/data/db"},
+            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
+          ],
+          "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
+        }],
+        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
+      }
+    }
+  }
+}
+PATCH
+)"
+    fi
+  done
 }
 
 setup() {

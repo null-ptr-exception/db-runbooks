@@ -50,6 +50,21 @@ RBAC_EOF
   _WR_PASS=$(kubectl --context "$ctx" -n "$ns" get secret mongodb-credentials \
     -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
 
+  # ── Headless Service (required for RS DNS: mongodb-N.mongodb.<ns>.svc.cluster.local) ──
+  kubectl --context "$ctx" -n "$ns" apply -f - <<'SVC_EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+spec:
+  clusterIP: None
+  selector:
+    app: mongodb
+  ports:
+    - port: 27017
+      targetPort: 27017
+SVC_EOF
+
   # ── 3-replica RS StatefulSet ─────────────────────────────────────────────────
   kubectl --context "$ctx" -n "$ns" apply -f - <<'STS_EOF'
 apiVersion: apps/v1
@@ -255,19 +270,34 @@ _task_data() { echo "$TASK_RESPONSE" | jq -r '.result.data // empty'; }
   wipe_task_id=$(echo "$HTTP_BODY" | jq -r '.id')
   wait_for_task "$MONGODB_AQSH_URL" "$wipe_task_id" 120
 
-  # Step 2: wait for pod to restart and reach Running
-  echo "Waiting for mongodb-2 to restart after wipe..." >&2
+  # Step 2: wait for pod to terminate then come back Running with a new UID.
+  # (The "before" UID is read here, AFTER submitting wipe, so kubernetes may have
+  #  already bumped the pod — capture it before the loop.)
+  echo "Waiting for mongodb-2 to terminate and restart..." >&2
   local before_uid after_uid elapsed=0
   before_uid=$(kubectl --context "$ctx" -n mongo-wr \
     get pod mongodb-2 -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "none")
+  echo "UID before wipe restart: $before_uid" >&2
+
+  # Phase 1: wait until pod is gone or UID changed (restart in progress)
+  until [[ "$(kubectl --context "$ctx" -n mongo-wr \
+      get pod mongodb-2 -o jsonpath='{.metadata.uid}' 2>/dev/null || echo '')" \
+      != "$before_uid" ]]; do
+    [[ $elapsed -ge 300 ]] && { echo "Pod did not restart within 300s" >&2; break; }
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+
+  # Phase 2: wait until pod is Running (reset elapsed so each phase gets its own 300s budget)
+  elapsed=0
   until kubectl --context "$ctx" -n mongo-wr \
       get pod mongodb-2 -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; do
     [[ $elapsed -ge 300 ]] && { echo "Pod did not reach Running within 300s" >&2; break; }
     sleep 5; elapsed=$((elapsed + 5))
   done
+
   after_uid=$(kubectl --context "$ctx" -n mongo-wr \
     get pod mongodb-2 -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "none")
-  echo "UID before=$before_uid after=$after_uid" >&2
+  echo "UID after restart: $after_uid" >&2
   [ "$before_uid" != "$after_uid" ]  # pod genuinely restarted
 
   # Step 3: manual reset
@@ -310,9 +340,19 @@ _task_data() { echo "$TASK_RESPONSE" | jq -r '.result.data // empty'; }
   wipe_task_id=$(echo "$HTTP_BODY" | jq -r '.id')
   wait_for_task "$MONGODB_AQSH_URL" "$wipe_task_id" 120
 
-  # Wait for pod to restart (UID change confirms init container ran)
+  # Wait for pod to terminate and come back (UID change confirms init container ran)
   echo "Waiting for mongodb-2 to restart..." >&2
-  local elapsed=0
+  local before_uid_d2 elapsed=0
+  before_uid_d2=$(kubectl --context "$ctx" -n mongo-wr \
+    get pod mongodb-2 -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "none")
+  until [[ "$(kubectl --context "$ctx" -n mongo-wr \
+      get pod mongodb-2 -o jsonpath='{.metadata.uid}' 2>/dev/null || echo '')" \
+      != "$before_uid_d2" ]]; do
+    [[ $elapsed -ge 300 ]] && break
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  # Wait until Running again (reset elapsed so Phase 2 gets its own 300s budget)
+  elapsed=0
   until kubectl --context "$ctx" -n mongo-wr \
       get pod mongodb-2 -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; do
     [[ $elapsed -ge 300 ]] && break

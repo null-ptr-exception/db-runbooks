@@ -269,22 +269,24 @@ _init_mongodb_rs() {
 _find_primary_pod() {
   local namespace="$1"
   local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
-  local elapsed=0 result
+  local elapsed=0 result _probe
 
   while (( elapsed < 60 )); do
-    result=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- \
-      mongosh --quiet --norc "mongodb://localhost:27017/admin" \
-      --eval "
-        try {
-          var s = rs.status();
-          var p = s.members && s.members.find(function(m){ return m.state===1; });
-          if (p) { print(p.name.split('.')[0]); quit(0); }
-        } catch(e) {}
-        quit(1);" 2>/dev/null | grep -E '^mongodb-[0-9]+$' | tail -1 || true)
-    if [[ -n "$result" ]]; then
-      echo "$result"
-      return 0
-    fi
+    for _probe in mongodb-0 mongodb-1 mongodb-2; do
+      result=$(kubectl --context "$ctx" -n "$namespace" exec "$_probe" -- \
+        mongosh --quiet --norc "mongodb://localhost:27017/admin" \
+        --eval "
+          try {
+            var s = rs.status();
+            var p = s.members && s.members.find(function(m){ return m.state===1; });
+            if (p) { print(p.name.split('.')[0]); quit(0); }
+          } catch(e) {}
+          quit(1);" 2>/dev/null | grep -E '^mongodb-[0-9]+$' | tail -1 || true)
+      if [[ -n "$result" ]]; then
+        echo "$result"
+        return 0
+      fi
+    done
     sleep 5; elapsed=$((elapsed + 5))
   done
   echo "Could not find primary pod in ${namespace}" >&2
@@ -304,9 +306,16 @@ _wait_for_rs_healthy() {
   local max_wait="${4:-120}"
   local elapsed=0
 
+  # Use a probe pod that is not the pod being waited on, so it can answer rs.status()
+  # even if pod_name is still restarting.
+  local probe_pod
+  for _p in mongodb-0 mongodb-1 mongodb-2; do
+    [[ "$_p" != "$pod_name" ]] && { probe_pod="$_p"; break; }
+  done
+
   while (( elapsed < max_wait )); do
     local healthy
-    healthy=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- \
+    healthy=$(kubectl --context "$ctx" -n "$namespace" exec "$probe_pod" -- \
       mongosh --quiet --norc "mongodb://localhost:27017/admin" \
       --eval "
         try {

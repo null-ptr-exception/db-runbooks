@@ -47,11 +47,12 @@ readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 _mongo_load_credentials() {
   local namespace="$1" secret="$2" user_key="$3" pass_key="$4"
   local direct_user="${5:-}"
+  direct_user="${direct_user//[[:space:]]/}"  # whitespace-only user must not bypass validation
 
   if [[ -n "$direct_user" ]]; then
     _MONGO_USER="$direct_user"
   else
-    _MONGO_USER=$(kubectl -n "$namespace" get secret "$secret" \
+    _MONGO_USER=$(_kubectl -n "$namespace" get secret "$secret" \
       -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
       jq -n --arg ns "$namespace" --arg s "$secret" \
         '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
@@ -59,7 +60,7 @@ _mongo_load_credentials() {
     }
   fi
 
-  _MONGO_PASS=$(kubectl -n "$namespace" get secret "$secret" \
+  _MONGO_PASS=$(_kubectl -n "$namespace" get secret "$secret" \
     -o jsonpath="{.data.${pass_key}}" 2>/dev/null | base64 -d) || {
     jq -n --arg ns "$namespace" --arg s "$secret" \
       '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \

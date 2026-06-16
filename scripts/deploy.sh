@@ -122,6 +122,10 @@ EOF
     local replicas
     replicas=$(kubectl --context "$ctx" -n "$ns" get statefulset mongodb \
       -o jsonpath='{.spec.replicas}')
+    if [[ -z "$replicas" ]] || ! [[ "$replicas" =~ ^[0-9]+$ ]]; then
+      echo "  [$ns] ERROR: could not read valid replica count from StatefulSet mongodb" >&2
+      return 1
+    fi
 
     local rs_init_js
     rs_init_js=$(cat <<RSJS
@@ -189,6 +193,10 @@ try {
       -o jsonpath='{.spec.template.spec.containers[0].image}')
     replicas=$(kubectl --context "$ctx" -n "$ns" get statefulset mongodb \
       -o jsonpath='{.spec.replicas}')
+    if [[ -z "$replicas" ]] || ! [[ "$replicas" =~ ^[0-9]+$ ]]; then
+      echo "  [$ns] ERROR: could not read valid replica count for recovery patch" >&2
+      return 1
+    fi
     kubectl --context "$ctx" -n "$ns" \
       patch statefulset mongodb --type=strategic -p "$(cat <<RECOVERY_PATCH
 {

@@ -309,7 +309,7 @@ var curMB=Math.ceil(st.maxSize/1024/1024);
 var first=l['oplog.rs'].find({},{ts:1}).sort({ts:1}).limit(1).toArray();
 var last=l['oplog.rs'].find({},{ts:1}).sort({ts:-1}).limit(1).toArray();
 var winHrs=(first.length&&last.length&&last[0].ts.t>first[0].ts.t)?(last[0].ts.t-first[0].ts.t)/3600:0;
-var wRate=winHrs>0.1?Math.ceil(curMB/winHrs):500;
+var wRate=winHrs>=1?Math.ceil(curMB/winHrs):500;
 var dataMB=${data_mb};
 var syncH=Math.max(1,Math.ceil(dataMB/(5*1024)));
 var reqWin=Math.max(4,syncH*2);

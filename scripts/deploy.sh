@@ -143,8 +143,13 @@ try{
 }
 RSJS
 )
-    kubectl --context "$ctx" -n "$ns" exec mongodb-0 -- \
-      mongosh --quiet --norc --eval "$rs_init_js" || true
+    local rs_init_out
+    rs_init_out=$(kubectl --context "$ctx" -n "$ns" exec mongodb-0 -- \
+      mongosh --quiet --norc --eval "$rs_init_js")
+    if echo "$rs_init_out" | grep -q '^RS_ERR'; then
+      echo "  [$ns] ERROR: RS initiate failed: $rs_init_out" >&2
+      return 1
+    fi
 
     # Wait for primary election (up to 120s)
     echo "  [$ns] Waiting for RS primary..."
@@ -180,7 +185,7 @@ try {
 } catch(e) {
   if(e.code===51003||e.message.indexOf('already exists')>=0){print('USER_EXISTS');}
   else{throw e;}
-}" || true
+}"
   done
 
   echo "Applying MongoDB recovery prerequisites in ${ctx}..."

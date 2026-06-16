@@ -44,7 +44,7 @@ args=()
 declare -A jq_vars
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n) shift ;;
+    -n|-c|-r) shift ;;
     --arg) jq_vars["$2"]="$3"; shift 3 ;;
     *) args+=("$1"); shift ;;
   esac

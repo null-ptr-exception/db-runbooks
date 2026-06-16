@@ -263,8 +263,9 @@ _init_mongodb_rs() {
 # _find_primary_pod <namespace> [context]
 #
 # Returns the name of the pod that is currently the RS writable primary.
-# Tries each pod (mongodb-0 first) using db.hello().isWritablePrimary.
-# Prints to stdout; returns 0 on success, 1 if no primary found within 60s.
+# Tries each pod (mongodb-0 first) calling rs.status() and finding the member
+# with state===1 (PRIMARY). Prints to stdout; returns 0 on success, 1 if no
+# primary found within 60s.
 # ---------------------------------------------------------------------------
 _find_primary_pod() {
   local namespace="$1"
@@ -297,7 +298,7 @@ _find_primary_pod() {
 # _wait_for_rs_healthy <namespace> <pod_name> [context] [max_wait_seconds]
 #
 # Waits until <pod_name> appears as a healthy (health=1) member in rs.status()
-# as observed from mongodb-0.
+# as observed from a peer pod (the first of mongodb-0/1/2 that is not pod_name).
 # ---------------------------------------------------------------------------
 _wait_for_rs_healthy() {
   local namespace="$1"

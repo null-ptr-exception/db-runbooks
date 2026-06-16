@@ -54,7 +54,7 @@ _mongo_load_credentials() {
   else
     _MONGO_USER=$(_kubectl -n "$namespace" get secret "$secret" \
       -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
-      jq -n --arg ns "$namespace" --arg s "$secret" \
+      jq -cn --arg ns "$namespace" --arg s "$secret" \
         '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
         > "$AQSH_RESULT_FILE"; exit 1
     }
@@ -62,14 +62,14 @@ _mongo_load_credentials() {
 
   _MONGO_PASS=$(_kubectl -n "$namespace" get secret "$secret" \
     -o jsonpath="{.data.${pass_key}}" 2>/dev/null | base64 -d) || {
-    jq -n --arg ns "$namespace" --arg s "$secret" \
+    jq -cn --arg ns "$namespace" --arg s "$secret" \
       '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
       > "$AQSH_RESULT_FILE"; exit 1
   }
   # A present-but-empty secret key decodes to "" with exit 0, so the traps above
   # do not fire — validate explicitly to avoid opaque downstream auth failures.
   if [[ -z "${_MONGO_USER}" || -z "${_MONGO_PASS}" ]]; then
-    jq -n --arg ns "$namespace" --arg s "$secret" --arg uk "$user_key" --arg pk "$pass_key" \
+    jq -cn --arg ns "$namespace" --arg s "$secret" --arg uk "$user_key" --arg pk "$pass_key" \
       '{"status":"error","message":"Credentials secret is missing required key(s) or values are empty","namespace":$ns,"secret":$s,"user_key":$uk,"pass_key":$pk}' \
       > "$AQSH_RESULT_FILE"; exit 1
   fi

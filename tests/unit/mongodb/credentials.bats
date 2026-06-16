@@ -30,23 +30,25 @@ setup() {
 
   mkdir -p "${TEST_TMPDIR}/bin"
 
-  # jq stub: only needs to handle the `jq -n --arg ... 'expr'` calls used in
-  # _mongo_load_credentials to write error JSON to AQSH_RESULT_FILE.
+  # jq stub: delegate to the real jq so error JSON matches the actual expression
+  # (the stub used to hand-build JSON from --arg names, producing wrong field names
+  # like "ns" instead of "namespace"). Fall back to a minimal stub only if jq is absent.
   cat > "${TEST_TMPDIR}/bin/jq" << 'JQ_EOF'
 #!/usr/bin/env bash
-# Minimal jq stub for _mongo_load_credentials error output.
-# Handles: jq -n --arg key val [--arg ...] 'expr'
+# Delegate to the real jq binary (search system paths, bypassing this stub).
+for _jq in /usr/bin/jq /usr/local/bin/jq /opt/homebrew/bin/jq; do
+  [[ -x "$_jq" ]] && exec "$_jq" "$@"
+done
+# Fallback: handle jq -n --arg key val [--arg ...] 'expr' with flat key-value output.
 args=()
 declare -A jq_vars
-mode=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n) mode="null-input"; shift ;;
+    -n) shift ;;
     --arg) jq_vars["$2"]="$3"; shift 3 ;;
     *) args+=("$1"); shift ;;
   esac
 done
-expr="${args[0]:-}"
 out="{"
 sep=""
 for k in "${!jq_vars[@]}"; do

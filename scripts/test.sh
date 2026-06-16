@@ -25,14 +25,12 @@ trap '"${SCRIPT_DIR}/teardown.sh"' EXIT
 
 if [[ "$DB_MODE" == "dual" ]]; then
   "$BATS_BIN" --recursive \
-    "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
     "${ROOT_DIR}/tests/mariadb/create_account.bats"
 else
   "$BATS_BIN" --recursive \
-    "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \

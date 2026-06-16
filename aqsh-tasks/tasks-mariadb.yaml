@@ -648,7 +648,7 @@ tasks:
         default: --all-databases
   restore:
     script: mariadb/restore.sh
-    description: "Restore a physical backup into a NEW MariaDB instance (optionally point-in-time)"
+    description: "Restore a physical backup into a new MariaDB instance (optionally point-in-time); managed-DB internals (credentials, S3 location, version) are resolved automatically"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -657,71 +657,38 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: target
-        env: RESTORE_TARGET
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: image
-        env: RESTORE_IMAGE
-        required: true
-        type: string
       - name: target_time
         env: TARGET_TIME
         required: false
         type: string
-      - name: root_secret_name
-        env: ROOT_SECRET_NAME
+      # --- Optional overrides (resolved automatically when omitted) ---
+      - name: target
+        env: RESTORE_TARGET
         required: false
         type: string
-        default: mariadb
-      - name: root_secret_key
-        env: ROOT_SECRET_KEY
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: image
+        env: RESTORE_IMAGE
         required: false
         type: string
-        default: password
       - name: storage_size
         env: STORAGE_SIZE
         required: false
         type: string
-        default: 1Gi
-      - name: replicas
-        env: REPLICAS
-        required: false
-        type: string
-        default: "1"
       - name: backup_bucket
         env: BACKUP_BUCKET
-        required: true
+        required: false
         type: string
+        default: db-backups
       - name: backup_prefix
         env: BACKUP_PREFIX
-        required: true
+        required: false
         type: string
       - name: backup_endpoint
         env: BACKUP_ENDPOINT
-        required: true
-        type: string
-      - name: backup_region
-        env: BACKUP_REGION
         required: false
         type: string
-        default: us-east-1
-      - name: backup_access_secret
-        env: BACKUP_ACCESS_SECRET
-        required: false
-        type: string
-        default: minio
-      - name: backup_access_key
-        env: BACKUP_ACCESS_KEY
-        required: false
-        type: string
-        default: access-key-id
-      - name: backup_secret_key
-        env: BACKUP_SECRET_KEY
-        required: false
-        type: string
-        default: secret-access-key
+        default: minio.db-ops.svc.cluster.local:9000
       - name: wait_ready
         env: WAIT_READY
         required: false

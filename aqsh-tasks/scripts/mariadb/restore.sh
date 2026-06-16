@@ -6,18 +6,26 @@ set -euo pipefail
 # Restore a MariaDB instance from a physical (mariabackup) backup in S3/MinIO,
 # optionally to a point in time.
 #
+# User-oriented surface: the caller says *what* to restore (namespace, optional
+# point-in-time), not *where/how* it is stored. Everything a managed database
+# controls — credentials, S3 endpoint/region/credentials, the backup location,
+# the engine version, and the storage size — is resolved internally from
+# platform conventions or from the source instance, and is overridable only as
+# an advanced option.
+#
 # AWS-style semantics: a restore always provisions a NEW MariaDB instance and
 # never overwrites in place (RestoreDBInstanceFromDBSnapshot /
 # RestoreDBInstanceToPointInTime). It drives the mariadb-operator
 # `spec.bootstrapFrom` restore path — the same machinery blue-green/bootstrap
-# uses — but without the replication / multi-cluster wiring. When a target_time
-# is supplied, `bootstrapFrom.targetRecoveryTime` performs point-in-time
-# recovery; otherwise the latest backup under the prefix is restored.
+# uses — but without the replication / multi-cluster wiring. With target_time,
+# `bootstrapFrom.targetRecoveryTime` performs point-in-time recovery; without
+# it, the latest backup under the prefix is restored.
 #
-# The backup itself must be a mariadb-operator PhysicalBackup / mariabackup
-# object-storage layout; the logical `backup` task is not a valid source. The
-# generic input validators, confirm gate, and result contract come from
-# mariadb-task-common.sh (shared with the blue-green tasks).
+# NOTE: the per-namespace backup prefix (mariadb/<namespace>) is a forward-
+# looking convention. Until the physical-backup task writes to that layout,
+# point `backup_prefix`/`backup_bucket` at where the backup actually lives.
+# The source must be a mariadb-operator PhysicalBackup / mariabackup layout;
+# the logical `backup` task is not a valid source.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -31,58 +39,74 @@ source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + 
 
 OP="restore"
 
-# Target instance + cluster. Empty values are caught by the validators below,
-# which emit a structured INVALID_INPUT-style result rather than a bash error.
-NAMESPACE="${DB_NAMESPACE:-}"
-TARGET="${RESTORE_TARGET:-}"
-IMAGE="${RESTORE_IMAGE:-}"
+# --- User-facing inputs ------------------------------------------------------
+NAMESPACE="${DB_NAMESPACE:-}"          # the only required input
+TARGET_TIME="${TARGET_TIME:-}"         # optional: omit → latest backup; set → PITR
+TARGET="${RESTORE_TARGET:-}"           # optional: auto-generated when empty
+IMAGE="${RESTORE_IMAGE:-}"             # optional: derived from the source when empty
+STORAGE_SIZE="${STORAGE_SIZE:-}"       # optional: derived from the source when empty
+CONFIRM="${CONFIRM:-false}"
+DRY_RUN="${DRY_RUN:-true}"
+WAIT_READY="${WAIT_READY:-true}"
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 K8S_CONTEXT="${K8S_CONTEXT:-}"
+
+# --- Advanced overrides (default to the platform convention) -----------------
+BACKUP_BUCKET="${BACKUP_BUCKET:-db-backups}"
+BACKUP_PREFIX="${BACKUP_PREFIX:-}"     # defaulted to mariadb/<namespace> below
+BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-minio.db-ops.svc.cluster.local:9000}"
+
+# --- Platform internals (NOT user-facing) ------------------------------------
+ROOT_SECRET_NAME="mariadb"
+ROOT_SECRET_KEY="password"
+BACKUP_REGION="us-east-1"
+BACKUP_ACCESS_SECRET="minio"
+BACKUP_ACCESS_KEY="access-key-id"
+BACKUP_SECRET_KEY="secret-access-key"
+REPLICAS="1"                           # restore is standalone by design
+SOURCE_NAME="${RESTORE_SOURCE:-mariadb}"   # conventional source instance in the namespace
+DEFAULT_IMAGE="mariadb:11.4"           # fallback when the source instance is gone
+DEFAULT_STORAGE_SIZE="1Gi"
+
 # shellcheck disable=SC2034  # consumed by _kubectl in k8s.sh (sourced indirectly)
 K8S_NAMESPACE="$NAMESPACE"
 
-ROOT_SECRET_NAME="${ROOT_SECRET_NAME:-mariadb}"
-ROOT_SECRET_KEY="${ROOT_SECRET_KEY:-password}"
-STORAGE_SIZE="${STORAGE_SIZE:-1Gi}"
-REPLICAS="${REPLICAS:-1}"
-
-BACKUP_BUCKET="${BACKUP_BUCKET:-}"
-BACKUP_PREFIX="${BACKUP_PREFIX:-}"
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-}"
-BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
-BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
-BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
-BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
-
-# Optional point-in-time recovery target. Empty → restore the latest backup.
-TARGET_TIME="${TARGET_TIME:-}"
-
-WAIT_READY="${WAIT_READY:-true}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
-CONFIRM="${CONFIRM:-false}"
-DRY_RUN="${DRY_RUN:-true}"
-
+# Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
   mdbt_require_confirm "$OP" "$CONFIRM"
 fi
 
+# Namespace is the one input the caller must provide.
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
+
+# Per-namespace backup location convention.
+BACKUP_PREFIX="${BACKUP_PREFIX:-mariadb/${NAMESPACE}}"
+
+# Name the restored instance for the caller when they didn't.
+if [[ -z "$TARGET" ]]; then
+  TARGET="${NAMESPACE}-restore-$(date +%Y%m%d%H%M%S)"
+fi
+
+# Resolve engine version / storage from the source instance; fall back to the
+# platform default when the source CR is gone (a common reason to restore).
+# NOTE: a physical restore is version-sensitive — if the source is gone, verify
+# the default matches the backup's MariaDB version or pass `image` explicitly.
+if [[ -z "$IMAGE" ]]; then
+  IMAGE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.image}' 2>/dev/null || true)"
+  IMAGE="${IMAGE:-$DEFAULT_IMAGE}"
+fi
+if [[ -z "$STORAGE_SIZE" ]]; then
+  STORAGE_SIZE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.storage.size}' 2>/dev/null || true)"
+  STORAGE_SIZE="${STORAGE_SIZE:-$DEFAULT_STORAGE_SIZE}"
+fi
+
+# Validate the resolved user-facing + override values (internals are trusted).
 mdbt_validate_dns_label "target" "$TARGET" "$OP"
 mdbt_validate_image "image" "$IMAGE" "$OP"
-mdbt_validate_dns_label "root_secret_name" "$ROOT_SECRET_NAME" "$OP"
-mdbt_validate_secret_key "root_secret_key" "$ROOT_SECRET_KEY" "$OP"
 mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
-mdbt_validate_uint "replicas" "$REPLICAS" "$OP"
-if [[ "$REPLICAS" != "1" ]]; then
-  mdbt_fail "$OP" "replicas must be 1 for standalone restore; replication/multiCluster wiring is intentionally not created" \
-    "$(jq -n --arg replicas "$REPLICAS" '{replicas: $replicas, supportedReplicas: "1"}')" 2
-fi
 mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
 mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
-mdbt_validate_region "backup_region" "$BACKUP_REGION" "$OP"
-mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$OP"
-mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$OP"
-mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
@@ -125,29 +149,42 @@ ${RECOVERY_LINE}
 EOF
 )"
 
-if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-  data="$(jq -n \
+# The restored instance is reachable at the operator-managed primary Service;
+# its root credentials live in the platform-managed Secret (returned by ref).
+CONNECTION_HOST="${TARGET}-primary.${NAMESPACE}.svc.cluster.local"
+
+# restore_result <restored:bool> <dryRun:bool>
+restore_result() {
+  jq -n \
     --arg namespace "$NAMESPACE" \
     --arg target "$TARGET" \
     --arg image "$IMAGE" \
     --arg bucket "$BACKUP_BUCKET" \
     --arg prefix "$BACKUP_PREFIX" \
     --arg endpoint "$BACKUP_ENDPOINT" \
-    --arg region "$BACKUP_REGION" \
     --argjson pitr "$(mdbt_bool_json "${TARGET_TIME:+true}")" \
     --arg targetTime "$TARGET_TIME" \
+    --arg host "$CONNECTION_HOST" \
+    --arg secretName "$ROOT_SECRET_NAME" \
+    --arg secretKey "$ROOT_SECRET_KEY" \
     --arg manifest "$MANIFEST" \
+    --argjson restored "$1" \
+    --argjson dry "$2" \
     '{
       namespace: $namespace,
       target: $target,
       image: $image,
-      backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, region: $region, contentType: "Physical"},
+      backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, contentType: "Physical"},
       pointInTimeRecovery: {enabled: $pitr, targetRecoveryTime: (if $pitr then $targetTime else null end)},
-      dryRun: true,
-      restored: false,
-      manifest: $manifest
-    }')"
-  mdbt_write_result "$(response_ok "$OP" "dry run: MariaDB restore manifest rendered for ${TARGET}" "$data")"
+      connection: {host: $host, port: 3306},
+      credentialsRef: {secretName: $secretName, secretKey: $secretKey},
+      dryRun: $dry,
+      restored: $restored
+    } + (if $dry then {manifest: $manifest} else {} end)'
+}
+
+if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
+  mdbt_write_result "$(response_ok "$OP" "dry run: MariaDB restore manifest rendered for ${TARGET}" "$(restore_result false true)")"
   exit 0
 fi
 
@@ -164,29 +201,4 @@ if [[ "$WAIT_READY" != "false" ]]; then
   mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"
 fi
 
-if [[ -n "$TARGET_TIME" ]]; then
-  PITR_ENABLED=true
-else
-  PITR_ENABLED=false
-fi
-
-data="$(jq -n \
-  --arg namespace "$NAMESPACE" \
-  --arg target "$TARGET" \
-  --arg image "$IMAGE" \
-  --arg bucket "$BACKUP_BUCKET" \
-  --arg prefix "$BACKUP_PREFIX" \
-  --arg endpoint "$BACKUP_ENDPOINT" \
-  --arg region "$BACKUP_REGION" \
-  --argjson pitr "$PITR_ENABLED" \
-  --arg targetTime "$TARGET_TIME" \
-  '{
-    namespace: $namespace,
-    target: $target,
-    image: $image,
-    backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, region: $region, contentType: "Physical"},
-    pointInTimeRecovery: {enabled: $pitr, targetRecoveryTime: (if $pitr then $targetTime else null end)},
-    restored: true
-  }')"
-
-mdbt_write_result "$(response_ok "$OP" "MariaDB restored into new instance ${TARGET}" "$data")"
+mdbt_write_result "$(response_ok "$OP" "MariaDB restored into new instance ${TARGET}" "$(restore_result true false)")"

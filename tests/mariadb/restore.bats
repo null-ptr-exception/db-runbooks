@@ -3,12 +3,14 @@
 # Contract tests for mariadb/restore.sh.
 #
 # These run the script directly against a mock `kubectl` — no cluster, no
-# MinIO, no operator. They lock down the guardrails and the manifest the task
-# renders, which is where the AWS-style restore semantics live:
-#   - confirm=true is mandatory (mutating task)
+# MinIO, no operator. They lock down the user-oriented surface and the manifest
+# the task renders:
+#   - namespace is the only required input; credentials / S3 location / version
+#     are resolved internally (convention or from the source instance)
+#   - confirm=true is mandatory to apply; dry_run (default) only renders
 #   - an existing target is never overwritten in place
-#   - target_time is validated and, when given, injected as PITR
-#   - the rendered MariaDB has bootstrapFrom Physical and no replication wiring
+#   - target_time is range-validated and, when given, injected as PITR
+#   - the result returns the connection endpoint + credential reference
 #
 # A live restore (real backup round-trip) belongs in the dual-cluster e2e suite.
 
@@ -23,15 +25,20 @@ setup() {
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
-# Minimal kubectl mock: find the verb past any --context/--namespace flags.
+# Minimal kubectl mock. Source-derive reads (jsonpath) return the configured
+# value; the bare get is the target existence probe; apply captures stdin.
+args="$*"
 verb=""
 for a in "$@"; do
-  case "$a" in
-    get|apply|wait) verb="$a"; break ;;
-  esac
+  case "$a" in get|apply|wait) verb="$a"; break ;; esac
 done
 case "$verb" in
-  get)   [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
+  get)
+    case "$args" in
+      *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";   exit 0 ;;
+      *storage.size*)  echo "${MOCK_SOURCE_STORAGE:-}"; exit 0 ;;
+      *) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
+    esac ;;
   apply) cat > "${MOCK_APPLY_CAPTURE}"; exit 0 ;;
   wait)  exit 0 ;;
   *)     exit 0 ;;
@@ -39,15 +46,8 @@ esac
 MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
-  # Valid baseline inputs; individual tests override as needed.
+  # namespace is the only required input; everything else is resolved/optional.
   export DB_NAMESPACE="mariadb-bg"
-  export RESTORE_TARGET="mariadb-restored"
-  export RESTORE_IMAGE="mariadb:10.11"
-  export BACKUP_BUCKET="multi-cluster"
-  export BACKUP_PREFIX="blue-bats"
-  export BACKUP_ENDPOINT="10.0.0.1:30092"
-  export CONFIRM="true"
-  unset TARGET_TIME
 }
 
 teardown() {
@@ -66,7 +66,7 @@ run_restore() {
 
 result_field() { jq -r "$1" "${RESULT}"; }
 
-@test "restore requires confirm=true" {
+@test "restore requires confirm=true to apply" {
   run_restore DRY_RUN=false CONFIRM=false
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
@@ -74,7 +74,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore refuses to overwrite an existing target" {
-  run_restore DRY_RUN=false MOCK_TARGET_EXISTS=1
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored MOCK_TARGET_EXISTS=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"already exists"* ]]
@@ -94,15 +94,8 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
-@test "restore rejects replicas greater than one" {
-  run_restore REPLICAS=2
-  [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"replicas must be 1"* ]]
-}
-
 @test "restore dry_run renders the manifest without confirm or apply" {
-  run_restore CONFIRM=false DRY_RUN=true
+  run_restore DRY_RUN=true CONFIRM=false RESTORE_TARGET=mariadb-restored
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.dryRun')" = "true" ]
@@ -112,29 +105,49 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.data.manifest')" == *"backupContentType: Physical"* ]]
 }
 
-@test "restore of latest backup renders Physical bootstrapFrom and no PITR" {
-  run_restore DRY_RUN=false MOCK_TARGET_EXISTS=0
+@test "restore resolves internals and returns a connection endpoint" {
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.restored')" = "true" ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "false" ]
 
-  grep -q "kind: MariaDB" "${CAPTURE}"
+  # Connection + credential reference are handed back to the caller.
+  [ "$(result_field '.data.connection.host')" = "mariadb-restored-primary.mariadb-bg.svc.cluster.local" ]
+  [ "$(result_field '.data.connection.port')" = "3306" ]
+  [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
+
+  # Convention-resolved internals land in the manifest.
   grep -q "backupContentType: Physical" "${CAPTURE}"
-  grep -q "bootstrapFrom:" "${CAPTURE}"
-  # Restore provisions a standalone instance — no replica/multi-cluster wiring.
+  grep -q "prefix: mariadb/mariadb-bg" "${CAPTURE}"
+  grep -q "image: mariadb:11.4" "${CAPTURE}"
   ! grep -q "replication:" "${CAPTURE}"
   ! grep -q "multiCluster:" "${CAPTURE}"
-  # No PITR target requested → no targetRecoveryTime in the manifest.
   ! grep -q "targetRecoveryTime" "${CAPTURE}"
 }
 
 @test "restore with target_time injects point-in-time recovery" {
-  run_restore DRY_RUN=false TARGET_TIME="2026-06-14T03:21:00Z"
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    TARGET_TIME="2026-06-14T03:21:00Z" MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
-  [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "true" ]
   [ "$(result_field '.data.pointInTimeRecovery.targetRecoveryTime')" = "2026-06-14T03:21:00Z" ]
-
   grep -q 'targetRecoveryTime: "2026-06-14T03:21:00Z"' "${CAPTURE}"
+}
+
+@test "restore auto-generates a target name when omitted" {
+  run_restore DRY_RUN=true
+  [ "$status" -eq 0 ]
+  local target
+  target="$(result_field '.data.target')"
+  [[ "$target" =~ ^mariadb-bg-restore-[0-9]+$ ]]
+  [ "$(result_field '.data.connection.host')" = "${target}-primary.mariadb-bg.svc.cluster.local" ]
+}
+
+@test "restore derives image and storage from the source instance" {
+  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
+    MOCK_SOURCE_IMAGE="mariadb:10.6" MOCK_SOURCE_STORAGE="5Gi"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.image')" = "mariadb:10.6" ]
+  [[ "$(result_field '.data.manifest')" == *"size: 5Gi"* ]]
 }

@@ -39,6 +39,18 @@ aqsh:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     tokenReviewURL: ""
 
+# --- mariadb (operator-managed) ---
+mariadb:
+  enabled: false
+  namespace: mariadb-1
+  image: mariadb:10.6
+  rootPassword: mariadb-test-pass
+  storage: 1Gi
+
+# --- mariadb RBAC ---
+mariadbRbac:
+  enabled: false
+
 # --- mongodb ---
 mongodb:
   enabled: false

@@ -13,6 +13,9 @@ source /tasks/lib/response.sh
 source /tasks/lib/k8s.sh
 source /tasks/lib/minio-client.sh
 
+# Load deploy-time MariaDB config (MINIO_ENDPOINT, etc.)
+[[ -f /etc/aqsh/config/mariadb.env ]] && source /etc/aqsh/config/mariadb.env
+
 DB_NAMESPACE="${DB_NAMESPACE:?DB_NAMESPACE is required}"
 MINIO_BUCKET="${MINIO_BUCKET:-db-backups}"
 BACKUP_DATABASES="${BACKUP_DATABASES:---all-databases}"

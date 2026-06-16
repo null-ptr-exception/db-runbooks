@@ -1,60 +1,100 @@
-# Integration test for operator-driven MariaDB restart.
-#
-# This is a black-box test: it submits the restart task and then checks the
-# cluster directly — did the operator actually roll the pods, or (without the
-# operator) leave everything untouched? The structured task result envelope
-# (status / reason_code / per-pod restart evidence) is asserted exhaustively
-# with a mocked kubectl in tests/unit/mariadb/restart.bats, so it is not
-# re-checked here.
+#!/usr/bin/env bats
 
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  deploy_mariadb "mariadb-1"
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
+
+  CTX_A="kind-cluster-a"
+  CTX_B="kind-cluster-b"
+  NS="db-ops"
+  AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
+
+  kubectl --context "$CTX_B" -n "$NS" wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
+  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
+    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
+
+  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
+
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
 setup() {
-  load '../test_helper/common_setup'
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
 }
 
-teardown_file() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mariadb-1 --ignore-not-found
+kexec() {
+  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
+}
+
+http_post() {
+  local url="$1" body="$2"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X POST '${url}' \
+    -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Content-Type: application/json' \
+    -d '${body}'")
+
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+wait_for_task() {
+  local base_url="$1" task_id="$2" max_wait="${3:-540}"
+  local elapsed=0 status
+
+  while (( elapsed < max_wait )); do
+    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
+      -H 'Authorization: Bearer ${TOKEN}' \
+      '${base_url}/executions/${task_id}'")
+    export TASK_RESPONSE
+
+    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+    [[ "$status" == "completed" ]] && return 0
+    [[ "$status" == "failed" ]] && { echo "Task ${task_id} failed: ${TASK_RESPONSE}" >&2; return 1; }
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  echo "Task ${task_id} timed out after ${max_wait}s (status: ${status})" >&2
+  return 1
 }
 
 K() {
-  kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" -n mariadb-1 "$@"
+  kubectl --context "$CTX_A" -n mariadb-1 "$@"
 }
 
-# Submit a restart task and block until it finishes (202 + task reaches done).
 submit_restart() {
-  http_post "${MARIADB_AQSH_URL}/tasks/restart" "$1"
+  http_post "${AQSH_URL}/tasks/restart" "$1"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$MARIADB_AQSH_URL" "$task_id"
+  wait_for_task "$AQSH_URL" "$task_id"
 }
 
-# One line per MariaDB pod, "name=uid", sorted by name. A changed UID means the
-# pod was recreated — i.e. the operator actually rolled it.
 pod_uids() {
   K get pods -l app.kubernetes.io/name=mariadb --sort-by=.metadata.name \
     -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.uid}{"\n"}{end}'
 }
 
-# The restart annotation the task stamps on the CR, regardless of which metadata
-# field the CRD supports (podMetadata on new CRDs, inheritMetadata on old ones).
 restart_annotation() {
   K get mariadb mariadb -o json | jq -r '
     ((.spec.podMetadata.annotations // {}) + (.spec.inheritMetadata.annotations // {}))
     | to_entries[] | select(.key | test("restarted-at$")) | .value' | head -1
 }
 
+# --- Tests ---
+
 @test "dry-run touches nothing on the cluster" {
   local before_uids
   before_uids=$(pod_uids)
 
-  # dry_run defaults to true.
   submit_restart '{"namespace": "mariadb-1"}'
 
   assert_equal "$(pod_uids)" "$before_uids"
@@ -66,20 +106,11 @@ restart_annotation() {
 
   submit_restart '{"namespace": "mariadb-1", "dry_run": "false", "confirm": "true"}'
 
-  if [[ "${USE_MARIADB_OPERATOR:-true}" != "true" ]]; then
-    # Operator-driven restart is a no-op without the operator: nothing changes.
-    echo "native mode: expecting no rollout"
-    assert_equal "$(pod_uids)" "$before_uids"
-    return
-  fi
-
-  # 1. The task's only cluster mutation is the restart annotation on the CR.
   local annotation
   annotation=$(restart_annotation)
   echo "restart annotation on CR: '${annotation}'"
   assert [ -n "$annotation" ]
 
-  # 2. The operator — not the task — recreates the pods and brings them back Ready.
   K wait pod -l app.kubernetes.io/name=mariadb --for=condition=Ready --timeout=180s >/dev/null 2>&1
 
   local after_uids ready desired_replicas

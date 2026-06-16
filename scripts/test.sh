@@ -29,14 +29,18 @@ if [[ "$DB_MODE" == "dual" ]]; then
     "${ROOT_DIR}/tests/mariadb/replication.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
-    "${ROOT_DIR}/tests/mariadb/create_account.bats"
+    "${ROOT_DIR}/tests/mariadb/create_account.bats" \
+    "${ROOT_DIR}/tests/mariadb/migration_preflight.bats" \
+    "${ROOT_DIR}/tests/mariadb/check_connection.bats"
 else
   "$BATS_BIN" --recursive \
     "${ROOT_DIR}/tests/common" \
     "${ROOT_DIR}/tests/mariadb/restart.bats" \
     "${ROOT_DIR}/tests/mariadb/status.bats" \
     "${ROOT_DIR}/tests/mariadb/sanity_check.bats" \
-    "${ROOT_DIR}/tests/mariadb/create_account.bats"
+    "${ROOT_DIR}/tests/mariadb/create_account.bats" \
+    "${ROOT_DIR}/tests/mariadb/migration_preflight.bats" \
+    "${ROOT_DIR}/tests/mariadb/check_connection.bats"
 fi
 
 if [[ "${ENABLE_MINIO:-false}" == "true" ]]; then

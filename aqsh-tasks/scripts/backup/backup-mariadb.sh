@@ -26,13 +26,13 @@ log_info "Using pod: ${POD_NAME}"
 # Check if pod exists and is ready
 if ! kubectl -n "${DB_NAMESPACE}" get pod "${POD_NAME}" &>/dev/null; then
   log_error "Pod ${POD_NAME} not found in namespace ${DB_NAMESPACE}"
-  response_err "Pod not found" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Pod ${POD_NAME} not found in namespace ${DB_NAMESPACE}" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
 if ! kubectl -n "${DB_NAMESPACE}" wait pod "${POD_NAME}" --for=condition=Ready --timeout=30s; then
   log_error "Pod ${POD_NAME} is not ready"
-  response_err "Pod not ready" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Pod ${POD_NAME} is not ready" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -65,7 +65,7 @@ if kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- \
   log_info "Database dump completed"
 else
   log_error "Database dump failed"
-  response_err "Dump failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Database dump failed for ${DB_NAMESPACE}" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -78,7 +78,7 @@ log_info "Backup size: ${BACKUP_SIZE_MB} MB"
 if ! setup_minio_client; then
   log_error "Failed to setup MinIO client"
   rm -f "${LOCAL_PATH}"
-  response_err "MinIO setup failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Failed to configure MinIO client" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -94,7 +94,7 @@ if upload_to_minio "${LOCAL_PATH}" "${REMOTE_PATH}"; then
 else
   log_error "Failed to upload backup to MinIO"
   rm -f "${LOCAL_PATH}"
-  response_err "Upload failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Failed to upload backup to MinIO" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -103,7 +103,7 @@ rm -f "${LOCAL_PATH}"
 log_info "Local backup file removed"
 
 # Return success result
-response_ok "$(jq -n \
+response_ok "backup" "Backup completed for ${DB_NAMESPACE}" "$(jq -n \
   --arg namespace "$DB_NAMESPACE" \
   --arg bucket "$MINIO_BUCKET" \
   --arg path "$REMOTE_PATH" \
@@ -114,8 +114,7 @@ response_ok "$(jq -n \
     bucket: $bucket,
     path: $path,
     size_bytes: ($size | tonumber),
-    timestamp: $timestamp,
-    status: "completed"
+    timestamp: $timestamp
   }')" > "$AQSH_RESULT_FILE"
 
 log_info "Backup task completed successfully"

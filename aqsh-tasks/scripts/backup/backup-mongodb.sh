@@ -23,13 +23,13 @@ log_info "Using pod: ${POD_NAME}"
 # Check if pod exists and is ready
 if ! kubectl -n "${DB_NAMESPACE}" get pod "${POD_NAME}" &>/dev/null; then
   log_error "Pod ${POD_NAME} not found in namespace ${DB_NAMESPACE}"
-  response_err "Pod not found" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Pod ${POD_NAME} not found in namespace ${DB_NAMESPACE}" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
 if ! kubectl -n "${DB_NAMESPACE}" wait pod "${POD_NAME}" --for=condition=Ready --timeout=30s; then
   log_error "Pod ${POD_NAME} is not ready"
-  response_err "Pod not ready" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Pod ${POD_NAME} is not ready" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -47,7 +47,7 @@ MONGO_PASS=$(kubectl -n "${DB_NAMESPACE}" get secret mongodb-credentials -o json
 
 if [[ -z "$MONGO_USER" ]] || [[ -z "$MONGO_PASS" ]]; then
   log_error "Could not retrieve MongoDB credentials from secret"
-  response_err "Credentials not found" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Could not retrieve MongoDB credentials from secret" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -63,7 +63,7 @@ if kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- \
   log_info "mongodump completed"
 else
   log_error "mongodump failed"
-  response_err "mongodump failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "mongodump failed for ${DB_NAMESPACE}" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -75,7 +75,7 @@ if kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- \
 else
   log_error "Failed to create archive"
   kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- rm -rf "/tmp/${BACKUP_NAME}"
-  response_err "Archive creation failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Archive creation failed" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -87,7 +87,7 @@ else
   log_error "Failed to copy archive from pod"
   kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- rm -f "/tmp/${BACKUP_ARCHIVE}"
   kubectl -n "${DB_NAMESPACE}" exec "${POD_NAME}" -- rm -rf "/tmp/${BACKUP_NAME}"
-  response_err "Copy failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Failed to copy backup from pod" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -104,7 +104,7 @@ log_info "Backup size: ${BACKUP_SIZE_MB} MB"
 if ! setup_minio_client; then
   log_error "Failed to setup MinIO client"
   rm -f "${LOCAL_PATH}"
-  response_err "MinIO setup failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Failed to configure MinIO client" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -120,7 +120,7 @@ if upload_to_minio "${LOCAL_PATH}" "${REMOTE_PATH}"; then
 else
   log_error "Failed to upload backup to MinIO"
   rm -f "${LOCAL_PATH}"
-  response_err "Upload failed" > "$AQSH_RESULT_FILE"
+  response_err "backup" "Failed to upload backup to MinIO" > "$AQSH_RESULT_FILE"
   exit 1
 fi
 
@@ -129,7 +129,7 @@ rm -f "${LOCAL_PATH}"
 log_info "Local backup file removed"
 
 # Return success result
-response_ok "$(jq -n \
+response_ok "backup" "Backup completed for ${DB_NAMESPACE}" "$(jq -n \
   --arg namespace "$DB_NAMESPACE" \
   --arg bucket "$MINIO_BUCKET" \
   --arg path "$REMOTE_PATH" \
@@ -140,8 +140,7 @@ response_ok "$(jq -n \
     bucket: $bucket,
     path: $path,
     size_bytes: ($size | tonumber),
-    timestamp: $timestamp,
-    status: "completed"
+    timestamp: $timestamp
   }')" > "$AQSH_RESULT_FILE"
 
 log_info "Backup task completed successfully"

@@ -1,14 +1,6 @@
 # Default values — installs nothing. Each suite's helmfile.yaml enables
 # the components it needs via inline values.
 
-# --- nginx (infra suite) ---
-nginx:
-  enabled: false
-
-# --- curl pod (infra suite, test-client alternative) ---
-curl:
-  enabled: false
-
 # --- kube-federated-auth ---
 federatedAuth:
   enabled: false

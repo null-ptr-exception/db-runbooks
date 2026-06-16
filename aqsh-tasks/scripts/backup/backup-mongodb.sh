@@ -12,6 +12,9 @@ source /tasks/lib/response.sh
 source /tasks/lib/k8s.sh
 source /tasks/lib/minio-client.sh
 
+# Load deploy-time MongoDB config (MINIO_ENDPOINT, etc.)
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+
 DB_NAMESPACE="${DB_NAMESPACE:?DB_NAMESPACE is required}"
 MINIO_BUCKET="${MINIO_BUCKET:-db-backups}"
 

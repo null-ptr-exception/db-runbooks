@@ -8,7 +8,6 @@ setup_file() {
   CTX_B="kind-cluster-b"
   NS="mongo-core"
   AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
-  MINIO_ENDPOINT="http://minio.kind-b.test:30080"
 
   kubectl --context "$CTX_B" -n "$NS" wait pod \
     -l app=test-client --for=condition=Ready --timeout=120s
@@ -21,7 +20,7 @@ setup_file() {
   # Wait for MinIO to be ready on cluster-b
   kubectl --context "$CTX_B" -n minio rollout status deployment/minio --timeout=120s
 
-  export CTX_A CTX_B NS AQSH_URL MINIO_ENDPOINT TEST_POD TOKEN
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
 setup() {
@@ -88,7 +87,7 @@ wait_for_task() {
 
 @test "backup completes successfully" {
   http_post "${AQSH_URL}/tasks/backup" \
-    "{\"namespace\":\"mongo-1\",\"minio_endpoint\":\"${MINIO_ENDPOINT}\"}"
+    '{"namespace":"mongo-1"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -112,7 +111,7 @@ wait_for_task() {
 
 @test "backup with custom bucket works" {
   http_post "${AQSH_URL}/tasks/backup" \
-    "{\"namespace\":\"mongo-1\",\"minio_endpoint\":\"${MINIO_ENDPOINT}\",\"minio_bucket\":\"test-backups\"}"
+    '{"namespace":"mongo-1","minio_bucket":"test-backups"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -129,7 +128,7 @@ wait_for_task() {
 
 @test "backup returns size and timestamp" {
   http_post "${AQSH_URL}/tasks/backup" \
-    "{\"namespace\":\"mongo-1\",\"minio_endpoint\":\"${MINIO_ENDPOINT}\"}"
+    '{"namespace":"mongo-1"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id

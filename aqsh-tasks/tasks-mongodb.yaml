@@ -73,11 +73,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9][a-z0-9-]*$'
-      - name: minio_endpoint
-        env: MINIO_ENDPOINT
-        required: false
-        type: string
-        default: "http://minio.minio.svc.cluster.local:9000"
       - name: minio_bucket
         env: MINIO_BUCKET
         required: false

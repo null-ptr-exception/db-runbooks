@@ -659,6 +659,92 @@ _d() { printf '%s' "$1" | sed 's/\\"/"/g'; }
   [ "$warn" = "true" ]
 }
 
+# ── Standard mongo:N paths (non-Bitnami) ─────────────────────────────────────
+#
+# The recovery library defaults to Bitnami paths (/bitnami/mongodb/data/db).
+# These tests verify the gates work correctly when the env-var overrides are
+# set to the standard mongo:N paths (/data/db) used by this repo's manifests.
+
+@test "G5 passes with standard /data/db data path override" {
+  _RECOVERY_DATA_PATH="/data/db"
+  export MOCK_DATA_MB=20480
+  out=$(_recovery_gate_g5 "mongodb" "mongodb-2")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  data_mb=$(printf '%s' "$out" | grep -o '"data_mb":[0-9]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$data_mb" = "20480" ]
+}
+
+@test "G5 blocks DATA_TOO_LARGE with /data/db path when size exceeds 100GB" {
+  _RECOVERY_DATA_PATH="/data/db"
+  export MOCK_DATA_MB=110000
+  export FORCE_WIPE=false
+  out=$(_recovery_gate_g5 "mongodb" "mongodb-2") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "DATA_TOO_LARGE" ]
+}
+
+@test "G5 degrades with warn when du returns 0 (wrong path silently empty)" {
+  _RECOVERY_DATA_PATH="/data/db"
+  export MOCK_DATA_MB=0
+  out=$(_recovery_gate_g5 "mongodb" "mongodb-2")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  data_mb=$(printf '%s' "$out" | grep -o '"data_mb":[0-9]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+  [ "$data_mb" = "0" ]
+}
+
+@test "G6 passes with standard /data/db mount path override" {
+  _RECOVERY_MOUNT_PATH="/data/db"
+  export MOCK_AVAIL_MB=5000
+  out=$(_recovery_gate_g6 "mongodb" "mongodb-2" "1024")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+}
+
+@test "G6 blocks INSUFFICIENT_PVC_SPACE with /data/db mount path override" {
+  _RECOVERY_MOUNT_PATH="/data/db"
+  export MOCK_AVAIL_MB=500   # 500 < 1024*1.2=1229
+  out=$(_recovery_gate_g6 "mongodb" "mongodb-2" "1024") || true
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  code=$(printf '%s' "$out" | grep -o '"code":"[^"]*"' | cut -d'"' -f4)
+  [ "$pass" = "false" ]
+  [ "$code" = "INSUFFICIENT_PVC_SPACE" ]
+}
+
+@test "G5 warns with data_mb=0 when Bitnami patch applied but task uses /data/db (path mismatch)" {
+  # Scenario: operator applied the Bitnami One-Time Setup patch (init container
+  # wipes /bitnami/mongodb/data/db) but calls recovery with data_path=/data/db.
+  # du /data/db hits an empty or absent directory → returns 0 → G5 silently
+  # degrades to warn instead of blocking.  This documents the failure mode so
+  # callers know to match data_path to the init container wipe path.
+  _RECOVERY_DATA_PATH="/data/db"
+  export MOCK_DATA_MB=0
+  out=$(_recovery_gate_g5 "mongodb" "mongodb-2")
+  pass=$(printf '%s' "$out" | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  warn=$(printf '%s' "$out" | grep -o '"warn":[a-z]*' | cut -d':' -f2)
+  data_mb=$(printf '%s' "$out" | grep -o '"data_mb":[0-9]*' | cut -d':' -f2)
+  [ "$pass" = "true" ]
+  [ "$warn" = "true" ]
+  [ "$data_mb" = "0" ]
+}
+
+@test "recovery_run_gates passes in report mode with non-Bitnami path overrides" {
+  _RECOVERY_DATA_PATH="/data/db"
+  _RECOVERY_MOUNT_PATH="/data/db"
+  result=$(recovery_run_gates "mongodb" "mongodb-2" "mongodb-recovery-config" "user" "pass" "report")
+  fail_count=$(printf '%s' "$(_d "$result")" | grep -o '"fail":[0-9]*' | head -1 | cut -d':' -f2)
+  g1_pass=$(printf '%s' "$(_d "$result")" | grep -o '"gate":"G1"[^}]*"pass":[a-z]*' | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  g2_pass=$(printf '%s' "$(_d "$result")" | grep -o '"gate":"G2"[^}]*"pass":[a-z]*' | grep -o '"pass":[a-z]*' | cut -d':' -f2)
+  [ "${fail_count:-1}" = "0" ]
+  [ "$g1_pass" = "true" ]
+  [ "$g2_pass" = "true" ]
+}
+
 # ── G8 ────────────────────────────────────────────────────────────────────────
 
 @test "G8 passes with no warn when no members are in RECOVERING state" {

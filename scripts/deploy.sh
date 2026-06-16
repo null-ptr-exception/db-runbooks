@@ -116,6 +116,105 @@ EOF
   for ns in "${namespaces[@]}"; do
     kubectl --context "$ctx" -n "$ns" rollout status statefulset/mongodb --timeout=180s
   done
+
+  echo "Initialising MongoDB replica sets in ${ctx}..."
+  for ns in "${namespaces[@]}"; do
+    local replicas
+    replicas=$(kubectl --context "$ctx" -n "$ns" get statefulset mongodb \
+      -o jsonpath='{.spec.replicas}')
+
+    local rs_init_js
+    rs_init_js=$(cat <<RSJS
+var cfg={_id:'rs0',members:[]};
+for(var i=0;i<${replicas};i++){
+  cfg.members.push({_id:i,host:'mongodb-'+i+'.mongodb.${ns}.svc.cluster.local:27017',priority:(i===0?2:1)});
+}
+try{
+  var r=rs.initiate(cfg);
+  if(r.ok||r.code===23){print('RS_OK');}
+  else{print('RS_ERR:'+JSON.stringify(r));}
+}catch(e){
+  if(e.message&&e.message.indexOf('already initialized')>=0){print('RS_ALREADY');}
+  else{throw e;}
+}
+RSJS
+)
+    kubectl --context "$ctx" -n "$ns" exec mongodb-0 -- \
+      mongosh --quiet --norc --eval "$rs_init_js" || true
+
+    # Wait for primary election (up to 120s)
+    echo "  [$ns] Waiting for RS primary..."
+    local elapsed=0
+    until kubectl --context "$ctx" -n "$ns" exec mongodb-0 -- \
+        mongosh --quiet --norc --eval \
+          "try{var h=db.hello();print(h.isWritablePrimary?'PRIMARY':'WAITING');}catch(e){print('WAITING');}" \
+        2>/dev/null | grep -q PRIMARY; do
+      if [[ "$elapsed" -ge 120 ]]; then
+        echo "  [$ns] WARNING: RS primary not elected after 120s" >&2
+        break
+      fi
+      sleep 5
+      elapsed=$((elapsed + 5))
+    done
+
+    # Create root user from secret (idempotent — ignore "already exists")
+    local root_user root_pass
+    root_user=$(kubectl --context "$ctx" -n "$ns" get secret mongodb-credentials \
+      -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
+    root_pass=$(kubectl --context "$ctx" -n "$ns" get secret mongodb-credentials \
+      -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
+
+    kubectl --context "$ctx" -n "$ns" exec mongodb-0 -- \
+      mongosh --quiet --norc --eval "
+try {
+  db.getSiblingDB('admin').createUser({
+    user: '${root_user}',
+    pwd: '${root_pass}',
+    roles: [{role:'root',db:'admin'}]
+  });
+  print('USER_CREATED');
+} catch(e) {
+  if(e.code===51003||e.message.indexOf('already exists')>=0){print('USER_EXISTS');}
+  else{throw e;}
+}" || true
+  done
+
+  echo "Applying MongoDB recovery prerequisites in ${ctx}..."
+  for ns in "${namespaces[@]}"; do
+    kubectl --context "$ctx" -n "$ns" apply \
+      -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/recovery-configmap.yaml"
+
+    local img replicas
+    img=$(kubectl --context "$ctx" -n "$ns" get statefulset mongodb \
+      -o jsonpath='{.spec.template.spec.containers[0].image}')
+    replicas=$(kubectl --context "$ctx" -n "$ns" get statefulset mongodb \
+      -o jsonpath='{.spec.replicas}')
+    kubectl --context "$ctx" -n "$ns" \
+      patch statefulset mongodb --type=strategic -p "$(cat <<RECOVERY_PATCH
+{
+  "spec": {
+    "updateStrategy": {"rollingUpdate": {"partition": ${replicas}}},
+    "template": {
+      "spec": {
+        "initContainers": [{
+          "name": "data-recovery",
+          "image": "${img}",
+          "command": ["/bin/bash", "-c"],
+          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
+          "volumeMounts": [
+            {"name": "data", "mountPath": "/data/db"},
+            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
+          ],
+          "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
+        }],
+        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
+      }
+    }
+  }
+}
+RECOVERY_PATCH
+)"
+  done
 }
 
 if [[ "$DB_MODE" == "dual" ]]; then

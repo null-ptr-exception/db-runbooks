@@ -15,6 +15,7 @@ set -euo pipefail
 #   DB_NAMESPACE            — target namespace
 #   MONGO_STS_NAME          — StatefulSet name (default: mongodb)
 #   MONGO_CRED_SECRET       — Secret name (default: mongodb-credentials)
+#   MONGO_CRED_USER         — Username value (optional; if set, MONGO_CRED_USER_KEY is ignored)
 #   MONGO_CRED_USER_KEY     — Secret key for username (default: MONGO_ROOT_USER)
 #   MONGO_CRED_PASS_KEY     — Secret key for password (default: MONGO_ROOT_PASS)
 #   RECOVERY_LEVEL          — diagnose | unfreeze | reconfig | force-primary
@@ -31,6 +32,7 @@ source "${LIB_DIR}/mongodb-recovery.sh"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 _STS="${MONGO_STS_NAME:-mongodb}"
 _SECRET="${MONGO_CRED_SECRET:-mongodb-credentials}"
+_DIRECT_USER="${MONGO_CRED_USER:-}"
 _USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
 _PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
 _LEVEL="${RECOVERY_LEVEL:?RECOVERY_LEVEL is required (diagnose|unfreeze|reconfig|force-primary)}"
@@ -38,7 +40,7 @@ _FORCE_POD="${RECOVERY_FORCE_POD:-}"
 
 log_info "recovery-fix-no-primary" "Level=${_LEVEL} STS=${_STS} namespace=${DB_NAMESPACE}"
 
-_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}"
+_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
 
 case "$_LEVEL" in
   diagnose)

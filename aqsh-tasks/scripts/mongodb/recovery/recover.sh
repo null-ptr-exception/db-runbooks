@@ -18,6 +18,7 @@ set -euo pipefail
 #   RECOVERY_TARGET_POD   — pod to recover, e.g. "mongodb-2"
 #   RECOVERY_CONFIGMAP    — recovery ConfigMap name (default: mongodb-recovery-config)
 #   MONGO_CRED_SECRET     — Secret name (default: mongodb-credentials)
+#   MONGO_CRED_USER       — Username value (optional; if set, MONGO_CRED_USER_KEY is ignored)
 #   MONGO_CRED_USER_KEY   — Secret key for username (default: MONGO_ROOT_USER)
 #   MONGO_CRED_PASS_KEY   — Secret key for password (default: MONGO_ROOT_PASS)
 #   FORCE_WIPE            — "true" to bypass 100GB gate (default: false)
@@ -35,6 +36,7 @@ export K8S_NAMESPACE="${DB_NAMESPACE}"
 _STS="${MONGO_STS_NAME:-mongodb}"
 _CM="${RECOVERY_CONFIGMAP:-mongodb-recovery-config}"
 _SECRET="${MONGO_CRED_SECRET:-mongodb-credentials}"
+_DIRECT_USER="${MONGO_CRED_USER:-}"
 _USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
 _PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
 _TARGET="${RECOVERY_TARGET_POD:?RECOVERY_TARGET_POD is required (e.g. mongodb-2)}"
@@ -43,7 +45,7 @@ export FORCE_WIPE="${FORCE_WIPE:-false}"
 
 log_info "recovery-recover" "Orchestrated recovery for pod ${_TARGET} in namespace ${DB_NAMESPACE}"
 
-_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}"
+_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
 
 # Determine replica count for partition restore
 _REPLICAS=$(kubectl -n "${DB_NAMESPACE}" get statefulset "${_STS}" \

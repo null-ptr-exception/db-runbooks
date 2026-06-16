@@ -35,19 +35,30 @@ readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 
 # ---------------------------------------------------------------------------
-# _mongo_load_credentials <namespace> <secret> <user_key> <pass_key>
-# Read MongoDB credentials from a Kubernetes Secret and export them as
-# _MONGO_USER / _MONGO_PASS in the calling script's scope.
+# _mongo_load_credentials <namespace> <secret> <user_key> <pass_key> [direct_user]
+# Read MongoDB credentials and export them as _MONGO_USER / _MONGO_PASS.
+#
+# direct_user (optional): if non-empty, use it as the username directly and
+# skip the user_key lookup — only the password is read from the secret.
+# This handles secrets that store only the password (no username key).
+#
 # Writes a JSON error to $AQSH_RESULT_FILE and calls exit 1 on any failure.
 # ---------------------------------------------------------------------------
 _mongo_load_credentials() {
   local namespace="$1" secret="$2" user_key="$3" pass_key="$4"
-  _MONGO_USER=$(kubectl -n "$namespace" get secret "$secret" \
-    -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
-    jq -n --arg ns "$namespace" --arg s "$secret" \
-      '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
-      > "$AQSH_RESULT_FILE"; exit 1
-  }
+  local direct_user="${5:-}"
+
+  if [[ -n "$direct_user" ]]; then
+    _MONGO_USER="$direct_user"
+  else
+    _MONGO_USER=$(kubectl -n "$namespace" get secret "$secret" \
+      -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
+      jq -n --arg ns "$namespace" --arg s "$secret" \
+        '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
+        > "$AQSH_RESULT_FILE"; exit 1
+    }
+  fi
+
   _MONGO_PASS=$(kubectl -n "$namespace" get secret "$secret" \
     -o jsonpath="{.data.${pass_key}}" 2>/dev/null | base64 -d) || {
     jq -n --arg ns "$namespace" --arg s "$secret" \
@@ -424,7 +435,7 @@ _recovery_gate_g7() {
   fi
   local is_primary
   is_primary=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
-    "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
+    "try{var h=db.hello();var isPrimary=h.setName?Boolean(h.isWritablePrimary||h.ismaster):false;print(isPrimary?'1':'0');}catch(e){print('0');}" \
     2>/dev/null | tail -1 | tr -d '\r') || is_primary="0"
   if [[ "$is_primary" == "1" ]]; then
     printf '{"gate":"G7","pass":false,"code":"TARGET_IS_PRIMARY","message":"Target %s is currently PRIMARY — wiping will cause an election and brief write unavailability","suggestion":"Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}' \

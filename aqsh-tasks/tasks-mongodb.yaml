@@ -571,6 +571,11 @@ tasks:
         required: false
         type: string
         default: mongodb-credentials
+      - name: credential_user
+        env: MONGO_CRED_USER
+        required: false
+        type: string
+        default: ""
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
@@ -631,6 +636,11 @@ tasks:
         required: false
         type: string
         default: mongodb-credentials
+      - name: credential_user
+        env: MONGO_CRED_USER
+        required: false
+        type: string
+        default: ""
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
@@ -726,6 +736,11 @@ tasks:
         required: false
         type: string
         default: mongodb-credentials
+      - name: credential_user
+        env: MONGO_CRED_USER
+        required: false
+        type: string
+        default: ""
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
@@ -780,6 +795,11 @@ tasks:
         required: false
         type: string
         default: mongodb-credentials
+      - name: credential_user
+        env: MONGO_CRED_USER
+        required: false
+        type: string
+        default: ""
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false

@@ -260,6 +260,70 @@ _init_mongodb_rs() {
 }
 
 # ---------------------------------------------------------------------------
+# _find_primary_pod <namespace> [context]
+#
+# Returns the name of the pod that is currently the RS writable primary.
+# Tries each pod (mongodb-0 first) using db.hello().isWritablePrimary.
+# Prints to stdout; returns 0 on success, 1 if no primary found within 60s.
+# ---------------------------------------------------------------------------
+_find_primary_pod() {
+  local namespace="$1"
+  local ctx="${2:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local elapsed=0 result
+
+  while (( elapsed < 60 )); do
+    result=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- \
+      mongosh --quiet --norc "mongodb://localhost:27017/admin" \
+      --eval "
+        try {
+          var s = rs.status();
+          var p = s.members && s.members.find(function(m){ return m.state===1; });
+          if (p) { print(p.name.split('.')[0]); quit(0); }
+        } catch(e) {}
+        quit(1);" 2>/dev/null | grep -E '^mongodb-[0-9]+$' | tail -1 || true)
+    if [[ -n "$result" ]]; then
+      echo "$result"
+      return 0
+    fi
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  echo "Could not find primary pod in ${namespace}" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# _wait_for_rs_healthy <namespace> <pod_name> [context] [max_wait_seconds]
+#
+# Waits until <pod_name> appears as a healthy (health=1) member in rs.status()
+# as observed from mongodb-0.
+# ---------------------------------------------------------------------------
+_wait_for_rs_healthy() {
+  local namespace="$1"
+  local pod_name="$2"
+  local ctx="${3:-${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}}"
+  local max_wait="${4:-120}"
+  local elapsed=0
+
+  while (( elapsed < max_wait )); do
+    local healthy
+    healthy=$(kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- \
+      mongosh --quiet --norc "mongodb://localhost:27017/admin" \
+      --eval "
+        try {
+          var s = rs.status();
+          var m = s.members && s.members.find(function(m){
+            return m.name.indexOf('${pod_name}.') === 0 && m.health === 1;
+          });
+          print(m ? '1' : '0');
+        } catch(e) { print('0'); }" 2>/dev/null | tail -1 | tr -d '\r' || echo "0")
+    [[ "$healthy" == "1" ]] && return 0
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  echo "Pod ${pod_name} not healthy in RS for ${namespace} after ${max_wait}s" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # deploy_mariadb <namespace>
 #
 # Creates namespace, RBAC RoleBinding, and MariaDB CR.

@@ -12,14 +12,15 @@ permissions are needed.
 
 1. [Architecture Overview](#architecture-overview)
 2. [How It Works](#how-it-works)
-3. [One-Time Setup](#one-time-setup)
-4. [API Reference](#api-reference)
-5. [Pre-Flight Gates G1–G8](#pre-flight-gates-g1g8)
-6. [Scenarios and Runbook](#scenarios-and-runbook)
-7. [Exception Scenarios](#exception-scenarios)
-8. [RBAC Requirements](#rbac-requirements)
-9. [API Examples](#api-examples)
-10. [Test Coverage Notes](#test-coverage-notes)
+3. [Prerequisites](#prerequisites)
+4. [One-Time Setup](#one-time-setup)
+5. [API Reference](#api-reference)
+6. [Pre-Flight Gates G1–G8](#pre-flight-gates-g1g8)
+7. [Scenarios and Runbook](#scenarios-and-runbook)
+8. [Exception Scenarios](#exception-scenarios)
+9. [RBAC Requirements](#rbac-requirements)
+10. [API Examples](#api-examples)
+11. [Test Coverage Notes](#test-coverage-notes)
 
 ---
 
@@ -57,7 +58,7 @@ permissions are needed.
 
 | Constraint | Solution |
 |---|---|
-| No `kubectl delete pvc` | Init container wipes `/bitnami/mongodb/data/db` from inside the pod |
+| No `kubectl delete pvc` | Init container wipes the data directory (`/data/db` for standard `mongo:N`) from inside the pod |
 | Pod in CrashLoopBackOff | Init containers run before the main container regardless of crash state |
 | No `kubectl delete pod` | StatefulSet `partition` + annotation bump triggers a targeted rolling restart |
 | No node cordon needed | All operations are K8s control-plane only (ConfigMap + StatefulSet patches) |
@@ -121,30 +122,92 @@ state** — before the initial sync finishes.
 
 ---
 
+## Prerequisites
+
+The recovery system **requires MongoDB to run in Replica Set mode with at least
+2 members**.  Standalone deployments are not supported:
+
+| Gate | Standalone behaviour | RS behaviour |
+|---|---|---|
+| G3 `NO_HEALTHY_SOURCE` | Always fails — the target IS the only pod, so no sync source exists | Passes when at least one other member is healthy |
+| G7 `TARGET_IS_PRIMARY` | Always blocks — `db.hello().ismaster` is `true` on standalone; `rs.stepDown()` is not valid | Correctly checks RS role; standalone sets `h.setName=undefined` so the gate skips |
+
+This repo's manifests (`k8s/cluster-dbs/mongodb/mongo-*.yaml`) deploy 3-replica
+RS clusters (`--replSet rs0`).  `scripts/deploy.sh` initialises the replica set
+and creates the root user automatically.
+
+**Minimum conditions before calling any recovery task:**
+
+1. StatefulSet has `replicas ≥ 2` and pods are running with `--replSet <name>`
+2. Replica set is initiated (`rs.initiate()` has been called and a primary has been elected)
+3. `data-recovery` init container is present in the STS spec (G1)
+4. `mongodb-recovery-config` ConfigMap exists in the namespace (G2)
+
+---
+
 ## One-Time Setup
 
-Apply two Kubernetes resources to the target namespace:
+> **This repo's `k8s/cluster-dbs/mongodb/` manifests use standard `mongo:N`
+> images.**  `scripts/deploy.sh` automatically applies the ConfigMap and STS
+> patch below for every namespace it deploys.  Run the commands manually only
+> if you are setting up a namespace outside the normal deploy flow.
 
-```yaml
-# 01-recovery-configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-recovery-config
-  namespace: <YOUR_NAMESPACE>
-data:
-  wipe-targets: ""
-  recovery-version: "0"
-```
+Apply the recovery ConfigMap (satisfies G2) and patch the StatefulSet to add
+the `data-recovery` init container (satisfies G1).  Choose the block that
+matches your MongoDB image type.
+
+### Standard `mongo:N` image (this repo's default)
 
 ```bash
-# Patch the StatefulSet to add the init container and set partition=3 (locked)
 CONTEXT=kind-cluster-dbs          # always target an explicit cluster
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
 IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
+REPLICAS=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.replicas}')
 
-kubectl --context $CONTEXT -n $NAMESPACE apply -f 01-recovery-configmap.yaml
+kubectl --context $CONTEXT -n $NAMESPACE apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml
+
+kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
+{
+  "spec": {
+    "updateStrategy": {"rollingUpdate": {"partition": ${REPLICAS}}},
+    "template": {
+      "spec": {
+        "initContainers": [{
+          "name": "data-recovery",
+          "image": "${IMAGE}",
+          "command": ["/bin/bash", "-c"],
+          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
+          "volumeMounts": [
+            {"name": "data", "mountPath": "/data/db"},
+            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
+          ],
+          "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
+        }],
+        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
+      }
+    }
+  }
+}
+EOF
+)"
+```
+
+Key differences from the Bitnami chart: volume name is `data` (not `datadir`),
+mount path is `/data/db`, wipe path is `find /data/db ...`, and
+`runAsUser: 999`.  Pass `"data_path":"/data/db","mount_path":"/data/db"` on
+**every** `pre-check` / `wipe` / `recover` call (the task defaults are
+Bitnami paths).
+
+### Bitnami helm chart
+
+```bash
+CONTEXT=kind-cluster-dbs
+NAMESPACE=<YOUR_NAMESPACE>
+STS=mongodb
+IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+kubectl --context $CONTEXT -n $NAMESPACE apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml
 
 kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
 {
@@ -172,20 +235,11 @@ EOF
 )"
 ```
 
-> **Note**: The StatefulSet patch triggers a rolling update.  With `partition=3`
-> (for a 3-replica cluster) no pods restart automatically — the partition is
-> the lock.  The running pods therefore do **not** have the init container yet;
-> it materialises on the target pod the first time a wipe lowers the partition.
-
-> **Non-Bitnami (standard `mongo:N` image) adaptation** — three things change
-> in the patch above (see `tests/mongodb/recovery.bats` setup for a working
-> example): the wipe path becomes `/data/db` and the init container must mount
-> the data volume at that **same** path the main container uses (`/data/db`) —
-> mounting it elsewhere makes `find /data/db` hit an empty subdir and silently
-> skip the wipe; the data volume is usually named `data` instead of `datadir`;
-> and the container user is `999` instead of `1001`.  Then pass
-> `"data_path":"/data/db","mount_path":"/data/db"` on every pre-check / wipe /
-> recover call.
+> **Note**: The StatefulSet patch triggers a rolling update.  With `partition`
+> set to the replica count (e.g. `3`) no pods restart automatically — the
+> partition is the lock.  The running pods therefore do **not** have the init
+> container yet; it materialises on the target pod the first time a wipe lowers
+> the partition.
 
 ---
 
@@ -245,12 +299,24 @@ response tells you to monitor it with `recovery/status`.
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
 | `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
 | `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
+| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
 | `wait_timeout` | `RECOVERY_WAIT_TIMEOUT` | no | `"300"` (seconds) |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
+| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
+| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
+
+> ¹ **Standard `mongo:N` image users must override both** to `/data/db` on
+> every call, e.g. `"data_path":"/data/db","mount_path":"/data/db"`.
+> Mismatched paths cause G5/G6 to silently degrade ("size unknown") and the
+> init container to wipe the wrong directory.
+
+> ² **`credential_user`**: if your secret stores only the password (no username
+> key), pass the username directly here, e.g. `"credential_user":"root"`.
+> When set, `credential_user_key` is ignored and only the password is read
+> from the secret.  If omitted, the username is read from the secret using
+> `credential_user_key` (default behaviour).
 
 > `wait_timeout` only covers the restart-and-reach-Running poll. Keep it well
 > under the aqsh task timeout (12m for `recovery/recover`) so the gates and
@@ -345,11 +411,16 @@ full report without making any changes.
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
 | `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
 | `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
+| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
+| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
+| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
+
+> ¹ Standard `mongo:N` image users must pass `"data_path":"/data/db","mount_path":"/data/db"`.
+
+> ² `credential_user`: pass the username value directly if the secret only stores the password. Omit to read from the secret via `credential_user_key`.
 
 > The credentials in `credential_secret` must be a **real MongoDB user**
 > (root role) present in `admin.system.users` — the gates authenticate via
@@ -490,6 +561,7 @@ with per-pod `results`).
 | `namespace` | `DB_NAMESPACE` | yes | — |
 | `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
 | `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
+| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `level` | `RECOVERY_LEVEL` | **yes** | — |
@@ -545,8 +617,8 @@ first blocking failure).
 
 | Gate | Check | Failure behavior | Suggestion |
 |---|---|---|---|
-| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Apply `02-sts-patch.yaml` |
-| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Apply `01-recovery-configmap.yaml` |
+| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Run `scripts/deploy.sh`, or apply the One-Time Setup patch manually |
+| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Run `scripts/deploy.sh`, or `kubectl apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml` |
 | **G3** | ≥1 healthy sync source (health=1) and a PRIMARY is elected | BLOCK | Run `recovery/fix-no-primary level=diagnose` |
 | **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
 | **G5** | Data size < 100 GB (overridable with `force_wipe=true`) | BLOCK | Use VolumeSnapshot or mongodump for large datasets |
@@ -638,8 +710,9 @@ kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --ev
 
 ### Scenario B: Corrupted Primary (pod-0 or whichever pod holds PRIMARY)
 
-Pod-0 is the Bitnami default primary, but after `recovery_fix_reconfig` resets
-member priorities all pods become equal candidates.  G7 checks `db.hello()`
+Pod-0 starts with `priority=2` (set by `deploy.sh`) so it becomes primary by
+default, but after `recovery_fix_reconfig` resets member priorities all pods
+become equal candidates.  G7 checks `db.hello()`
 on the target pod regardless of its ordinal and blocks if it is currently
 PRIMARY.  Wait for automatic election after a crash, or trigger stepDown.
 

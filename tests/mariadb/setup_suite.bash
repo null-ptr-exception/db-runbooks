@@ -133,11 +133,19 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  # Delete mariadb operator webhooks first — they block CR patching/deletion
-  # after the operator pod is gone.
+  # 1. Delete mariadb operator webhooks — they block CR operations after
+  #    the operator pod is gone.
+  # 2. Strip finalizers from mariadb CRs — the operator can't process them
+  #    once the namespace is deleted.
+  # 3. Delete namespaces.
   for ctx in "$ctx_a" "$ctx_b"; do
     kubectl --context "$ctx" delete validatingwebhookconfiguration mariadb-operator-webhook --ignore-not-found 2>/dev/null || true
     kubectl --context "$ctx" delete mutatingwebhookconfiguration mariadb-operator-webhook --ignore-not-found 2>/dev/null || true
+    for crd in mariadbs grants users databases backups restores connections; do
+      kubectl --context "$ctx" -n mariadb-1 get "${crd}.k8s.mariadb.com" -o name 2>/dev/null \
+        | xargs -I{} kubectl --context "$ctx" -n mariadb-1 patch {} --type=merge \
+            -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+    done
   done
 
   kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found || true

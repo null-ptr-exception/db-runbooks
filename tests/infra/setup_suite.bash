@@ -15,9 +15,14 @@ setup_suite() {
 }
 
 teardown_suite() {
-  if [[ "${TEARDOWN:-}" != "true" ]]; then
-    return 0
+  local ctx_a="kind-cluster-a"
+  local ctx_b="kind-cluster-b"
+
+  kubectl --context "$ctx_a" delete ns infra-a --ignore-not-found || true
+  kubectl --context "$ctx_b" delete ns infra-b --ignore-not-found || true
+
+  if [[ "${TEARDOWN:-}" == "true" ]]; then
+    ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    helmfile destroy -f "${ROOT_DIR}/tests/infra/helmfile.yaml" || true
   fi
-  ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  helmfile destroy -f "${ROOT_DIR}/tests/infra/helmfile.yaml" || true
 }

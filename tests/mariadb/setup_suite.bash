@@ -128,11 +128,14 @@ EOF
 }
 
 teardown_suite() {
-  if [[ "${TEARDOWN:-}" != "true" ]]; then
-    return 0
+  local ctx_a="kind-cluster-a"
+  local ctx_b="kind-cluster-b"
+
+  kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found || true
+  kubectl --context "$ctx_b" delete ns db-ops mariadb-1 --ignore-not-found || true
+
+  if [[ "${TEARDOWN:-}" == "true" ]]; then
+    ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    helmfile destroy -f "${ROOT_DIR}/tests/mariadb/helmfile.yaml" || true
   fi
-  ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  helmfile destroy -f "${ROOT_DIR}/tests/mariadb/helmfile.yaml" || true
-  kubectl --context kind-cluster-a delete ns mariadb-1 --ignore-not-found
-  kubectl --context kind-cluster-b delete ns mariadb-1 --ignore-not-found
 }

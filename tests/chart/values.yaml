@@ -65,6 +65,14 @@ minio:
   rootUser: minioadmin
   rootPassword: minioadmin-changeme-prod
 
+# --- nginx (simple HTTP target for connectivity tests) ---
+nginx:
+  enabled: false
+
+# --- curl (sleep pod for connectivity tests) ---
+curl:
+  enabled: false
+
 # --- Istio VirtualServices (route through shared-gateway) ---
 gateway:
   enabled: false

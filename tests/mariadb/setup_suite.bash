@@ -133,6 +133,13 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
+  # Delete mariadb operator webhooks first — they block CR patching/deletion
+  # after the operator pod is gone.
+  for ctx in "$ctx_a" "$ctx_b"; do
+    kubectl --context "$ctx" delete validatingwebhookconfiguration mariadb-operator-webhook --ignore-not-found 2>/dev/null || true
+    kubectl --context "$ctx" delete mutatingwebhookconfiguration mariadb-operator-webhook --ignore-not-found 2>/dev/null || true
+  done
+
   kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found || true
   kubectl --context "$ctx_b" delete ns db-ops mariadb-1 minio --ignore-not-found || true
 

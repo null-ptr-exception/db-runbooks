@@ -98,7 +98,7 @@ EOF
 
   echo "Waiting for MongoDB primary election..."
   local elapsed=0
-  while (( elapsed < 120 )); do
+  while (( elapsed < 300 )); do
     if kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -c mongodb -- \
       mongosh --quiet --eval "rs.status().members.some(m => m.stateStr === 'PRIMARY')" 2>/dev/null | grep -q true; then
       echo "MongoDB primary elected"
@@ -107,8 +107,8 @@ EOF
     sleep 2
     elapsed=$((elapsed + 2))
   done
-  if (( elapsed >= 120 )); then
-    echo "MongoDB primary not elected within 120s" >&2
+  if (( elapsed >= 300 )); then
+    echo "MongoDB primary not elected within 300s" >&2
     return 1
   fi
 

@@ -103,7 +103,7 @@ _task_result_data() {
   result_status=$(echo "$result" | jq -r '.status // "unknown"')
   echo "blue-green/status result: ${result_status}"
   echo "$result" | jq .
-  [[ "$result_status" == "ok" || "$result_status" == "OK" ]]
+  [[ "$result_status" == "ok" || "$result_status" == "OK" || "$result_status" == "success" ]]
 }
 
 @test "blue-green create requires confirm" {

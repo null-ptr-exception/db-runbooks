@@ -13,7 +13,7 @@ Always specify `--context` when running kubectl commands.
 
 ## Architecture
 
-```
+```text
 test-client (cluster-b)
     │ Bearer Token
     ▼

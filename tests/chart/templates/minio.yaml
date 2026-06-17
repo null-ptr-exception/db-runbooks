@@ -4,8 +4,8 @@ kind: Secret
 metadata:
   name: minio-credentials
 stringData:
-  MINIO_ROOT_USER: {{ .Values.minio.rootUser }}
-  MINIO_ROOT_PASSWORD: {{ .Values.minio.rootPassword }}
+  MINIO_ROOT_USER: {{ .Values.minio.rootUser | quote }}
+  MINIO_ROOT_PASSWORD: {{ .Values.minio.rootPassword | quote }}
 ---
 apiVersion: apps/v1
 kind: Deployment

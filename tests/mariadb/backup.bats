@@ -90,7 +90,8 @@ wait_for_task() {
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "missing task id in response: $HTTP_BODY" >&2; return 1; }
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result data
@@ -114,7 +115,8 @@ wait_for_task() {
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "missing task id in response: $HTTP_BODY" >&2; return 1; }
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result data bucket
@@ -131,7 +133,8 @@ wait_for_task() {
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]] || { echo "missing task id in response: $HTTP_BODY" >&2; return 1; }
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result data size_bytes timestamp

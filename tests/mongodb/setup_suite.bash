@@ -22,7 +22,7 @@ setup_suite() {
   setup_infra
 
   wait_ns_gone "$CTX_A" mongo-core mongo-1
-  wait_ns_gone "$CTX_B" mongo-core
+  wait_ns_gone "$CTX_B" mongo-core minio
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
@@ -108,7 +108,8 @@ EOF
     elapsed=$((elapsed + 2))
   done
   if (( elapsed >= 120 )); then
-    echo "WARNING: MongoDB primary not elected within 120s" >&2
+    echo "MongoDB primary not elected within 120s" >&2
+    return 1
   fi
 
   echo "Waiting for test-client..."
@@ -122,7 +123,7 @@ teardown_suite() {
   local ctx_b="kind-cluster-b"
 
   kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found  || true
-  kubectl --context "$ctx_b" delete ns mongo-core --ignore-not-found  || true
+  kubectl --context "$ctx_b" delete ns mongo-core minio --ignore-not-found  || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

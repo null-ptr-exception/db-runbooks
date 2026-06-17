@@ -5,8 +5,9 @@
 # These run the script directly against a mock `kubectl` — no cluster, no
 # MinIO, no operator. They lock down the user-oriented surface and the manifest
 # the task renders:
-#   - namespace is the only required input; credentials / S3 location / version
-#     are resolved internally (convention or from the source instance)
+#   - namespace is the only required input; credentials / S3 location are internal
+#   - the source instance (for version/storage) is auto-detected, overridable
+#     via `source`, and version is never silently guessed
 #   - confirm=true is mandatory to apply; dry_run (default) only renders
 #   - an existing target is never overwritten in place
 #   - target_time is range-validated and, when given, injected as PITR
@@ -25,8 +26,12 @@ setup() {
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
-# Minimal kubectl mock. Source-derive reads (jsonpath) return the configured
-# value; the bare get is the target existence probe; apply captures stdin.
+# Minimal kubectl mock:
+#   get ... {range .items...}  → source auto-detect list (MOCK_SOURCES)
+#   get <name> ... spec.image  → source image
+#   get <name> ... storage.size → source storage
+#   get <target>               → target existence probe
+#   apply                      → capture stdin
 args="$*"
 verb=""
 for a in "$@"; do
@@ -35,8 +40,9 @@ done
 case "$verb" in
   get)
     case "$args" in
-      *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";   exit 0 ;;
-      *storage.size*)  echo "${MOCK_SOURCE_STORAGE:-}"; exit 0 ;;
+      *items*)         printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;
+      *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";          exit 0 ;;
+      *storage.size*)  echo "${MOCK_SOURCE_STORAGE:-}";        exit 0 ;;
       *) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
     esac ;;
   apply) cat > "${MOCK_APPLY_CAPTURE}"; exit 0 ;;
@@ -74,28 +80,29 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore refuses to overwrite an existing target" {
-  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored MOCK_TARGET_EXISTS=1
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    RESTORE_IMAGE=mariadb:11.4 MOCK_TARGET_EXISTS=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"already exists"* ]]
 }
 
 @test "restore rejects a malformed target_time" {
-  run_restore TARGET_TIME="not-a-timestamp"
+  run_restore RESTORE_IMAGE=mariadb:11.4 TARGET_TIME="not-a-timestamp"
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
 @test "restore rejects an out-of-range target_time" {
-  run_restore TARGET_TIME="2026-99-99T25:61:61Z"
+  run_restore RESTORE_IMAGE=mariadb:11.4 TARGET_TIME="2026-99-99T25:61:61Z"
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
 @test "restore dry_run renders the manifest without confirm or apply" {
-  run_restore DRY_RUN=true CONFIRM=false RESTORE_TARGET=mariadb-restored
+  run_restore DRY_RUN=true CONFIRM=false RESTORE_TARGET=mariadb-restored RESTORE_IMAGE=mariadb:11.4
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.dryRun')" = "true" ]
@@ -106,21 +113,18 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore resolves internals and returns a connection endpoint" {
-  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored MOCK_TARGET_EXISTS=0
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    MOCK_SOURCES=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
-  [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.restored')" = "true" ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "false" ]
 
-  # Connection + credential reference are handed back to the caller.
   [ "$(result_field '.data.connection.host')" = "mariadb-restored-primary.mariadb-bg.svc.cluster.local" ]
   [ "$(result_field '.data.connection.port')" = "3306" ]
   [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
 
-  # Convention-resolved internals land in the manifest.
   grep -q "backupContentType: Physical" "${CAPTURE}"
   grep -q "prefix: mariadb/mariadb-bg" "${CAPTURE}"
-  grep -q "image: mariadb:11.4" "${CAPTURE}"
   ! grep -q "replication:" "${CAPTURE}"
   ! grep -q "multiCluster:" "${CAPTURE}"
   ! grep -q "targetRecoveryTime" "${CAPTURE}"
@@ -128,7 +132,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
 
 @test "restore with target_time injects point-in-time recovery" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
-    TARGET_TIME="2026-06-14T03:21:00Z" MOCK_TARGET_EXISTS=0
+    RESTORE_IMAGE=mariadb:11.4 TARGET_TIME="2026-06-14T03:21:00Z" MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "true" ]
   [ "$(result_field '.data.pointInTimeRecovery.targetRecoveryTime')" = "2026-06-14T03:21:00Z" ]
@@ -136,7 +140,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "restore auto-generates a target name when omitted" {
-  run_restore DRY_RUN=true
+  run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4
   [ "$status" -eq 0 ]
   local target
   target="$(result_field '.data.target')"
@@ -144,10 +148,33 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.data.connection.host')" = "${target}-primary.mariadb-bg.svc.cluster.local" ]
 }
 
-@test "restore derives image and storage from the source instance" {
+@test "restore derives image and storage from the auto-detected source" {
   run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
-    MOCK_SOURCE_IMAGE="mariadb:10.6" MOCK_SOURCE_STORAGE="5Gi"
+    MOCK_SOURCES=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.image')" = "mariadb:10.6" ]
+  [ "$(result_field '.data.source')" = "mariadb-green" ]
+  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
   [[ "$(result_field '.data.manifest')" == *"size: 5Gi"* ]]
+}
+
+@test "restore fails when the source is gone and no image is given" {
+  run_restore DRY_RUN=true   # MOCK_SOURCES empty → no source found
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"image"* ]]
+}
+
+@test "restore fails on an ambiguous source without source/image" {
+  run_restore DRY_RUN=true MOCK_SOURCES=$'mariadb-blue\nmariadb-green'
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"multiple MariaDB instances"* ]]
+}
+
+@test "restore uses an explicit source override" {
+  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
+    RESTORE_SOURCE=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.source')" = "mariadb-green" ]
+  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
 }

@@ -36,6 +36,8 @@ fi
 
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
+# shellcheck source=../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"              # for mariadb_resolve_name (source auto-detect)
 
 OP="restore"
 
@@ -64,9 +66,7 @@ BACKUP_ACCESS_SECRET="minio"
 BACKUP_ACCESS_KEY="access-key-id"
 BACKUP_SECRET_KEY="secret-access-key"
 REPLICAS="1"                           # restore is standalone by design
-SOURCE_NAME="${RESTORE_SOURCE:-mariadb}"   # conventional source instance in the namespace
-DEFAULT_IMAGE="mariadb:11.4"           # fallback when the source instance is gone
-DEFAULT_STORAGE_SIZE="1Gi"
+DEFAULT_STORAGE_SIZE="1Gi"             # only used when the source instance is gone
 
 # shellcheck disable=SC2034  # consumed by _kubectl in k8s.sh (sourced indirectly)
 K8S_NAMESPACE="$NAMESPACE"
@@ -87,16 +87,42 @@ if [[ -z "$TARGET" ]]; then
   TARGET="${NAMESPACE}-restore-$(date +%Y%m%d%H%M%S)"
 fi
 
-# Resolve engine version / storage from the source instance; fall back to the
-# platform default when the source CR is gone (a common reason to restore).
-# NOTE: a physical restore is version-sensitive — if the source is gone, verify
-# the default matches the backup's MariaDB version or pass `image` explicitly.
-if [[ -z "$IMAGE" ]]; then
-  IMAGE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.image}' 2>/dev/null || true)"
-  IMAGE="${IMAGE:-$DEFAULT_IMAGE}"
+# Resolve the source instance (for engine version / storage size): an explicit
+# `source`, else the single MariaDB CR in the namespace. Restore creates new CRs
+# in the same namespace, so once a namespace holds more than one instance the
+# caller must say which one via `source` (or pass `image`).
+SOURCE_NAME="${RESTORE_SOURCE:-}"
+SOURCE_CANDIDATES=""
+if [[ -z "$SOURCE_NAME" ]] && { [[ -z "$IMAGE" ]] || [[ -z "$STORAGE_SIZE" ]]; }; then
+  if SOURCE_NAME="$(mariadb_resolve_name)"; then
+    :                                  # exactly one MariaDB CR → that is the source
+  else
+    rc=$?
+    if [[ "$rc" -eq 2 ]]; then SOURCE_CANDIDATES="$SOURCE_NAME"; fi   # ambiguous
+    SOURCE_NAME=""
+  fi
 fi
+
+# A physical restore is version-sensitive: when the source is gone or ambiguous
+# and no image was given, fail loudly rather than guessing a mismatched version.
+if [[ -z "$IMAGE" ]]; then
+  if [[ -n "$SOURCE_NAME" ]]; then
+    IMAGE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.image}' 2>/dev/null || true)"
+  fi
+  if [[ -z "$IMAGE" ]]; then
+    if [[ -n "$SOURCE_CANDIDATES" ]]; then
+      mdbt_fail "$OP" "multiple MariaDB instances in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
+        "$(jq -n --arg c "$SOURCE_CANDIDATES" '{candidates: ($c | split(","))}')" 2
+    fi
+    mdbt_fail "$OP" "could not determine the source MariaDB version (no source instance in '${NAMESPACE}'); pass 'image' explicitly" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+  fi
+fi
+
 if [[ -z "$STORAGE_SIZE" ]]; then
-  STORAGE_SIZE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.storage.size}' 2>/dev/null || true)"
+  if [[ -n "$SOURCE_NAME" ]]; then
+    STORAGE_SIZE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.storage.size}' 2>/dev/null || true)"
+  fi
   STORAGE_SIZE="${STORAGE_SIZE:-$DEFAULT_STORAGE_SIZE}"
 fi
 
@@ -158,6 +184,7 @@ restore_result() {
   jq -n \
     --arg namespace "$NAMESPACE" \
     --arg target "$TARGET" \
+    --arg source "${SOURCE_NAME:-}" \
     --arg image "$IMAGE" \
     --arg bucket "$BACKUP_BUCKET" \
     --arg prefix "$BACKUP_PREFIX" \
@@ -173,6 +200,7 @@ restore_result() {
     '{
       namespace: $namespace,
       target: $target,
+      source: (if $source == "" then null else $source end),
       image: $image,
       backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, contentType: "Physical"},
       pointInTimeRecovery: {enabled: $pitr, targetRecoveryTime: (if $pitr then $targetTime else null end)},

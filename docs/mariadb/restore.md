@@ -30,7 +30,7 @@ restored.
 |------|--------|
 | Plan (default) | With `dry_run=true` (the default) the task renders the MariaDB manifest and returns without applying; `confirm` is not required. |
 | Guard | To apply, set `dry_run=false` **and** `confirm=true` (mutating). |
-| Resolve | `target` is auto-named; `image`/`storage_size` come from the source instance (or platform defaults if it is gone); the backup location, credentials, and S3 config come from platform convention. |
+| Resolve | `target` is auto-named; the source instance is auto-detected (the single MariaDB in the namespace, or `source`) and `image`/`storage_size` come from it; the backup location, credentials, and S3 config come from platform convention. |
 | Guard | If a MariaDB named `target` already exists, the task fails — restore never overwrites in place. |
 | Validate | `target_time`, when given, must be a range-checked RFC3339 instant (e.g. `2026-06-14T03:21:00Z`). |
 | Apply | Creates a standalone `MariaDB` CR via `bootstrapFrom.s3` (`backupContentType: Physical`), `replicas=1`, no replication/multiCluster. |
@@ -44,8 +44,9 @@ The only required input is `namespace`.
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | Source namespace. |
 | `target_time` | `TARGET_TIME` | | — | RFC3339 instant for point-in-time recovery. Omit to restore the latest backup. |
+| `source` | `RESTORE_SOURCE` | | auto | Source MariaDB instance (for version/storage). Auto-detected as the single MariaDB in the namespace; **required when more than one exists** (restore itself creates new instances in the namespace). |
 | `target` | `RESTORE_TARGET` | | auto | New instance name. Auto-named `<namespace>-restore-<ts>` when omitted. |
-| `image` | `RESTORE_IMAGE` | | source | MariaDB image. Derived from the source instance; platform default if it is gone. |
+| `image` | `RESTORE_IMAGE` | | source | MariaDB image, derived from the source instance. The version is **never guessed** — if the source is gone or ambiguous, pass `image` explicitly. |
 | `storage_size` | `STORAGE_SIZE` | | source | PVC size. Derived from the source instance; `1Gi` if it is gone. |
 | `backup_bucket` | `BACKUP_BUCKET` | | `db-backups` | Advanced override. |
 | `backup_prefix` | `BACKUP_PREFIX` | | `mariadb/<namespace>` | Advanced override (per-namespace convention). |
@@ -116,7 +117,8 @@ source's users and passwords).
   `target_time` outside the available backup/binlog window will fail at the
   operator level.
 - **Version sensitivity.** A physical restore must use the source's MariaDB
-  version. When the source instance is gone and `image` is not provided, verify
-  the platform default matches the backup, or pass `image` explicitly.
+  version, so `image` is taken from the source instance and is never guessed.
+  When the source is gone or ambiguous and `image` is not provided, the task
+  fails and asks for `image` explicitly.
 - **Standalone by design.** To turn a restored instance into a replica or a
   blue/green member, drive it through the blue-green tasks afterwards.

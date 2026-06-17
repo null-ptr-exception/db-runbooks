@@ -11,6 +11,16 @@ export CTX_A="kind-cluster-a"
 export CTX_B="kind-cluster-b"
 export REGISTRY="localhost:5005"
 
+wait_ns_gone() {
+  local ctx="$1"; shift
+  for ns in "$@"; do
+    while kubectl --context "$ctx" get ns "$ns" 2>/dev/null | grep -q Terminating; do
+      echo "Waiting for namespace $ns to terminate on $ctx..."
+      sleep 3
+    done
+  done
+}
+
 setup_infra() {
   local INFRA_DIR
   INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

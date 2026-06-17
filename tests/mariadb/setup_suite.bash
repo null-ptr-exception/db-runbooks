@@ -23,6 +23,9 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
+  wait_ns_gone "$CTX_A" db-ops mariadb-1
+  wait_ns_gone "$CTX_B" db-ops mariadb-1 minio
+
   # Install mariadb-operator CRDs and operator on both clusters
   helm repo add mariadb-operator https://helm.mariadb.com/mariadb-operator 2>/dev/null || true
   helm repo update mariadb-operator
@@ -31,15 +34,13 @@ setup_suite() {
     echo "Installing mariadb-operator CRDs on ${ctx}..."
     helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
       --kube-context "$ctx" \
-      --wait
-
+      
     echo "Installing mariadb-operator on ${ctx}..."
     helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
       --kube-context "$ctx" \
       --namespace db-ops \
       --create-namespace \
-      --wait
-  done
+        done
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"

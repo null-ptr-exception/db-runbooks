@@ -21,6 +21,9 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
+  wait_ns_gone "$CTX_A" mongo-core mongo-1
+  wait_ns_gone "$CTX_B" mongo-core
+
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
   docker push localhost:5005/db-runbooks:latest
@@ -118,8 +121,8 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found --wait || true
-  kubectl --context "$ctx_b" delete ns mongo-core --ignore-not-found --wait || true
+  kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found  || true
+  kubectl --context "$ctx_b" delete ns mongo-core --ignore-not-found  || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

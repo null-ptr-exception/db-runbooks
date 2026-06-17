@@ -5,12 +5,12 @@ apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:
   name: {{ .name }}
-  namespace: istio-ingress
+  namespace: {{ $.Release.Namespace }}
 spec:
   hosts:
     - {{ .host | quote }}
   gateways:
-    - shared-gateway
+    - istio-ingress/shared-gateway
   http:
     - route:
         - destination:

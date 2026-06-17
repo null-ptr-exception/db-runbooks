@@ -133,8 +133,6 @@ teardown_suite() {
 
   kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found || true
   kubectl --context "$ctx_b" delete ns db-ops mariadb-1 minio --ignore-not-found || true
-  kubectl --context "$ctx_a" -n istio-ingress delete virtualservice fedauth-mariadb aqsh-mariadb --ignore-not-found || true
-  kubectl --context "$ctx_b" -n istio-ingress delete virtualservice minio aqsh-mariadb-b --ignore-not-found || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

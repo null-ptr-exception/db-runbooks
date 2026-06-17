@@ -62,6 +62,7 @@ releases:
           enabled: true
           authorizedClients:
             - "cluster-a/db-ops/kube-auth-proxy"
+            - "cluster-b/db-ops/kube-auth-proxy"
         redis:
           enabled: true
         aqsh:
@@ -72,17 +73,58 @@ releases:
             mariadb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
           authProxy:
-            tokenReviewURL: "http://fedauth.kind-a.test:30080"
+            tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:
           enabled: true
         gateway:
           enabled: true
           virtualServices:
             - name: fedauth-mariadb
-              host: "fedauth.kind-a.test"
+              host: "fedauth-mariadb.kind-a.test"
               backendHost: kube-federated-auth.db-ops.svc.cluster.local
               backendPort: 8080
             - name: aqsh-mariadb
               host: "aqsh-mariadb.kind-a.test"
+              backendHost: aqsh.db-ops.svc.cluster.local
+              backendPort: 4180
+
+  # cluster-b: MariaDB instance (creates mariadb-1 namespace)
+  - name: mariadb-1-b
+    chart: ../chart
+    namespace: mariadb-1
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    values:
+      - mariadb:
+          enabled: true
+          namespace: mariadb-1
+
+  # cluster-b: aqsh-mariadb, redis, rbac, gateway
+  - name: mariadb-server-b
+    chart: ../chart
+    namespace: db-ops
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    needs:
+      - kind-cluster-b/mariadb-1/mariadb-1-b
+    values:
+      - redis:
+          enabled: true
+        aqsh:
+          enabled: true
+          tasksConfig: /etc/aqsh/task-mariadb.yaml
+          workerQueues: mariadb
+          config:
+            mariadb.env: |
+              MINIO_ENDPOINT=http://minio.kind-b.test:30080
+          authProxy:
+            tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
+        mariadbRbac:
+          enabled: true
+        gateway:
+          enabled: true
+          virtualServices:
+            - name: aqsh-mariadb-b
+              host: "aqsh-mariadb.kind-b.test"
               backendHost: aqsh.db-ops.svc.cluster.local
               backendPort: 4180

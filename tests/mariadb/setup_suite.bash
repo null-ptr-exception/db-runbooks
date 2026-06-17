@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # MariaDB test suite setup
 #
-# Deploys the MariaDB control plane + a test instance on the 2-cluster infra.
+# Deploys the MariaDB control plane + test instances on the 2-cluster infra.
 #
 # cluster-a (server):
 #   db-ops:     kube-federated-auth, kube-auth-proxy + aqsh-mariadb, Redis
 #   mariadb-1:  MariaDB instance (operator-managed)
-# cluster-b (client):
-#   db-ops:     test-client pod
+# cluster-b (server + client):
+#   db-ops:     test-client pod, kube-auth-proxy + aqsh-mariadb, Redis
+#   mariadb-1:  MariaDB instance (operator-managed)
 #   minio:      MinIO for backup tests
 
 setup_suite() {
@@ -21,21 +22,23 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
-  # Install mariadb-operator CRDs and operator on cluster-a
+  # Install mariadb-operator CRDs and operator on both clusters
   helm repo add mariadb-operator https://helm.mariadb.com/mariadb-operator 2>/dev/null || true
   helm repo update mariadb-operator
 
-  echo "Installing mariadb-operator CRDs..."
-  helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
-    --kube-context "$CTX_A" \
-    --wait
+  for ctx in "$CTX_A" "$CTX_B"; do
+    echo "Installing mariadb-operator CRDs on ${ctx}..."
+    helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
+      --kube-context "$ctx" \
+      --wait
 
-  echo "Installing mariadb-operator..."
-  helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
-    --kube-context "$CTX_A" \
-    --namespace db-ops \
-    --create-namespace \
-    --wait
+    echo "Installing mariadb-operator on ${ctx}..."
+    helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
+      --kube-context "$ctx" \
+      --namespace db-ops \
+      --create-namespace \
+      --wait
+  done
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
@@ -92,18 +95,29 @@ EOF
   helmfile apply -f "$HELMFILE" --values "$RUNTIME_VALUES"
   rm -f "$RUNTIME_VALUES"
 
-  # Wait for deployments
+  # Wait for deployments on cluster-a
   echo "Waiting for kube-federated-auth..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/kube-federated-auth --timeout=120s
 
-  echo "Waiting for redis..."
+  echo "Waiting for redis (cluster-a)..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/redis --timeout=60s
 
-  echo "Waiting for aqsh..."
+  echo "Waiting for aqsh (cluster-a)..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/aqsh --timeout=120s
 
-  echo "Waiting for mariadb..."
+  echo "Waiting for mariadb (cluster-a)..."
   kubectl --context "$CTX_A" -n mariadb-1 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s
+
+  # Wait for deployments on cluster-b
+  echo "Waiting for redis (cluster-b)..."
+  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/redis --timeout=60s
+
+  echo "Waiting for aqsh (cluster-b)..."
+  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/aqsh --timeout=120s
+
+  echo "Waiting for mariadb (cluster-b)..."
+  kubectl --context "$CTX_B" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=300s
 
   echo "Waiting for test-client..."
@@ -119,4 +133,5 @@ teardown_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   helmfile destroy -f "${ROOT_DIR}/tests/mariadb/helmfile.yaml" || true
   kubectl --context kind-cluster-a delete ns mariadb-1 --ignore-not-found
+  kubectl --context kind-cluster-b delete ns mariadb-1 --ignore-not-found
 }

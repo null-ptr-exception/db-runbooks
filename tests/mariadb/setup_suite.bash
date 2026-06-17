@@ -34,13 +34,14 @@ setup_suite() {
     echo "Installing mariadb-operator CRDs on ${ctx}..."
     helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
       --kube-context "$ctx" \
-      
+      --wait
     echo "Installing mariadb-operator on ${ctx}..."
     helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
       --kube-context "$ctx" \
       --namespace db-ops \
       --create-namespace \
-        done
+      --wait
+  done
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
@@ -132,8 +133,8 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found --wait || true
-  kubectl --context "$ctx_b" delete ns db-ops mariadb-1 minio --ignore-not-found --wait || true
+  kubectl --context "$ctx_a" delete ns db-ops mariadb-1 --ignore-not-found || true
+  kubectl --context "$ctx_b" delete ns db-ops mariadb-1 minio --ignore-not-found || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

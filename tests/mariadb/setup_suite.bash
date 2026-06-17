@@ -13,6 +13,7 @@
 
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  "${ROOT_DIR}/scripts/preflight.sh"
   source "${ROOT_DIR}/infra/deploy.sh"
 
   local CTX_A="kind-cluster-a"

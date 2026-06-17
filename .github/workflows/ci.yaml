@@ -72,9 +72,6 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
-
       - name: Run mariadb test suite
         run: bats tests/mariadb/
 
@@ -133,9 +130,6 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
-
       - name: Run infra e2e tests
         run: bats tests/infra/
 
@@ -160,9 +154,6 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
-
       - name: Run aqsh test suite
         run: bats tests/aqsh/
 
@@ -186,9 +177,6 @@ jobs:
         run: |
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
-
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
 
       - name: Run mongodb test suite
         run: bats tests/mongodb/

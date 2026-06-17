@@ -20,6 +20,8 @@ teardown_suite() {
 
   kubectl --context "$ctx_a" delete ns infra-a --ignore-not-found || true
   kubectl --context "$ctx_b" delete ns infra-b --ignore-not-found || true
+  kubectl --context "$ctx_a" -n istio-ingress delete virtualservice nginx --ignore-not-found || true
+  kubectl --context "$ctx_b" -n istio-ingress delete virtualservice nginx --ignore-not-found || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

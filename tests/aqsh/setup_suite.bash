@@ -101,6 +101,7 @@ teardown_suite() {
 
   kubectl --context "$ctx_a" delete ns aqsh-test --ignore-not-found || true
   kubectl --context "$ctx_b" delete ns aqsh-test --ignore-not-found || true
+  kubectl --context "$ctx_a" -n istio-ingress delete virtualservice fedauth-aqsh aqsh --ignore-not-found || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

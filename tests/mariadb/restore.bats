@@ -40,8 +40,9 @@ done
 case "$verb" in
   get)
     case "$args" in
-      *items*)         printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;
-      *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";          exit 0 ;;
+      *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;   # resolve-name list
+      *items*spec.image*) printf '%s' "${MOCK_SOURCE_IMAGES:-}"; exit 0 ;; # distinct-image scan
+      *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";          exit 0 ;;   # single instance image
       *storage.size*)  echo "${MOCK_SOURCE_STORAGE:-}";        exit 0 ;;
       *) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
     esac ;;
@@ -164,11 +165,20 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.message')" == *"image"* ]]
 }
 
-@test "restore fails on an ambiguous source without source/image" {
-  run_restore DRY_RUN=true MOCK_SOURCES=$'mariadb-blue\nmariadb-green'
+@test "restore resolves the version when several instances share it (no source needed)" {
+  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
+    MOCK_SOURCES=$'mariadb-green\nmariadb-bg-restore-1' MOCK_SOURCE_IMAGES="mariadb:10.11"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
+  [ "$(result_field '.data.source')" = "null" ]
+}
+
+@test "restore fails on mixed versions without source/image" {
+  run_restore DRY_RUN=true \
+    MOCK_SOURCES=$'mariadb-blue\nmariadb-green' MOCK_SOURCE_IMAGES=$'mariadb:10.11\nmariadb:10.6'
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"multiple MariaDB instances"* ]]
+  [[ "$(result_field '.message')" == *"multiple MariaDB versions"* ]]
 }
 
 @test "restore uses an explicit source override" {

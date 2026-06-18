@@ -87,34 +87,35 @@ if [[ -z "$TARGET" ]]; then
   TARGET="${NAMESPACE}-restore-$(date +%Y%m%d%H%M%S)"
 fi
 
-# Resolve the source instance (for engine version / storage size): an explicit
-# `source`, else the single MariaDB CR in the namespace. Restore creates new CRs
-# in the same namespace, so once a namespace holds more than one instance the
-# caller must say which one via `source` (or pass `image`).
+# Resolve the engine version (and storage) for the restored instance:
+#  - explicit `source`             → derive from that instance
+#  - exactly one MariaDB instance  → derive from it
+#  - several, all the same image   → use that version (restore's own clones, etc.)
+#  - mixed versions / none         → fail asking for `source`/`image` (never guess)
 SOURCE_NAME="${RESTORE_SOURCE:-}"
-SOURCE_CANDIDATES=""
-if [[ -z "$SOURCE_NAME" ]] && { [[ -z "$IMAGE" ]] || [[ -z "$STORAGE_SIZE" ]]; }; then
-  if SOURCE_NAME="$(mariadb_resolve_name)"; then
-    :                                  # exactly one MariaDB CR → that is the source
-  else
-    rc=$?
-    if [[ "$rc" -eq 2 ]]; then SOURCE_CANDIDATES="$SOURCE_NAME"; fi   # ambiguous
-    SOURCE_NAME=""
-  fi
+if [[ -z "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
+  if SOURCE_NAME="$(mariadb_resolve_name)"; then :; else SOURCE_NAME=""; fi
 fi
 
-# A physical restore is version-sensitive: when the source is gone or ambiguous
-# and no image was given, fail loudly rather than guessing a mismatched version.
 if [[ -z "$IMAGE" ]]; then
   if [[ -n "$SOURCE_NAME" ]]; then
     IMAGE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.image}' 2>/dev/null || true)"
+  else
+    # No single source (multiple instances or none): a physical restore is
+    # version-sensitive, so accept a derived version only when every instance
+    # agrees — a namespace should not run mixed versions outside a blue-green
+    # upgrade, and that window is exactly when the caller must disambiguate.
+    NS_IMAGES="$(_kubectl get mariadb -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}' 2>/dev/null | sed '/^$/d' | sort -u || true)"
+    NS_IMAGE_COUNT="$(printf '%s\n' "$NS_IMAGES" | grep -c . || true)"
+    if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
+      IMAGE="$NS_IMAGES"
+    elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
+      mdbt_fail "$OP" "multiple MariaDB versions in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
+        "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
+    fi
   fi
   if [[ -z "$IMAGE" ]]; then
-    if [[ -n "$SOURCE_CANDIDATES" ]]; then
-      mdbt_fail "$OP" "multiple MariaDB instances in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
-        "$(jq -n --arg c "$SOURCE_CANDIDATES" '{candidates: ($c | split(","))}')" 2
-    fi
-    mdbt_fail "$OP" "could not determine the source MariaDB version (no source instance in '${NAMESPACE}'); pass 'image' explicitly" \
+    mdbt_fail "$OP" "could not determine the source MariaDB version (no MariaDB instance in '${NAMESPACE}'); pass 'image' explicitly" \
       "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
   fi
 fi

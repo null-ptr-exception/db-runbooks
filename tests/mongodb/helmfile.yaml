@@ -32,6 +32,23 @@ releases:
           enabled: true
           namespace: mongo-1
 
+  # cluster-b: MinIO for backup tests (aqsh reaches it via Istio gateway)
+  - name: minio
+    chart: ../chart
+    namespace: minio
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    values:
+      - minio:
+          enabled: true
+        gateway:
+          enabled: true
+          virtualServices:
+            - name: minio
+              host: "minio.kind-b.test"
+              backendHost: minio.minio.svc.cluster.local
+              backendPort: 9000
+
   # cluster-a: fedauth, aqsh-mongodb, redis, rbac, gateway
   # Runtime-discovered values (issuers, CAs, tokens) are injected via
   # a second helmfile apply with --values runtime-values.yaml.
@@ -53,6 +70,9 @@ releases:
           enabled: true
           tasksConfig: /etc/aqsh/task-mongodb.yaml
           workerQueues: mongodb
+          config:
+            mongodb.env: |
+              MINIO_ENDPOINT=http://minio.kind-b.test:30080
           authProxy:
             tokenReviewURL: "http://fedauth.kind-a.test:30080"
         mongodbRbac:

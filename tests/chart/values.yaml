@@ -1,14 +1,6 @@
 # Default values — installs nothing. Each suite's helmfile.yaml enables
 # the components it needs via inline values.
 
-# --- nginx (infra suite) ---
-nginx:
-  enabled: false
-
-# --- curl pod (infra suite, test-client alternative) ---
-curl:
-  enabled: false
-
 # --- kube-federated-auth ---
 federatedAuth:
   enabled: false
@@ -34,9 +26,22 @@ aqsh:
   imagePullPolicy: Always
   tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
+  config: {}
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     tokenReviewURL: ""
+
+# --- mariadb (operator-managed) ---
+mariadb:
+  enabled: false
+  namespace: mariadb-1
+  image: mariadb:10.6
+  rootPassword: mariadb-test-pass
+  storage: 1Gi
+
+# --- mariadb RBAC ---
+mariadbRbac:
+  enabled: false
 
 # --- mongodb ---
 mongodb:
@@ -51,6 +56,21 @@ mongodbRbac:
 
 # --- test-client (curl pod with projected SA token) ---
 testClient:
+  enabled: false
+
+# --- minio ---
+minio:
+  enabled: false
+  image: minio/minio:latest
+  rootUser: minioadmin
+  rootPassword: minioadmin-changeme-prod
+
+# --- nginx (simple HTTP target for connectivity tests) ---
+nginx:
+  enabled: false
+
+# --- curl (sleep pod for connectivity tests) ---
+curl:
   enabled: false
 
 # --- Istio VirtualServices (route through shared-gateway) ---

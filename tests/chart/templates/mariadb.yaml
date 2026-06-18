@@ -1,0 +1,23 @@
+{{- if .Values.mariadb.enabled }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb
+  namespace: {{ .Values.mariadb.namespace }}
+stringData:
+  password: {{ .Values.mariadb.rootPassword | quote }}
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: mariadb
+  namespace: {{ .Values.mariadb.namespace }}
+spec:
+  rootPasswordSecretKeyRef:
+    name: mariadb
+    key: password
+  port: 3306
+  image: {{ .Values.mariadb.image }}
+  storage:
+    size: {{ .Values.mariadb.storage }}
+{{- end }}

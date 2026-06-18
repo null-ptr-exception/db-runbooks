@@ -184,13 +184,10 @@ setup() {
 }
 
 teardown_file() {
-  # Revert all setup_file STS mutations so other test files see a clean state.
+  # Revert all setup_file STS mutations so other test files see a clean RS.
   # Do NOT delete the namespace — setup_suite owns that lifecycle.
   local ctx="kind-cluster-a"
-  kubectl --context "$ctx" -n mongo-1 \
-    patch statefulset mongodb --type=merge -p \
-    '{"spec":{"replicas":1,"updateStrategy":{"rollingUpdate":{"partition":0}}}}' \
-    2>/dev/null || true
+
   # Remove init container and recovery-config volume added by setup_file.
   # Use JSON patch to target by name so index doesn't matter.
   local ic_idx vol_idx
@@ -210,8 +207,19 @@ teardown_file() {
       -p "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/volumes/$((vol_idx-1))\"}]" \
       2>/dev/null || true
   fi
+
+  # Reset partition to 0 but keep replicas=3 so the RS stays functional.
+  kubectl --context "$ctx" -n mongo-1 \
+    patch statefulset mongodb --type=merge -p \
+    '{"spec":{"replicas":3,"updateStrategy":{"rollingUpdate":{"partition":0}}}}' \
+    2>/dev/null || true
+
   kubectl --context "$ctx" -n mongo-1 \
     delete configmap mongodb-recovery-config --ignore-not-found 2>/dev/null || true
+
+  # Wait for all pods to be ready so subsequent test files see a healthy RS.
+  kubectl --context "$ctx" -n mongo-1 \
+    rollout status statefulset/mongodb --timeout=120s 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -288,6 +296,25 @@ _init_mongodb_rs() {
         else { print('RS init error: ' + e.message); quit(1); }
       }
     " || { echo "RS initiate failed" >&2; return 1; }
+
+  # Ensure mongodb-0 has priority 2 (previous recovery runs may have set all to 1).
+  kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://localhost:27017/admin" --eval "
+      try {
+        var cfg = rs.conf();
+        var needsReconfig = false;
+        cfg.members.forEach(function(m) {
+          var target = m.host.indexOf('mongodb-0') !== -1 ? 2 : 1;
+          if (m.priority !== target) { m.priority = target; needsReconfig = true; }
+        });
+        if (needsReconfig) {
+          cfg.version++;
+          rs.reconfig(cfg, {force: true});
+          print('Reconfigured RS priorities (mongodb-0 → 2)');
+        }
+      } catch(e) { print('Priority reconfig skipped: ' + e.message); }
+    " 2>/dev/null || true
+
   echo "RS initiated — allowing time for primary election..."
   sleep 8
 }
@@ -780,7 +807,7 @@ _wait_for_rs_healthy() {
   # so replSetSyncFrom usually fails (false) unless the tiny dataset syncs within
   # the retry window. Both outcomes are valid; recovery success must not depend on it.
   local sync_src_set
-  sync_src_set=$(echo "$result" | jq -r '.sync_source_set // "MISSING"')
+  sync_src_set=$(echo "$result" | jq -r 'if has("sync_source_set") then (.sync_source_set | tostring) else "MISSING" end')
   [ "$sync_src_set" != "MISSING" ]
   [[ "$sync_src_set" == "true" || "$sync_src_set" == "false" ]]
 
@@ -830,7 +857,7 @@ _wait_for_rs_healthy() {
   local result
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   local sync_src_set
-  sync_src_set=$(echo "$result" | jq -r '.sync_source_set // "MISSING"')
+  sync_src_set=$(echo "$result" | jq -r 'if has("sync_source_set") then (.sync_source_set | tostring) else "MISSING" end')
   [ "$sync_src_set" != "MISSING" ]
   [[ "$sync_src_set" == "true" || "$sync_src_set" == "false" ]]
 
@@ -945,11 +972,11 @@ _wait_for_rs_healthy() {
   _stepdown_pod0 "mongo-1" "$ctx" 120
 
   local primary_pod
-  primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+  primary_pod=$(_find_primary_pod "mongo-1" "$ctx") || true
   # If the election hasn't settled yet, give it a few more seconds.
   if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
     sleep 10
-    primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+    primary_pod=$(_find_primary_pod "mongo-1" "$ctx") || true
   fi
   if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
     skip "Could not elect a non-pod-0 primary within stepdown window"

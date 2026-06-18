@@ -9,6 +9,11 @@ setup_file() {
   NS="mongo-core"
   AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
 
+  # Ensure MongoDB RS is healthy (3 replicas with a primary).
+  # recovery.bats teardown or a previous interrupted run may have left the
+  # cluster in a degraded state.
+  _ensure_mongodb_rs_healthy
+
   # Resolve test-client pod on cluster-b
   kubectl --context "$CTX_B" -n "$NS" wait pod \
     -l app=test-client --for=condition=Ready --timeout=120s
@@ -20,6 +25,131 @@ setup_file() {
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
 
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
+}
+
+_ensure_mongodb_rs_healthy() {
+  local ctx="kind-cluster-a"
+
+  # Ensure the StatefulSet is in RS mode with 3 replicas.
+  # The helm chart deploys standalone (replicas=1, no --replSet);
+  # recovery.bats upgrades to RS mode but its teardown may leave a
+  # degraded state. Apply the full RS-mode spec unconditionally.
+  local current_replicas current_cmd
+  current_replicas=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+  current_cmd=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
+    -o jsonpath='{.spec.template.spec.containers[0].args[0]}' 2>/dev/null || echo "")
+
+  if [[ "$current_replicas" -lt 3 || "$current_cmd" != "--replSet" ]]; then
+    echo "MongoDB not in 3-replica RS mode (replicas=${current_replicas}, args[0]=${current_cmd}), upgrading..."
+    kubectl --context "$ctx" -n mongo-1 apply -f - <<'RS_EOF'
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+  namespace: mongo-1
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mongodb
+  serviceName: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+        app.kubernetes.io/name: mongodb
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      containers:
+        - name: mongodb
+          image: mongo:7
+          command: ["mongod"]
+          args: ["--replSet", "rs0", "--bind_ip_all"]
+          ports:
+            - containerPort: 27017
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+            readOnlyRootFilesystem: false
+          readinessProbe:
+            exec:
+              command: ["mongosh", "--quiet", "--norc", "--eval", "db.adminCommand('ping').ok"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+RS_EOF
+    kubectl --context "$ctx" -n mongo-1 \
+      rollout status statefulset/mongodb --timeout=300s
+
+    # Initialize the replica set if not already done
+    kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
+      "mongodb://localhost:27017/admin" --eval "
+        try {
+          rs.initiate({_id:'rs0', members:[
+            {_id:0, host:'mongodb-0.mongodb.mongo-1.svc.cluster.local:27017', priority:2},
+            {_id:1, host:'mongodb-1.mongodb.mongo-1.svc.cluster.local:27017', priority:1},
+            {_id:2, host:'mongodb-2.mongodb.mongo-1.svc.cluster.local:27017', priority:1}
+          ]});
+        } catch(e) {
+          if (/AlreadyInitialized/.test(e.message)) { print('RS already initialized'); }
+          else { throw e; }
+        }" 2>/dev/null || true
+  fi
+
+  # Ensure mongodb-0 has priority 2 (recovery tests may have set all to 1).
+  kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://localhost:27017/admin" --eval "
+      try {
+        var cfg = rs.conf();
+        var needsReconfig = false;
+        cfg.members.forEach(function(m) {
+          var target = m.host.indexOf('mongodb-0') !== -1 ? 2 : 1;
+          if (m.priority !== target) { m.priority = target; needsReconfig = true; }
+        });
+        if (needsReconfig) {
+          cfg.version++;
+          rs.reconfig(cfg, {force: true});
+          print('Reconfigured RS priorities (mongodb-0 → 2)');
+        } else {
+          print('RS priorities OK');
+        }
+      } catch(e) { print('Priority reconfig skipped: ' + e.message); }
+    " 2>/dev/null || true
+
+  # Wait for mongodb-0 to become PRIMARY (priority=2 ensures this).
+  # _mongo_exec connects to mongodb-0 directly, so it must be writable.
+  local elapsed=0
+  while (( elapsed < 120 )); do
+    local role
+    role=$(kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -c mongodb -- \
+      mongosh --quiet --norc --eval "try{var h=db.hello();print(h.isWritablePrimary?'PRIMARY':'OTHER');}catch(e){print('ERR');}" \
+      2>/dev/null | tail -1 | tr -d '\r') || role="ERR"
+    [[ "$role" == "PRIMARY" ]] && { echo "MongoDB RS healthy — mongodb-0 is PRIMARY"; return 0; }
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  echo "WARNING: mongodb-0 did not become PRIMARY after 120s" >&2
+  return 1
 }
 
 setup() {
@@ -92,8 +222,15 @@ _mongo_exec() {
   local user pass
   user="$(_root_user)"
   pass="$(_root_pass)"
+  local rs_hosts="mongodb-0.mongodb.mongo-1.svc.cluster.local:27017,mongodb-1.mongodb.mongo-1.svc.cluster.local:27017,mongodb-2.mongodb.mongo-1.svc.cluster.local:27017"
   kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
-    mongosh --quiet --norc "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" --eval "$js"
+    mongosh --quiet --norc \
+      --host "rs0/${rs_hosts}" \
+      --username="$user" \
+      --password="$pass" \
+      --authenticationDatabase "admin" \
+      "admin" \
+      --eval "$js"
 }
 
 _mongo_exec_as() {
@@ -101,12 +238,14 @@ _mongo_exec_as() {
   local username="$2"
   local password="$3"
   local js="$4"
+  local rs_hosts="mongodb-0.mongodb.mongo-1.svc.cluster.local:27017,mongodb-1.mongodb.mongo-1.svc.cluster.local:27017,mongodb-2.mongodb.mongo-1.svc.cluster.local:27017"
 
   kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
     mongosh --quiet --norc \
-      --username "$username" \
-      --password "$password" \
-      --authenticationDatabase "$auth_db" \
+      --host "rs0/${rs_hosts}" \
+      --username="$username" \
+      --password="$password" \
+      --authenticationDatabase="$auth_db" \
       "$auth_db" \
       --eval "$js"
 }

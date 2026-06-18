@@ -1,75 +1,108 @@
+#!/usr/bin/env bats
+
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  if [[ "${DB_MODE:-single}" == "dual" ]]; then
-    deploy_mariadb_dual "mariadb-3"
-  else
-    deploy_mariadb "mariadb-3"
-  fi
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
+
+  CTX_A="kind-cluster-a"
+  CTX_B="kind-cluster-b"
+  NS="db-ops"
+  AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
+
+  kubectl --context "$CTX_B" -n "$NS" wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
+  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
+    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
+
+  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
+
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
 setup() {
-  load '../test_helper/common_setup'
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
 }
 
-teardown_file() {
-  if [[ "${DB_MODE:-single}" == "dual" ]]; then
-    kubectl --context kind-cluster-dbs-a delete ns mariadb-3 --ignore-not-found
-    kubectl --context kind-cluster-dbs-b delete ns mariadb-3 --ignore-not-found
-  else
-    kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mariadb-3 --ignore-not-found
-  fi
+kexec() {
+  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
 }
 
-_mariadb_status_payload() {
-  jq -nc '{
-    namespace: "mariadb-3",
+http_post() {
+  local url="$1" body="$2"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X POST '${url}' \
+    -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Content-Type: application/json' \
+    -d '${body}'")
+
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+wait_for_task() {
+  local base_url="$1" task_id="$2" max_wait="${3:-540}"
+  local elapsed=0 status
+
+  while (( elapsed < max_wait )); do
+    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
+      -H 'Authorization: Bearer ${TOKEN}' \
+      '${base_url}/executions/${task_id}'")
+    export TASK_RESPONSE
+
+    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
+    [[ "$status" == "completed" ]] && return 0
+    [[ "$status" == "failed" ]] && { echo "Task ${task_id} failed: ${TASK_RESPONSE}" >&2; return 1; }
+
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+
+  echo "Task ${task_id} timed out after ${max_wait}s (status: ${status})" >&2
+  return 1
+}
+
+_task_result_data() {
+  echo "$TASK_RESPONSE" | jq -c '
+    .result.data as $data |
+    (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))
+  '
+}
+
+# --- Tests ---
+
+@test "status returns MariaDB summary" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mariadb-1",
     resource: "mariadb",
     mdb: "mariadb"
-  }'
-}
+  }')
 
-_assert_mariadb_status_ok() {
-  local aqsh_url="$1"
-  local label="$2"
-  local payload
-
-  payload="$(_mariadb_status_payload)"
-  http_post "${aqsh_url}/tasks/status" "$payload"
+  http_post "${AQSH_URL}/tasks/status" "$payload"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
-  if [[ -z "$task_id" ]]; then
-    echo "expected task id in response: $HTTP_BODY" >&2
-    return 1
-  fi
-  wait_for_task "$aqsh_url" "$task_id"
+  [[ -n "$task_id" ]]
+  wait_for_task "$AQSH_URL" "$task_id"
 
-  local result_status pod_count
-  result_status=$(echo "$TASK_RESPONSE" | jq -r '((.result.data as $data | (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))) | .status // "unknown")')
-  pod_count=$(echo "$TASK_RESPONSE" | jq -r '((.result.data as $data | (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))) | .pods | length)')
+  local result result_status pod_count
+  result="$(_task_result_data)"
+  result_status=$(echo "$result" | jq -r '.status // "unknown"')
+  pod_count=$(echo "$result" | jq -r '.pods | length')
 
-  echo "${label} status result: status=${result_status} pods=${pod_count}"
+  echo "status result: status=${result_status} pods=${pod_count}"
   case "$result_status" in
     OK|WARN) ;;
     *)
-      echo "$TASK_RESPONSE" | jq '.' >&2
-      echo "expected ${label} status OK or WARN, got ${result_status}" >&2
+      echo "$result" | jq '.' >&2
+      echo "expected status OK or WARN, got ${result_status}" >&2
       return 1
       ;;
   esac
-  assert [ "$pod_count" -gt 0 ]
-}
-
-@test "status returns MariaDB summary" {
-  _assert_mariadb_status_ok "$MARIADB_AQSH_URL" "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}"
-}
-
-@test "dual mode status returns MariaDB summary on cluster-b" {
-  if [[ "${DB_MODE:-single}" != "dual" ]]; then
-    skip "DB_MODE is not dual"
-  fi
-
-  _assert_mariadb_status_ok "$MARIADB_AQSH_B_URL" "kind-cluster-dbs-b"
+  [[ "$pod_count" -gt 0 ]]
 }

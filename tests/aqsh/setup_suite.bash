@@ -11,6 +11,7 @@
 
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  "${ROOT_DIR}/scripts/preflight.sh"
   source "${ROOT_DIR}/infra/deploy.sh"
 
   local CTX_A="kind-cluster-a"
@@ -19,6 +20,9 @@ setup_suite() {
 
   # Layer 0: shared infra (idempotent)
   setup_infra
+
+  wait_ns_gone kind-cluster-a aqsh-test
+  wait_ns_gone kind-cluster-b aqsh-test
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
@@ -95,9 +99,14 @@ EOF
 }
 
 teardown_suite() {
-  if [[ "${TEARDOWN:-}" != "true" ]]; then
-    return 0
+  local ctx_a="kind-cluster-a"
+  local ctx_b="kind-cluster-b"
+
+  kubectl --context "$ctx_a" delete ns aqsh-test --ignore-not-found  || true
+  kubectl --context "$ctx_b" delete ns aqsh-test --ignore-not-found  || true
+
+  if [[ "${TEARDOWN:-}" == "true" ]]; then
+    ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    helmfile destroy -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" || true
   fi
-  ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  helmfile destroy -f "${ROOT_DIR}/tests/aqsh/helmfile.yaml" || true
 }

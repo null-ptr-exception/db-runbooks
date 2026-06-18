@@ -58,25 +58,9 @@ jobs:
       - name: Build db-runbooks task image
         run: docker build -t "${IMAGE_DB_RUNBOOKS}:ci" .
 
-  integration:
+  mariadb:
     runs-on: [self-hosted, aws-runner]
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        include:
-          - db_mode: single
-            use_mariadb_operator: "true"
-          - db_mode: single
-            use_mariadb_operator: "false"
-          - db_mode: dual
-            use_mariadb_operator: "true"
-          - db_mode: dual
-            use_mariadb_operator: "false"
-    env:
-      DB_MODE: ${{ matrix.db_mode }}
-      USE_MARIADB_OPERATOR: ${{ matrix.use_mariadb_operator }}
+    timeout-minutes: 30
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -88,15 +72,18 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Run BATS tests (DB_MODE=${{ matrix.db_mode }}, USE_MARIADB_OPERATOR=${{ matrix.use_mariadb_operator }})
-        run: ./scripts/test.sh
+      - name: Run mariadb test suite
+        run: bats tests/mariadb/
 
       - name: Tear down clusters
         if: always()
-        run: ./scripts/teardown.sh
+        run: |
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true
 
   publish-image:
-    needs: [lint, build-image, integration]
+    needs: [lint, build-image, mariadb, mongodb]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -143,9 +130,6 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
-
       - name: Run infra e2e tests
         run: bats tests/infra/
 
@@ -170,9 +154,6 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
-
       - name: Run aqsh test suite
         run: bats tests/aqsh/
 
@@ -196,9 +177,6 @@ jobs:
         run: |
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
-
-      - name: Install prerequisites
-        run: ./scripts/preflight.sh
 
       - name: Run mongodb test suite
         run: bats tests/mongodb/

@@ -224,7 +224,13 @@ _mongo_exec() {
   pass="$(_root_pass)"
   local rs_hosts="mongodb-0.mongodb.mongo-1.svc.cluster.local:27017,mongodb-1.mongodb.mongo-1.svc.cluster.local:27017,mongodb-2.mongodb.mongo-1.svc.cluster.local:27017"
   kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
-    mongosh --quiet --norc "mongodb://${user}:${pass}@${rs_hosts}/admin?replicaSet=rs0&authSource=admin" --eval "$js"
+    mongosh --quiet --norc \
+      --host "rs0/${rs_hosts}" \
+      --username="$user" \
+      --password="$pass" \
+      --authenticationDatabase "admin" \
+      "admin" \
+      --eval "$js"
 }
 
 _mongo_exec_as() {
@@ -237,9 +243,9 @@ _mongo_exec_as() {
   kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- \
     mongosh --quiet --norc \
       --host "rs0/${rs_hosts}" \
-      --username "$username" \
-      --password "$password" \
-      --authenticationDatabase "$auth_db" \
+      --username="$username" \
+      --password="$password" \
+      --authenticationDatabase="$auth_db" \
       "$auth_db" \
       --eval "$js"
 }

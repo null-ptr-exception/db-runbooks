@@ -185,7 +185,7 @@ jobs:
 
   mongodb:
     runs-on: [self-hosted, aws-runner]
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -200,12 +200,18 @@ jobs:
       - name: Install prerequisites
         run: ./scripts/preflight.sh
 
+      - name: Provision multi-cluster sandbox (mongo-1/2/3 RS tests)
+        run: |
+          ./scripts/setup-clusters.sh
+          ./scripts/deploy-infra.sh
+
       - name: Run mongodb test suite
         run: bats tests/mongodb/
 
       - name: Tear down clusters
         if: always()
         run: |
+          ./scripts/teardown.sh || true
           kind delete cluster --name cluster-a 2>/dev/null || true
           kind delete cluster --name cluster-b 2>/dev/null || true
           docker rm -f registry 2>/dev/null || true

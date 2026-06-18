@@ -434,7 +434,12 @@ EOF
   fi
 
   kubectl --context "$ctx" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/${namespace}.yaml"
-  kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
+  # nodeport-service.yaml hardcodes nodePort 30090 for cross-cluster replication
+  # (dual mode only) — applying it per-namespace in single mode would collide
+  # across mongo-1/2/3 sharing the same cluster-dbs context.
+  if [[ "${DB_MODE:-single}" == "dual" ]]; then
+    kubectl --context "$ctx" -n "$namespace" apply -f "${ROOT_DIR}/k8s/cluster-dbs/mongodb/nodeport-service.yaml"
+  fi
 
   echo "Waiting for MongoDB in ${namespace} to be ready..."
   if ! kubectl --context "$ctx" -n "$namespace" rollout status statefulset/mongodb --timeout=300s 2>/dev/null; then

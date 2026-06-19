@@ -132,9 +132,11 @@ The recovery system **requires MongoDB to run in Replica Set mode with at least
 | G3 `NO_HEALTHY_SOURCE` | Always fails — the target IS the only pod, so no sync source exists | Passes when at least one other member is healthy |
 | G7 `TARGET_IS_PRIMARY` | Always blocks — `db.hello().ismaster` is `true` on standalone; `rs.stepDown()` is not valid | Correctly checks RS role; standalone sets `h.setName=undefined` so the gate skips |
 
-This repo's manifests (`k8s/cluster-dbs/mongodb/mongo-*.yaml`) deploy 3-replica
-RS clusters (`--replSet rs0`).  `scripts/deploy.sh` initialises the replica set
-and creates the root user automatically.
+This repo's `mongo-1` test namespace deploys as a single-replica standalone by
+default (see `tests/chart/templates/mongodb.yaml`); the `recovery.bats`
+integration suite upgrades it to a 3-replica RS (`--replSet rs0`) in its
+`setup_file`, initialises the replica set, and creates the root user — see
+that file for a working reference of every step below.
 
 **Minimum conditions before calling any recovery task:**
 
@@ -147,10 +149,11 @@ and creates the root user automatically.
 
 ## One-Time Setup
 
-> **This repo's `k8s/cluster-dbs/mongodb/` manifests use standard `mongo:N`
-> images.**  `scripts/deploy.sh` automatically applies the ConfigMap and STS
-> patch below for every namespace it deploys.  Run the commands manually only
-> if you are setting up a namespace outside the normal deploy flow.
+> **This repo's MongoDB test fixture uses the standard `mongo:N` image.**
+> `tests/mongodb/recovery.bats`'s `setup_file` applies the ConfigMap and STS
+> patch below against the `mongo-1` namespace before any recovery test runs.
+> Run the commands manually only when setting up a namespace outside that
+> test flow.
 
 Apply the recovery ConfigMap (satisfies G2) and patch the StatefulSet to add
 the `data-recovery` init container (satisfies G1).  Choose the block that
@@ -159,13 +162,21 @@ matches your MongoDB image type.
 ### Standard `mongo:N` image (this repo's default)
 
 ```bash
-CONTEXT=kind-cluster-dbs          # always target an explicit cluster
+CONTEXT=kind-cluster-a          # always target an explicit cluster
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
 IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
 REPLICAS=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.replicas}')
 
-kubectl --context $CONTEXT -n $NAMESPACE apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml
+kubectl --context $CONTEXT -n $NAMESPACE apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-recovery-config
+data:
+  wipe-targets: ""
+  recovery-version: "0"
+EOF
 
 kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
 {
@@ -202,12 +213,20 @@ Bitnami paths).
 ### Bitnami helm chart
 
 ```bash
-CONTEXT=kind-cluster-dbs
+CONTEXT=kind-cluster-a
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
 IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-kubectl --context $CONTEXT -n $NAMESPACE apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml
+kubectl --context $CONTEXT -n $NAMESPACE apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongodb-recovery-config
+data:
+  wipe-targets: ""
+  recovery-version: "0"
+EOF
 
 kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
 {
@@ -617,8 +636,8 @@ first blocking failure).
 
 | Gate | Check | Failure behavior | Suggestion |
 |---|---|---|---|
-| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Run `scripts/deploy.sh`, or apply the One-Time Setup patch manually |
-| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Run `scripts/deploy.sh`, or `kubectl apply -f k8s/cluster-dbs/mongodb/recovery-configmap.yaml` |
+| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Apply the One-Time Setup patch above |
+| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Apply the One-Time Setup ConfigMap above |
 | **G3** | ≥1 healthy sync source (health=1) and a PRIMARY is elected | BLOCK | Run `recovery/fix-no-primary level=diagnose` |
 | **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
 | **G5** | Data size < 100 GB (overridable with `force_wipe=true`) | BLOCK | Use VolumeSnapshot or mongodump for large datasets |
@@ -658,8 +677,8 @@ Required oplog: 2730 MB  →  PASS (4096 >= 2730)
 ### Phase 0: Always run pre-check first
 
 ```bash
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
-URL="http://<cluster-dbs-ip>:30082"
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=30m)
+URL="http://aqsh-mongodb.kind-a.test:30080"
 
 curl -s -X POST "$URL/tasks/recovery/pre-check" \
   -H "Authorization: Bearer $TOKEN" \
@@ -683,7 +702,7 @@ POST /tasks/recovery/recover  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Then monitor initial sync until the pod catches up:
 POST /tasks/recovery/status   {"namespace":"mongo-1"}
-# or: kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
+# or: kubectl --context kind-cluster-a -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
 ```
 
 **Manual step-by-step (for special cases or debugging):**
@@ -696,21 +715,21 @@ POST /tasks/recovery/pre-check  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 POST /tasks/recovery/wipe       {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Step 3: monitor pod restart
-kubectl --context kind-cluster-dbs -n mongo-1 get pods -w
+kubectl --context kind-cluster-a -n mongo-1 get pods -w
 # When mongodb-2 shows Running (not Terminating/Init):
 
 # Step 4: clear recovery state IMMEDIATELY
 POST /tasks/recovery/reset      {"namespace":"mongo-1"}
 
 # Step 5: verify sync (run repeatedly until optimeDate matches primary)
-kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
+kubectl --context kind-cluster-a -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
 ```
 
 ---
 
 ### Scenario B: Corrupted Primary (pod-0 or whichever pod holds PRIMARY)
 
-Pod-0 starts with `priority=2` (set by `deploy.sh`) so it becomes primary by
+Pod-0 starts with `priority=2` (set during RS init) so it becomes primary by
 default, but after `recovery_fix_reconfig` resets member priorities all pods
 become equal candidates.  G7 checks `db.hello()`
 on the target pod regardless of its ordinal and blocks if it is currently
@@ -783,7 +802,7 @@ with corrupted data.
 ## RBAC Requirements
 
 The `aqsh-mongo-manager` ClusterRole must include (mirrors
-`k8s/cluster-dbs/mongodb/rbac.yaml`):
+`tests/chart/templates/mongodb-rbac.yaml`):
 
 ```yaml
 rules:
@@ -830,9 +849,8 @@ rules:
 ## API Examples
 
 ```bash
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
-URL="http://$(kubectl --context kind-cluster-dbs -n db-ops get svc aqsh-mongodb -o jsonpath='{.spec.clusterIP}'):4180"
-# or via NodePort: http://<cluster-dbs-ip>:30082
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=30m)
+URL="http://aqsh-mongodb.kind-a.test:30080"
 
 # 1. Status
 curl -s -X POST "$URL/tasks/recovery/status" \
@@ -869,12 +887,15 @@ curl -s -X POST "$URL/tasks/recovery/fix-no-primary" \
 ## Test Coverage Notes
 
 Integration tests (`tests/mongodb/recovery.bats`) exercise the full
-`recovery/recover` path twice against a real 3-member RS, always targeting
-the **highest ordinal** (mongodb-2). The following paths are deliberately
-**not** covered by integration tests and rely on unit tests + this runbook:
+`recovery/recover` path against a real 3-member RS — including both
+mongodb-1 and mongodb-2 as targets, the `recovery/wipe` + manual
+`recovery/reset` split flow, and `credential_user` end-to-end through
+`pre-check` and `fix-no-primary`. They also pin down that `setup_file`'s own
+RS bootstrap is idempotent — re-running `rs.initiate()` against an
+already-initialised set and `createUser` against an existing root user must
+not crash. The following paths are deliberately **not** covered by
+integration tests and rely on unit tests + this runbook:
 
-- `recovery/wipe` followed by a manual `recovery/reset` (the split flow)
-- Wiping a lower-ordinal pod (see the quorum warning above)
 - `fix-no-primary` levels `unfreeze` / `reconfig` / `force-primary`
   (require deliberately breaking the cluster)
 - The recover timeout path where `wipe-targets` is intentionally left in

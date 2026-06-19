@@ -11,6 +11,24 @@ export CTX_A="kind-cluster-a"
 export CTX_B="kind-cluster-b"
 export REGISTRY="localhost:5005"
 
+wait_ns_gone() {
+  local ctx="$1"; shift
+  local max_wait="${WAIT_NS_GONE_TIMEOUT:-180}"
+  for ns in "$@"; do
+    local elapsed=0
+    while kubectl --context "$ctx" get ns "$ns" 2>/dev/null | grep -q Terminating; do
+      if (( elapsed >= max_wait )); then
+        echo "Timed out waiting for namespace ${ns} to terminate on ${ctx}" >&2
+        kubectl --context "$ctx" get ns "$ns" -o yaml >&2 || true
+        return 1
+      fi
+      echo "Waiting for namespace $ns to terminate on $ctx..."
+      sleep 3
+      elapsed=$((elapsed + 3))
+    done
+  done
+}
+
 setup_infra() {
   local INFRA_DIR
   INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

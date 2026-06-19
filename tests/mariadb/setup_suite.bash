@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# MongoDB test suite setup
+# MariaDB test suite setup
 #
-# Deploys the MongoDB control plane + a test instance on the 2-cluster infra.
+# Deploys the MariaDB control plane + test instances on the 2-cluster infra.
 #
 # cluster-a (server):
-#   mongo-core: kube-federated-auth, kube-auth-proxy + aqsh-mongodb, Redis
-#   mongo-1:   MongoDB StatefulSet
-# cluster-b (client):
-#   mongo-core: test-client pod
+#   db-ops:     kube-federated-auth, kube-auth-proxy + aqsh-mariadb, Redis
+#   mariadb-1:  MariaDB instance (operator-managed)
+# cluster-b (server + client):
+#   db-ops:     test-client pod, kube-auth-proxy + aqsh-mariadb, Redis
+#   mariadb-1:  MariaDB instance (operator-managed)
+#   minio:      MinIO for backup tests
 
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -16,23 +18,38 @@ setup_suite() {
 
   local CTX_A="kind-cluster-a"
   local CTX_B="kind-cluster-b"
-  local NS="mongo-core"
+  local NS="db-ops"
 
   # Layer 0: shared infra (idempotent)
   setup_infra
 
-  wait_ns_gone "$CTX_A" mongo-core mongo-1
-  wait_ns_gone "$CTX_B" mongo-core minio
+  wait_ns_gone "$CTX_A" db-ops mariadb-1
+  wait_ns_gone "$CTX_B" db-ops mariadb-1 minio
+
+  # Install mariadb-operator CRDs and operator on both clusters
+  helm repo add mariadb-operator https://helm.mariadb.com/mariadb-operator 2>/dev/null || true
+  helm repo update mariadb-operator
+
+  for ctx in "$CTX_A" "$CTX_B"; do
+    echo "Installing mariadb-operator CRDs on ${ctx}..."
+    helm upgrade --install mariadb-operator-crds mariadb-operator/mariadb-operator-crds \
+      --kube-context "$ctx" \
+      --wait
+    echo "Installing mariadb-operator on ${ctx}..."
+    helm upgrade --install mariadb-operator mariadb-operator/mariadb-operator \
+      --kube-context "$ctx" \
+      --namespace db-ops \
+      --create-namespace \
+      --wait
+  done
 
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
   docker push localhost:5005/db-runbooks:latest
 
-  local HELMFILE="${ROOT_DIR}/tests/mongodb/helmfile.yaml"
+  local HELMFILE="${ROOT_DIR}/tests/mariadb/helmfile.yaml"
 
   # First apply: deploy everything with default (empty) runtime values.
-  # This creates SAs, RBAC, and all workloads. Federated-auth starts
-  # without real tokens — that's fine, we fix it in the second apply.
   helmfile apply -f "$HELMFILE"
 
   [[ -n "${CLUSTER_A_IP:-}" ]] || { echo "CLUSTER_A_IP not set by setup_infra" >&2; return 1; }
@@ -57,7 +74,7 @@ setup_suite() {
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
   # Write runtime-discovered values to a temp file
-  local RUNTIME_VALUES="${ROOT_DIR}/tests/mongodb/runtime-values.yaml"
+  local RUNTIME_VALUES="${ROOT_DIR}/tests/mariadb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
 federatedAuth:
   clusters:
@@ -77,40 +94,54 @@ $(echo "$CA_B" | sed 's/^/      /')
     cluster-b-token: "${TOKEN_B}"
 EOF
 
-  # Second apply: inject real runtime values. Helm updates only the
-  # resources whose values changed (Secret, ConfigMaps). Drift-free.
-  # The checksum annotation on the Deployment triggers a rollout automatically.
+  # Second apply: inject real runtime values.
   helmfile apply -f "$HELMFILE" --values "$RUNTIME_VALUES"
   rm -f "$RUNTIME_VALUES"
 
-  # Wait for deployments
+  # Wait for deployments on cluster-a
   echo "Waiting for kube-federated-auth..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/kube-federated-auth --timeout=120s
 
-  echo "Waiting for redis..."
+  echo "Waiting for redis (cluster-a)..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/redis --timeout=60s
 
-  echo "Waiting for aqsh..."
+  echo "Waiting for aqsh (cluster-a)..."
   kubectl --context "$CTX_A" -n "$NS" rollout status deployment/aqsh --timeout=120s
 
-  echo "Waiting for mongodb..."
-  kubectl --context "$CTX_A" -n mongo-1 rollout status statefulset/mongodb --timeout=120s
+  echo "Waiting for mariadb (cluster-a)..."
+  kubectl --context "$CTX_A" -n mariadb-1 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s
+
+  # Wait for deployments on cluster-b
+  echo "Waiting for redis (cluster-b)..."
+  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/redis --timeout=60s
+
+  echo "Waiting for aqsh (cluster-b)..."
+  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/aqsh --timeout=120s
+
+  echo "Waiting for mariadb (cluster-b)..."
+  kubectl --context "$CTX_B" -n mariadb-1 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s
 
   echo "Waiting for test-client..."
   kubectl --context "$CTX_B" -n "$NS" rollout status deployment/test-client --timeout=60s
 
-  echo "=== mongodb test suite setup complete ==="
+  echo "=== mariadb test suite setup complete ==="
 }
 
 teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found  || true
-  kubectl --context "$ctx_b" delete ns mongo-core minio --ignore-not-found  || true
+  # Delete mariadb-1 first — the operator in db-ops processes CR finalizers.
+  # Then delete db-ops — no finalizer-bearing CRs remain.
+  kubectl --context "$ctx_a" delete ns mariadb-1 --ignore-not-found || true
+  kubectl --context "$ctx_b" delete ns mariadb-1 --ignore-not-found || true
+  kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found || true
+  kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    helmfile destroy -f "${ROOT_DIR}/tests/mongodb/helmfile.yaml" || true
+    helmfile destroy -f "${ROOT_DIR}/tests/mariadb/helmfile.yaml" || true
   fi
 }

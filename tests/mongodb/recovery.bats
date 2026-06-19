@@ -112,7 +112,7 @@ RS_EOF
     -o jsonpath='{.data.MONGO_ROOT_USER}' | base64 -d)
   mongo_pass=$(kubectl --context "$ctx" -n mongo-1 get secret mongodb-credentials \
     -o jsonpath='{.data.MONGO_ROOT_PASS}' | base64 -d)
-  local user_elapsed=0
+  local user_elapsed=0 user_ready=false
   while (( user_elapsed < 60 )); do
     # createUser must run on the primary; retry until the election settles.
     if kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
@@ -124,10 +124,15 @@ RS_EOF
           if (/already exists/.test(e.message)) { print('root user exists'); }
           else { throw e; }
         }" >/dev/null 2>&1; then
+      user_ready=true
       break
     fi
     sleep 5; user_elapsed=$((user_elapsed + 5))
   done
+  if [[ "$user_ready" != true ]]; then
+    echo "Failed to create/verify root user in mongo-1 after 60s" >&2
+    return 1
+  fi
 
   # Apply the recovery ConfigMap (G2 gate requires it)
   kubectl --context "$ctx" -n mongo-1 apply -f - <<'CM_EOF'
@@ -184,13 +189,10 @@ setup() {
 }
 
 teardown_file() {
-  # Revert all setup_file STS mutations so other test files see a clean state.
+  # Revert all setup_file STS mutations so other test files see a clean RS.
   # Do NOT delete the namespace — setup_suite owns that lifecycle.
   local ctx="kind-cluster-a"
-  kubectl --context "$ctx" -n mongo-1 \
-    patch statefulset mongodb --type=merge -p \
-    '{"spec":{"replicas":1,"updateStrategy":{"rollingUpdate":{"partition":0}}}}' \
-    2>/dev/null || true
+
   # Remove init container and recovery-config volume added by setup_file.
   # Use JSON patch to target by name so index doesn't matter.
   local ic_idx vol_idx
@@ -210,8 +212,19 @@ teardown_file() {
       -p "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/volumes/$((vol_idx-1))\"}]" \
       2>/dev/null || true
   fi
+
+  # Reset partition to 0 but keep replicas=3 so the RS stays functional.
+  kubectl --context "$ctx" -n mongo-1 \
+    patch statefulset mongodb --type=merge -p \
+    '{"spec":{"replicas":3,"updateStrategy":{"rollingUpdate":{"partition":0}}}}' \
+    2>/dev/null || true
+
   kubectl --context "$ctx" -n mongo-1 \
     delete configmap mongodb-recovery-config --ignore-not-found 2>/dev/null || true
+
+  # Wait for all pods to be ready so subsequent test files see a healthy RS.
+  kubectl --context "$ctx" -n mongo-1 \
+    rollout status statefulset/mongodb --timeout=120s 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -288,6 +301,25 @@ _init_mongodb_rs() {
         else { print('RS init error: ' + e.message); quit(1); }
       }
     " || { echo "RS initiate failed" >&2; return 1; }
+
+  # Ensure mongodb-0 has priority 2 (previous recovery runs may have set all to 1).
+  kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://localhost:27017/admin" --eval "
+      try {
+        var cfg = rs.conf();
+        var needsReconfig = false;
+        cfg.members.forEach(function(m) {
+          var target = m.host.indexOf('mongodb-0') !== -1 ? 2 : 1;
+          if (m.priority !== target) { m.priority = target; needsReconfig = true; }
+        });
+        if (needsReconfig) {
+          cfg.version++;
+          rs.reconfig(cfg, {force: true});
+          print('Reconfigured RS priorities (mongodb-0 → 2)');
+        }
+      } catch(e) { print('Priority reconfig skipped: ' + e.message); }
+    " 2>/dev/null || true
+
   echo "RS initiated — allowing time for primary election..."
   sleep 8
 }
@@ -449,6 +481,36 @@ _wait_for_rs_healthy() {
   done
   echo "_wait_for_rs_healthy: ${target_pod} did not become healthy within ${max_wait}s (last: ${state})" >&2
   return 1
+}
+
+# ── RS bootstrap idempotency: setup_file's own operations must not crash ────
+#
+# setup_file already runs rs.initiate() and createUser against mongo-1 on every
+# load, but a failure there was previously silent (no return code checked).
+# These tests pin down that re-running those two operations against state
+# that's already initialised is safe and observable, instead of relying on
+# setup_file's bootstrap succeeding by accident.
+
+@test "rs.initiate() on an already-initialised RS in mongo-1 does not error" {
+  _init_mongodb_rs "mongo-1" "$CTX_A" 3
+}
+
+@test "createUser on an existing root user in mongo-1 does not crash deploy" {
+  local mongo_user mongo_pass
+  { IFS= read -r mongo_user; IFS= read -r mongo_pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
+
+  local out
+  out=$(kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
+    "mongodb://localhost:27017/admin" --eval "
+      try {
+        db.getSiblingDB('admin').createUser({
+          user:'${mongo_user}',pwd:'${mongo_pass}',roles:[{role:'root',db:'admin'}]});
+        print('created');
+      } catch(e) {
+        if (/already exists/.test(e.message)) { print('exists'); } else { throw e; }
+      }" 2>/dev/null | tail -1 | tr -d '\r')
+  echo "createUser result: $out" >&2
+  [[ "$out" == "exists" || "$out" == "created" ]]
 }
 
 # ── recovery/status ───────────────────────────────────────────────────────────
@@ -660,6 +722,50 @@ _wait_for_rs_healthy() {
   assert_equal "$g7_pass" "true"
 }
 
+# ── credential_user: supply username directly instead of via secret key ─────
+
+@test "recovery/pre-check passes when credential_user is supplied directly" {
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
+
+  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"mongodb-2\",
+      \"credential_user\":\"${user}\",
+      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result g3_pass
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  g3_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G3") | .pass' 2>/dev/null || echo "null")
+  assert_equal "$g3_pass" "true"
+}
+
+@test "recovery/pre-check credential_user overrides a wrong credential_user_key" {
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
+
+  # credential_user_key points at a key that does not exist in the secret —
+  # credential_user must make that lookup irrelevant.
+  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"mongodb-2\",
+      \"credential_user\":\"${user}\",\"credential_user_key\":\"NONEXISTENT_KEY\",
+      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result g3_pass
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  g3_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G3") | .pass' 2>/dev/null || echo "null")
+  assert_equal "$g3_pass" "true"
+}
+
 @test "recovery/pre-check G8 reports no RECOVERING members on healthy cluster" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
     '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
@@ -716,6 +822,24 @@ _wait_for_rs_healthy() {
   http_post "${AQSH_URL}/tasks/recovery%2Ffix-no-primary" \
     '{"namespace":"mongo-1","level":"invalid-level"}'
   [ "$HTTP_CODE" != "202" ]
+}
+
+@test "recovery/fix-no-primary diagnose works with credential_user" {
+  local user pass
+  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
+
+  http_post "${AQSH_URL}/tasks/recovery%2Ffix-no-primary" \
+    "{\"namespace\":\"mongo-1\",\"level\":\"diagnose\",\"credential_user\":\"${user}\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result diagnosis
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  diagnosis=$(echo "$result" | jq -r '.diagnosis // empty')
+  assert_equal "$diagnosis" "PRIMARY_EXISTS"
 }
 
 # ── recovery/reset (idempotent — safe to run on a clean cluster) ──────────────
@@ -780,7 +904,7 @@ _wait_for_rs_healthy() {
   # so replSetSyncFrom usually fails (false) unless the tiny dataset syncs within
   # the retry window. Both outcomes are valid; recovery success must not depend on it.
   local sync_src_set
-  sync_src_set=$(echo "$result" | jq -r '.sync_source_set // "MISSING"')
+  sync_src_set=$(echo "$result" | jq -r 'if has("sync_source_set") then (.sync_source_set | tostring) else "MISSING" end')
   [ "$sync_src_set" != "MISSING" ]
   [[ "$sync_src_set" == "true" || "$sync_src_set" == "false" ]]
 
@@ -830,7 +954,7 @@ _wait_for_rs_healthy() {
   local result
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   local sync_src_set
-  sync_src_set=$(echo "$result" | jq -r '.sync_source_set // "MISSING"')
+  sync_src_set=$(echo "$result" | jq -r 'if has("sync_source_set") then (.sync_source_set | tostring) else "MISSING" end')
   [ "$sync_src_set" != "MISSING" ]
   [[ "$sync_src_set" == "true" || "$sync_src_set" == "false" ]]
 
@@ -945,11 +1069,11 @@ _wait_for_rs_healthy() {
   _stepdown_pod0 "mongo-1" "$ctx" 120
 
   local primary_pod
-  primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+  primary_pod=$(_find_primary_pod "mongo-1" "$ctx") || true
   # If the election hasn't settled yet, give it a few more seconds.
   if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
     sleep 10
-    primary_pod=$(_find_primary_pod "mongo-1" "$ctx")
+    primary_pod=$(_find_primary_pod "mongo-1" "$ctx") || true
   fi
   if [[ -z "$primary_pod" || "$primary_pod" == "mongodb-0" ]]; then
     skip "Could not elect a non-pod-0 primary within stepdown window"
@@ -1065,4 +1189,78 @@ _wait_for_rs_healthy() {
   kubectl --context "$ctx" -n mongo-1 \
     wait pod mongodb-0 --for=condition=Ready --timeout=300s >/dev/null 2>&1 || true
   _wait_for_rs_healthy "mongo-1" "mongodb-0" "$ctx" 300
+}
+
+# ── recovery/wipe vs recovery/recover: manual split flow ─────────────────────
+#
+# recovery/wipe only runs gate-mode checks + sets wipe-targets — it does NOT
+# auto-reset like recovery/recover does. These tests prove that distinction:
+# wipe alone leaves wipe-targets set until an explicit recovery/reset call.
+
+@test "recovery/wipe leaves wipe-targets set until a manual recovery/reset" {
+  local ctx="$CTX_A"
+
+  # Pick a non-primary target dynamically — the previous test's stepdown/
+  # re-election may not have fully settled back to pod-0 yet.
+  local primary_pod target=""
+  primary_pod=$(_find_primary_pod "mongo-1" "$ctx") || true
+  for p in mongodb-2 mongodb-1 mongodb-0; do
+    [[ "$p" != "$primary_pod" ]] && { target="$p"; break; }
+  done
+  echo "Primary: ${primary_pod}  wipe target: ${target}" >&2
+
+  local before_uid
+  before_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod "$target" -o jsonpath='{.metadata.uid}')
+
+  http_post "${AQSH_URL}/tasks/recovery%2Fwipe" \
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${target}\",
+      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local wipe_task_id
+  wipe_task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$wipe_task_id" 120
+
+  # wipe.sh does not call reset — wipe-targets must still be set
+  local wipe_targets
+  wipe_targets=$(kubectl --context "$ctx" -n mongo-1 \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  echo "wipe-targets after wipe (no reset): '${wipe_targets}'" >&2
+  assert_equal "$wipe_targets" "$target"
+
+  # Wait for the pod to restart and come back Running
+  local elapsed=0
+  until [[ "$(kubectl --context "$ctx" -n mongo-1 \
+      get pod "$target" -o jsonpath='{.metadata.uid}' 2>/dev/null || echo '')" \
+      != "$before_uid" ]]; do
+    [[ $elapsed -ge 300 ]] && { echo "Pod did not restart within 300s" >&2; break; }
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  elapsed=0
+  until kubectl --context "$ctx" -n mongo-1 \
+      get pod "$target" -o jsonpath='{.status.phase}' 2>/dev/null | grep -q Running; do
+    [[ $elapsed -ge 300 ]] && { echo "Pod did not reach Running within 300s" >&2; break; }
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  local after_uid
+  after_uid=$(kubectl --context "$ctx" -n mongo-1 \
+    get pod "$target" -o jsonpath='{.metadata.uid}')
+  [ "$before_uid" != "$after_uid" ]
+
+  # Explicit reset clears it
+  http_post "${AQSH_URL}/tasks/recovery%2Freset" '{"namespace":"mongo-1"}'
+  assert_equal "$HTTP_CODE" "202"
+  local reset_task_id
+  reset_task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$reset_task_id"
+
+  wipe_targets=$(kubectl --context "$ctx" -n mongo-1 \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  assert_equal "$wipe_targets" ""
+
+  # Leave mongo-1 healthy for any test file that runs after this one
+  kubectl --context "$ctx" -n mongo-1 \
+    wait pod "$target" --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
+  _wait_for_rs_healthy "mongo-1" "$target" "$ctx" 180
 }

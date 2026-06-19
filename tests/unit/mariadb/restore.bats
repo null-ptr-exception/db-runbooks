@@ -16,7 +16,7 @@
 # A live restore (real backup round-trip) belongs in the dual-cluster e2e suite.
 
 setup() {
-  REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   RESTORE_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/restore.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
 

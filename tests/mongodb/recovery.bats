@@ -285,17 +285,29 @@ _init_mongodb_rs() {
     members+="{_id:${i},host:'mongodb-${i}.mongodb.${namespace}.svc.cluster.local:27017',priority:${prio}},"
   done
   members="${members%,}"
-  kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
-    "mongodb://localhost:27017/admin" \
-    --eval "
-      try {
-        var r = rs.initiate({_id: 'rs0', members: [${members}]});
-        print('RS initiate: ' + JSON.stringify(r));
-      } catch(e) {
-        if (e.codeName === 'AlreadyInitialized') { print('RS already initialized'); }
-        else { print('RS init error: ' + e.message); quit(1); }
-      }
-    " || { echo "RS initiate failed" >&2; return 1; }
+  local rs_ok=false
+  local attempt
+  for attempt in 1 2 3; do
+    if kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \
+      "mongodb://localhost:27017/admin" \
+      --eval "
+        try {
+          var r = rs.initiate({_id: 'rs0', members: [${members}]});
+          print('RS initiate: ' + JSON.stringify(r));
+        } catch(e) {
+          if (e.codeName === 'AlreadyInitialized') { print('RS already initialized'); }
+          else { print('RS init error: ' + e.message); quit(1); }
+        }
+      "; then
+      rs_ok=true
+      break
+    fi
+    echo "RS initiate attempt $attempt failed, retrying in 5s..." >&2
+    sleep 5
+  done
+  if [[ "$rs_ok" != "true" ]]; then
+    echo "RS initiate failed after 3 attempts" >&2; return 1
+  fi
 
   # Ensure mongodb-0 has priority 2 (previous recovery runs may have set all to 1).
   kubectl --context "$ctx" -n "$namespace" exec mongodb-0 -- mongosh --quiet --norc \

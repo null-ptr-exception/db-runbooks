@@ -103,18 +103,30 @@ RS_EOF
       rollout status statefulset/mongodb --timeout=300s
 
     # Initialize the replica set if not already done
-    kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
-      "mongodb://localhost:27017/admin" --eval "
-        try {
-          rs.initiate({_id:'rs0', members:[
-            {_id:0, host:'mongodb-0.mongodb.mongo-1.svc.cluster.local:27017', priority:2},
-            {_id:1, host:'mongodb-1.mongodb.mongo-1.svc.cluster.local:27017', priority:1},
-            {_id:2, host:'mongodb-2.mongodb.mongo-1.svc.cluster.local:27017', priority:1}
-          ]});
-        } catch(e) {
-          if (/AlreadyInitialized/.test(e.message)) { print('RS already initialized'); }
-          else { throw e; }
-        }" 2>/dev/null || true
+    local rs_ok=false
+    local attempt
+    for attempt in 1 2 3; do
+      if kubectl --context "$ctx" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
+        "mongodb://localhost:27017/admin" --eval "
+          try {
+            rs.initiate({_id:'rs0', members:[
+              {_id:0, host:'mongodb-0.mongodb.mongo-1.svc.cluster.local:27017', priority:2},
+              {_id:1, host:'mongodb-1.mongodb.mongo-1.svc.cluster.local:27017', priority:1},
+              {_id:2, host:'mongodb-2.mongodb.mongo-1.svc.cluster.local:27017', priority:1}
+            ]});
+          } catch(e) {
+            if (/AlreadyInitialized/.test(e.message)) { print('RS already initialized'); }
+            else { throw e; }
+          }"; then
+        rs_ok=true
+        break
+      fi
+      echo "RS initiate attempt $attempt failed, retrying in 5s..." >&2
+      sleep 5
+    done
+    if [[ "$rs_ok" != "true" ]]; then
+      echo "RS initiate failed after 3 attempts" >&2; return 1
+    fi
   fi
 
   # Ensure mongodb-0 has priority 2 (recovery tests may have set all to 1).

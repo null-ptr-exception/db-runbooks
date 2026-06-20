@@ -47,6 +47,14 @@ Served by **aqsh-mongodb** on NodePort `30082`.
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | string | no | `MONGO_ROOT_USER` | Key in Secret for username |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | string | no | `MONGO_ROOT_PASS` | Key in Secret for password |
 
+> `sts_name`/`credential_secret`/`credential_user_key`/`credential_pass_key` are
+> deployment conventions sourced from internal config
+> (`/etc/aqsh/config/mongodb.env`'s `*_DEFAULT` keys) by default — the
+> "Default" column above is the library's last-resort fallback, used only
+> when neither the caller nor internal config sets a value. See
+> `docs/mongodb/recovery.md` "API Reference" and CLAUDE.md "Configuration
+> Layers".
+
 ## Response
 
 ### 202 Accepted

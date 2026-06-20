@@ -26,10 +26,11 @@ source "${LIB_DIR}/mongodb.sh"
 log_info "mongo-sanity-check" "Starting sanity check for namespace: ${DB_NAMESPACE}"
 
 # ── Configurable defaults ─────────────────────────────────────────────────────
-_STS_NAME="${MONGO_STS_NAME:-mongodb}"
-_CRED_SECRET="${MONGO_CRED_SECRET:-mongodb-credentials}"
-_CRED_USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
-_CRED_PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+_STS_NAME="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
+_CRED_SECRET="${MONGO_CRED_SECRET:-${MONGO_CRED_SECRET_DEFAULT:-mongodb-credentials}}"
+_CRED_USER_KEY="${MONGO_CRED_USER_KEY:-${MONGO_CRED_USER_KEY_DEFAULT:-MONGO_ROOT_USER}}"
+_CRED_PASS_KEY="${MONGO_CRED_PASS_KEY:-${MONGO_CRED_PASS_KEY_DEFAULT:-MONGO_ROOT_PASS}}"
 _PRIMARY_RESOLVE_MAX_WAIT="${MONGO_PRIMARY_RESOLVE_MAX_WAIT_SECONDS:-90}"
 _PRIMARY_RESOLVE_INTERVAL="${MONGO_PRIMARY_RESOLVE_INTERVAL_SECONDS:-3}"
 

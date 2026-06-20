@@ -49,6 +49,13 @@ mongodb:
   namespace: mongo-1
   image: mongo:7.0.21
   storage: 1Gi
+  # Naming convention this deployment's recovery/account/sanity-check tasks
+  # use by default (see aqsh-tasks/config/mongodb.env's *_DEFAULT keys and
+  # CLAUDE.md "Configuration Layers"). The RBAC ClusterRole below is scoped
+  # to these names — change all three together.
+  stsName: mongodb
+  credentialSecret: mongodb-credentials
+  recoveryConfigmap: mongodb-recovery-config
 
 # --- mongodb RBAC ---
 mongodbRbac:

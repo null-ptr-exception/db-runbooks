@@ -50,6 +50,50 @@ Task scripts live in `aqsh-tasks/scripts/` and are baked into the Docker image v
 
 Deploy-time configuration lives in `aqsh-tasks/config/` (e.g., `mongodb.env`, `mariadb.env`) and is mounted into aqsh at `/etc/aqsh/config/` via ConfigMap.
 
+## Configuration Layers
+
+When adding a new task parameter, decide which layer it belongs to:
+
+- **Internal config** (`aqsh-tasks/config/*.env` → ConfigMap → `/etc/aqsh/config/*.env`,
+  sourced by scripts) — for values that are fixed for a given deployment but
+  vary *across* deployments: secret/StatefulSet naming conventions, credential
+  key names, data/mount paths per image type. A given corporate environment
+  doesn't change these between calls; they describe how that environment is
+  built.
+- **API spec** (`input:` in `tasks-*.yaml`) — for values a caller legitimately
+  picks differently on different calls within the *same* deployment: target
+  namespace/pod, force flags, account usernames, escalation levels.
+
+**Rule of thumb**: if two environments could reasonably want different
+values for X, but one environment wants the *same* value of X on every call,
+X is internal config, not a task input. `credential_secret`, `credential_user`,
+`credential_user_key`, `credential_pass_key`, `sts_name`, `recovery_configmap`,
+`data_path`, `mount_path` (MongoDB recovery/account/sanity-check tasks) follow
+this pattern.
+
+**Resolution order** (3 tiers, implemented per-script — see
+`aqsh-tasks/scripts/mongodb/recovery/pre-check.sh` for a worked example):
+
+1. Task input — only non-empty if the caller explicitly passed it (YAML
+   `default: ""`, not a literal)
+2. Internal config — sourced into a `*_DEFAULT`-suffixed env var
+   (e.g. `MONGO_STS_NAME_DEFAULT`), set once per deployment
+3. Library hardcoded fallback — keeps zero-config use working
+
+```bash
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+_STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
+```
+
+A distinct `*_DEFAULT` variable name (rather than reusing the task-input env
+var name) is deliberate: sourcing the internal config file can never silently
+clobber an explicit caller override, because it writes to a different name.
+
+If a value like this also gates RBAC (e.g. `resourceNames` pinned to a
+StatefulSet/Secret/ConfigMap name), template the RBAC chart from the same
+chart values that produce the internal config, so a non-default convention
+doesn't get silently denied — see `tests/chart/templates/mongodb-rbac.yaml`.
+
 ## Test Suites
 
 Each DB type has its own test suite under `tests/<db>/` with:

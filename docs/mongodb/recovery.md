@@ -78,13 +78,18 @@ The `data-recovery` init container runs on every pod start.  It reads
 ### Data Paths per Deployment Type
 
 The gates (`du` for G5, `df` for G6) and the init container must agree on
-where the data lives.  The tasks default to Bitnami paths; override per call
-with the `data_path` / `mount_path` inputs:
+where the data lives.  This is a deployment convention, not a per-call
+choice — set `RECOVERY_DATA_PATH_DEFAULT` / `RECOVERY_MOUNT_PATH_DEFAULT` once
+in this cluster's internal config (`/etc/aqsh/config/mongodb.env`; see
+CLAUDE.md "Configuration Layers") so every call gets it automatically. The
+`data_path` / `mount_path` task inputs remain available to override a single
+call (e.g. one StatefulSet that doesn't match the cluster's usual image
+type). With no internal config set, the library falls back to Bitnami paths:
 
 | Deployment | `data_path` (du target) | `mount_path` (df target) |
 |---|---|---|
 | Bitnami helm chart (default) | `/bitnami/mongodb/data/db` | `/bitnami/mongodb` |
-| Standard `mongo:N` image | `/data/db` | `/data` |
+| Standard `mongo:N` image (this repo's test fixture) | `/data/db` | `/data/db` |
 
 > If `data_path` points at the wrong location, `du` returns nothing and the
 > size gates **silently degrade**: G5 passes with a warn ("size unknown") and
@@ -150,115 +155,45 @@ that file for a working reference of every step below.
 ## One-Time Setup
 
 > **This repo's MongoDB test fixture uses the standard `mongo:N` image.**
-> `tests/mongodb/recovery.bats`'s `setup_file` applies the ConfigMap and STS
-> patch below against the `mongo-1` namespace before any recovery test runs.
-> Run the commands manually only when setting up a namespace outside that
+> `tests/mongodb/recovery.bats`'s `setup_file` runs the same script below
+> (`--profile standard`) against the `mongo-1` namespace before any recovery
+> test runs. Run it manually only when setting up a namespace outside that
 > test flow.
 
 Apply the recovery ConfigMap (satisfies G2) and patch the StatefulSet to add
-the `data-recovery` init container (satisfies G1).  Choose the block that
-matches your MongoDB image type.
-
-### Standard `mongo:N` image (this repo's default)
+the `data-recovery` init container (satisfies G1) using the canonical setup
+script — this is the single source of truth for the init-container/wipe
+logic; it's not duplicated between this doc and the test fixture.
 
 ```bash
 CONTEXT=kind-cluster-a          # always target an explicit cluster
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
-IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
-REPLICAS=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.replicas}')
 
-kubectl --context $CONTEXT -n $NAMESPACE apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-recovery-config
-data:
-  wipe-targets: ""
-  recovery-version: "0"
-EOF
+# Standard `mongo:N` image:
+aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
+  --context "$CONTEXT" --namespace "$NAMESPACE" --sts "$STS" --profile standard
 
-kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
-{
-  "spec": {
-    "updateStrategy": {"rollingUpdate": {"partition": ${REPLICAS}}},
-    "template": {
-      "spec": {
-        "initContainers": [{
-          "name": "data-recovery",
-          "image": "${IMAGE}",
-          "command": ["/bin/bash", "-c"],
-          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
-          "volumeMounts": [
-            {"name": "data", "mountPath": "/data/db"},
-            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
-          ],
-          "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
-        }],
-        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
-      }
-    }
-  }
-}
-EOF
-)"
+# Bitnami helm chart:
+aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
+  --context "$CONTEXT" --namespace "$NAMESPACE" --sts "$STS" --profile bitnami
 ```
 
-Key differences from the Bitnami chart: volume name is `data` (not `datadir`),
-mount path is `/data/db`, wipe path is `find /data/db ...`, and
-`runAsUser: 999`.  Pass `"data_path":"/data/db","mount_path":"/data/db"` on
-**every** `pre-check` / `wipe` / `recover` call (the task defaults are
-Bitnami paths).
-
-### Bitnami helm chart
-
-```bash
-CONTEXT=kind-cluster-a
-NAMESPACE=<YOUR_NAMESPACE>
-STS=mongodb
-IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
-
-kubectl --context $CONTEXT -n $NAMESPACE apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-recovery-config
-data:
-  wipe-targets: ""
-  recovery-version: "0"
-EOF
-
-kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
-{
-  "spec": {
-    "updateStrategy": {"rollingUpdate": {"partition": 3}},
-    "template": {
-      "spec": {
-        "initContainers": [{
-          "name": "data-recovery",
-          "image": "${IMAGE}",
-          "command": ["/bin/bash", "-c"],
-          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /bitnami/mongodb/data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
-          "volumeMounts": [
-            {"name": "datadir", "mountPath": "/bitnami/mongodb"},
-            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
-          ],
-          "securityContext": {"runAsUser": 1001, "runAsNonRoot": true}
-        }],
-        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
-      }
-    }
-  }
-}
-EOF
-)"
-```
+| Profile | volume name | mount path | `runAsUser` |
+|---|---|---|---|
+| `standard` (this repo's test fixture) | `data` | `/data/db` | 999 |
+| `bitnami` | `datadir` | `/bitnami/mongodb` | 1001 |
 
 > **Note**: The StatefulSet patch triggers a rolling update.  With `partition`
 > set to the replica count (e.g. `3`) no pods restart automatically — the
 > partition is the lock.  The running pods therefore do **not** have the init
 > container yet; it materialises on the target pod the first time a wipe lowers
 > the partition.
+
+> Set this namespace's `data_path`/`mount_path` convention once in internal
+> config (`RECOVERY_DATA_PATH_DEFAULT`/`RECOVERY_MOUNT_PATH_DEFAULT`) rather
+> than passing `data_path`/`mount_path` on every call — see "Data Paths per
+> Deployment Type" above and CLAUDE.md "Configuration Layers".
 
 ---
 
@@ -268,6 +203,17 @@ All tasks are available via `POST /tasks/<name>` on the aqsh-mongodb endpoint.
 
 Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
 `fix-no-primary` 8m, `pre-check` 5m, `reset` 3m, `status` 2m.
+
+> **`sts_name`, `credential_secret`, `credential_user`, `credential_user_key`,
+> `credential_pass_key`, `recovery_configmap`, `data_path`, `mount_path`** are
+> deployment conventions, not per-call choices. Set them once for this
+> cluster in internal config (`/etc/aqsh/config/mongodb.env`'s `*_DEFAULT`
+> keys) and most calls below need only `namespace`/`target_pod` — the
+> "Default" column shows the library's last-resort fallback, used only when
+> neither the caller nor internal config sets a value. These task inputs
+> stay available to override a single call (e.g. one StatefulSet that
+> doesn't match this cluster's usual convention). See CLAUDE.md
+> "Configuration Layers" for the full precedence rule.
 
 There are two ways to drive recovery:
 
@@ -326,10 +272,11 @@ response tells you to monitor it with `recovery/status`.
 | `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
 | `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
 
-> ¹ **Standard `mongo:N` image users must override both** to `/data/db` on
-> every call, e.g. `"data_path":"/data/db","mount_path":"/data/db"`.
-> Mismatched paths cause G5/G6 to silently degrade ("size unknown") and the
-> init container to wipe the wrong directory.
+> ¹ **Standard `mongo:N` image users**: set `RECOVERY_DATA_PATH_DEFAULT=/data/db`
+> and `RECOVERY_MOUNT_PATH_DEFAULT=/data/db` once in internal config instead of
+> passing `data_path`/`mount_path` on every call. Mismatched paths cause
+> G5/G6 to silently degrade ("size unknown") and the init container to wipe
+> the wrong directory.
 
 > ² **`credential_user`**: if your secret stores only the password (no username
 > key), pass the username directly here, e.g. `"credential_user":"root"`.
@@ -437,7 +384,8 @@ full report without making any changes.
 | `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
 | `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
 
-> ¹ Standard `mongo:N` image users must pass `"data_path":"/data/db","mount_path":"/data/db"`.
+> ¹ Standard `mongo:N` image users: set this once via `RECOVERY_DATA_PATH_DEFAULT`/
+> `RECOVERY_MOUNT_PATH_DEFAULT` in internal config, or pass `"data_path":"/data/db","mount_path":"/data/db"` per call.
 
 > ² `credential_user`: pass the username value directly if the secret only stores the password. Omit to read from the secret via `credential_user_key`.
 
@@ -837,9 +785,16 @@ rules:
 > `delete`). It is **ignored by `list`, `watch`, and `create`**. The recovery
 > tasks never create the ConfigMap (it is applied once during setup by an
 > admin) and never list it by name, so `get`/`patch` is the exact set needed.
-> Because the name is pinned here, a task invoked with a non-default
-> `recovery_configmap` or `sts_name` is denied by RBAC — these inputs exist for
-> future per-namespace customization where this ClusterRole is also widened.
+
+> **`resourceNames` are templated from chart values**
+> (`tests/chart/templates/mongodb-rbac.yaml`, driven by `.Values.mongodb.stsName`
+> / `credentialSecret` / `recoveryConfigmap`), defaulting to today's literals
+> (`mongodb`, `mongodb-credentials`, `mongodb-recovery-config`). Set those
+> values to match this cluster's naming convention — the same convention set
+> in internal config (`MONGO_STS_NAME_DEFAULT` etc. in
+> `/etc/aqsh/config/mongodb.env`) — so the `sts_name`/`credential_secret`/
+> `recovery_configmap` task-input overrides actually work instead of being
+> denied by RBAC. See CLAUDE.md "Configuration Layers".
 
 **Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
 `configmaps` create/update/list.

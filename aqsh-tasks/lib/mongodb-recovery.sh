@@ -26,11 +26,16 @@
 [[ -n "${_MONGODB_RECOVERY_LIB_LOADED:-}" ]] && return 0
 _MONGODB_RECOVERY_LIB_LOADED=1
 
-# Data paths vary by MongoDB deployment type; override via API params or env:
-#   Bitnami helm chart (default): /bitnami/mongodb/data/db  /bitnami/mongodb
-#   Standard mongo:N image:       /data/db                  /data
-_RECOVERY_DATA_PATH="${RECOVERY_DATA_PATH:-/bitnami/mongodb/data/db}"
-_RECOVERY_MOUNT_PATH="${RECOVERY_MOUNT_PATH:-/bitnami/mongodb}"
+# Data paths vary by MongoDB deployment type; resolved 3 tiers deep:
+#   1. RECOVERY_DATA_PATH/RECOVERY_MOUNT_PATH task input (explicit per-call override)
+#   2. RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT (deploy-time internal
+#      config — /etc/aqsh/config/mongodb.env — see CLAUDE.md "Configuration Layers")
+#   3. Library fallback — Bitnami helm chart paths
+# Sourced here (not just by callers) because this assignment runs at module-load
+# time, before a calling script reaches its own internal-config sourcing line.
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+_RECOVERY_DATA_PATH="${RECOVERY_DATA_PATH:-${RECOVERY_DATA_PATH_DEFAULT:-/bitnami/mongodb/data/db}}"
+_RECOVERY_MOUNT_PATH="${RECOVERY_MOUNT_PATH:-${RECOVERY_MOUNT_PATH_DEFAULT:-/bitnami/mongodb}}"
 readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 

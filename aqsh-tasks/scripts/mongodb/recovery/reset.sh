@@ -22,8 +22,10 @@ source "${LIB_DIR}/k8s.sh"
 source "${LIB_DIR}/mongodb-recovery.sh"
 
 export K8S_NAMESPACE="${DB_NAMESPACE}"
-_STS="${MONGO_STS_NAME:-mongodb}"
-_CM="${RECOVERY_CONFIGMAP:-mongodb-recovery-config}"
+# mongodb-recovery.sh (sourced above) already loads /etc/aqsh/config/mongodb.env
+# before this point — see its header comment for why it must run there.
+_STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
+_CM="${RECOVERY_CONFIGMAP:-${RECOVERY_CONFIGMAP_DEFAULT:-mongodb-recovery-config}}"
 
 log_info "recovery-reset" "Resetting recovery state for STS ${_STS} in namespace ${DB_NAMESPACE}"
 

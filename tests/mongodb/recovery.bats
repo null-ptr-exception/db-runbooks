@@ -134,48 +134,11 @@ RS_EOF
     return 1
   fi
 
-  # Apply the recovery ConfigMap (G2 gate requires it)
-  kubectl --context "$ctx" -n mongo-1 apply -f - <<'CM_EOF'
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-recovery-config
-  namespace: mongo-1
-data:
-  wipe-targets: ""
-  recovery-version: "0"
-CM_EOF
-
-  # Patch the StatefulSet to add the data-recovery init container (uses /data/db)
-  # and lock partition=3 so only deliberate partition changes restart pods.
-  kubectl --context "$ctx" -n mongo-1 \
-    patch statefulset mongodb --type=strategic -p "$(cat <<'PATCH_EOF'
-{
-  "spec": {
-    "updateStrategy": {"rollingUpdate": {"partition": 3}},
-    "template": {
-      "spec": {
-        "initContainers": [{
-          "name": "data-recovery",
-          "image": "mongo:7",
-          "command": ["/bin/bash", "-c"],
-          "args": ["WIPE_TARGETS=$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=$(hostname); if [ -n \"$WIPE_TARGETS\" ] && echo \"$WIPE_TARGETS\" | grep -qw \"$MY_NAME\"; then echo \"[RECOVERY] Wiping data for $MY_NAME\"; find /data/db -mindepth 1 -delete 2>/dev/null || true; echo \"[RECOVERY] Wipe complete.\"; else echo \"[RECOVERY] $MY_NAME not in wipe targets, skip.\"; fi"],
-          "volumeMounts": [
-            {"name": "data", "mountPath": "/data/db"},
-            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
-          ],
-          "securityContext": {"runAsUser": 999, "runAsNonRoot": true}
-        }],
-        "volumes": [{
-          "name": "recovery-config-vol",
-          "configMap": {"name": "mongodb-recovery-config"}
-        }]
-      }
-    }
-  }
-}
-PATCH_EOF
-)"
+  # Apply the recovery ConfigMap + data-recovery init container via the
+  # canonical setup script — single source of truth shared with
+  # docs/mongodb/recovery.md's One-Time Setup section.
+  "${BATS_TEST_DIRNAME}/../../aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh" \
+    --context "$ctx" --namespace mongo-1 --sts mongodb --profile standard
 
   echo "Waiting for MongoDB to stabilise after init-container patch..."
   kubectl --context "$ctx" -n mongo-1 \

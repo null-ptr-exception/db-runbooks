@@ -28,8 +28,8 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
   sanity-check:
     script: mongodb/sanity-check.sh
     description: "3-layer health check: K8s infrastructure, MongoDB connectivity, MongoDB internals"
@@ -45,23 +45,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
   backup:
     script: backup/backup-mongodb.sh
     description: "Backup MongoDB database to MinIO"
@@ -94,23 +94,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -201,23 +201,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -248,23 +248,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -295,23 +295,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -346,23 +346,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -392,23 +392,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -444,23 +444,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -521,23 +521,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
   recovery/pre-check:
     script: mongodb/recovery/pre-check.sh
     description: "Run G1-G8 pre-flight gates for a target pod (read-only)"
@@ -553,8 +553,8 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
@@ -564,13 +564,13 @@ tasks:
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
-        default: mongodb-recovery-config
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user
         env: MONGO_CRED_USER
         required: false
@@ -580,12 +580,12 @@ tasks:
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: force_wipe
         env: FORCE_WIPE
         required: false
@@ -595,13 +595,13 @@ tasks:
         env: RECOVERY_DATA_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'
   recovery/wipe:
     script: mongodb/recovery/wipe.sh
@@ -618,8 +618,8 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
@@ -629,13 +629,13 @@ tasks:
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
-        default: mongodb-recovery-config
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user
         env: MONGO_CRED_USER
         required: false
@@ -645,12 +645,12 @@ tasks:
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: force_wipe
         env: FORCE_WIPE
         required: false
@@ -660,13 +660,13 @@ tasks:
         env: RECOVERY_DATA_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'
   recovery/reset:
     script: mongodb/recovery/reset.sh
@@ -683,14 +683,14 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
-        default: mongodb-recovery-config
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
   recovery/status:
     script: mongodb/recovery/status.sh
     description: "Show current recovery state (wipe-target, partition, pod phases)"
@@ -706,14 +706,14 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: recovery_configmap
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
-        default: mongodb-recovery-config
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
   recovery/fix-no-primary:
     script: mongodb/recovery/fix-no-primary.sh
     description: "Restore primary when all RS members show SECONDARY (E1+E5 combined scenario)"
@@ -729,13 +729,13 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user
         env: MONGO_CRED_USER
         required: false
@@ -745,12 +745,12 @@ tasks:
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: level
         env: RECOVERY_LEVEL
         required: true
@@ -777,8 +777,8 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: mongodb
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
         required: true
@@ -788,13 +788,13 @@ tasks:
         env: RECOVERY_CONFIGMAP
         required: false
         type: string
-        default: mongodb-recovery-config
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: mongodb-credentials
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_user
         env: MONGO_CRED_USER
         required: false
@@ -804,12 +804,12 @@ tasks:
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: MONGO_ROOT_USER
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: MONGO_ROOT_PASS
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
       - name: force_wipe
         env: FORCE_WIPE
         required: false
@@ -824,11 +824,11 @@ tasks:
         env: RECOVERY_DATA_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'
       - name: mount_path
         env: RECOVERY_MOUNT_PATH
         required: false
         type: string
-        default: ""
+        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
         pattern: '^(/[A-Za-z0-9._-]+)*$'

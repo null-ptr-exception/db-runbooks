@@ -30,11 +30,13 @@ source "${LIB_DIR}/mongodb.sh"
 source "${LIB_DIR}/mongodb-recovery.sh"
 
 export K8S_NAMESPACE="${DB_NAMESPACE}"
-_STS="${MONGO_STS_NAME:-mongodb}"
-_SECRET="${MONGO_CRED_SECRET:-mongodb-credentials}"
-_DIRECT_USER="${MONGO_CRED_USER:-}"
-_USER_KEY="${MONGO_CRED_USER_KEY:-MONGO_ROOT_USER}"
-_PASS_KEY="${MONGO_CRED_PASS_KEY:-MONGO_ROOT_PASS}"
+# mongodb-recovery.sh (sourced above) already loads /etc/aqsh/config/mongodb.env
+# before this point — see its header comment for why it must run there.
+_STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
+_SECRET="${MONGO_CRED_SECRET:-${MONGO_CRED_SECRET_DEFAULT:-mongodb-credentials}}"
+_DIRECT_USER="${MONGO_CRED_USER:-${MONGO_CRED_USER_DEFAULT:-}}"
+_USER_KEY="${MONGO_CRED_USER_KEY:-${MONGO_CRED_USER_KEY_DEFAULT:-MONGO_ROOT_USER}}"
+_PASS_KEY="${MONGO_CRED_PASS_KEY:-${MONGO_CRED_PASS_KEY_DEFAULT:-MONGO_ROOT_PASS}}"
 _LEVEL="${RECOVERY_LEVEL:?RECOVERY_LEVEL is required (diagnose|unfreeze|reconfig|force-primary)}"
 _FORCE_POD="${RECOVERY_FORCE_POD:-}"
 

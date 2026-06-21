@@ -654,10 +654,15 @@ _wait_for_rs_healthy() {
 # mongo-1 here is a standard mongo:N deployment (volume "data" at /data/db).
 # If a caller mistakenly supplies the Bitnami profile's paths instead — e.g.
 # because RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT were set for
-# the wrong profile — `du`/`df` against the nonexistent path return nothing,
-# and the gates must degrade to a non-blocking warning rather than erroring
-# loudly. tests/unit/mongodb/recovery.bats already proves this against a
-# mocked kubectl; these two prove it against this real cluster.
+# the wrong profile — `du` against the nonexistent data_path returns nothing,
+# and G5 degrades to a non-blocking warning (data_mb=0) rather than erroring
+# loudly. G6 then ALSO degrades, but for a different reason than its own
+# `df`/PVC-name fallback: recovery_run_gates() only calls _recovery_gate_g6
+# at all when G5 reports data_mb > 0 (see the `if [[ "$data_mb" -gt 0 ]]`
+# branch in recovery_run_gates) — once G5's measurement comes back as 0,
+# G6 is skipped outright with a hardcoded warning, never reaching its own
+# PVC-fallback logic. tests/unit/mongodb/recovery.bats already proves the G5
+# half against a mocked kubectl; these two prove the real end-to-end chain.
 
 @test "recovery/pre-check G5 silently degrades to warn (not block) when called with the wrong profile's data_path" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
@@ -681,7 +686,7 @@ _wait_for_rs_healthy() {
   assert_equal "$g5_data_mb" "0"
 }
 
-@test "recovery/pre-check G6 still passes via the PVC-name fallback despite the wrong profile's mount_path" {
+@test "recovery/pre-check G6 is skipped with a warn once G5's data_mb comes back 0 from the wrong data_path" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
     '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/bitnami/mongodb/data/db","mount_path":"/bitnami/mongodb"}'
   assert_equal "$HTTP_CODE" "202"
@@ -692,16 +697,17 @@ _wait_for_rs_healthy() {
 
   local result
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  local g6_pass g6_warn
+  local g6_pass g6_warn g6_message
   g6_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .pass' 2>/dev/null || echo "null")
   g6_warn=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .warn' 2>/dev/null || echo "null")
-  # `df /bitnami/mongodb` fails inside a standard pod, but G6 falls back to
-  # the PVC's own capacity (matched by name, e.g. data-mongodb-2 — see the
-  # candidate list in _recovery_gate_g6), which is unaffected by the wrong
-  # mount_path. Unlike G5, G6's design happens to stay accurate here — this
-  # test documents that asymmetry rather than assuming both gates degrade.
+  g6_message=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .message' 2>/dev/null || echo "null")
+  # G6 never even runs its own df/PVC-fallback logic here: recovery_run_gates
+  # only calls _recovery_gate_g6 when data_mb > 0, and G5 already reported
+  # data_mb=0 for this wrong data_path. G6's warning is the generic
+  # "data size unknown" skip, not a PVC-capacity result of its own.
   assert_equal "$g6_pass" "true"
-  assert_equal "$g6_warn" "null"
+  assert_equal "$g6_warn" "true"
+  assert_equal "$g6_message" "PVC space check skipped: data size unknown"
 }
 
 @test "recovery/pre-check G7 blocks when target is mongodb-0 (primary)" {

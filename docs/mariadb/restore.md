@@ -43,6 +43,7 @@ The only required input is `namespace`.
 | Input | Env | Required | Default | Notes |
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | Source namespace. |
+| `context` | `K8S_CONTEXT` | | `""` | kubectl context for the target cluster. Empty (the default) uses the in-cluster config — aqsh runs inside `cluster-dbs`, which already hosts the MariaDB instances; only out-of-cluster / multi-cluster callers need to set it. Validated when non-empty so a typo can't provision into the wrong cluster. |
 | `target_time` | `TARGET_TIME` | | — | RFC3339 instant for point-in-time recovery. Omit to restore the latest backup. |
 | `source` | `RESTORE_SOURCE` | | auto | Source MariaDB instance (for version/storage). Auto-detected from the namespace; only needed when the namespace runs **mixed versions** (e.g. mid blue-green upgrade). |
 | `target` | `RESTORE_TARGET` | | auto | New instance name. Auto-named `<namespace>-restore-<ts>` when omitted. |
@@ -57,6 +58,9 @@ The only required input is `namespace`.
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |
 
 Credentials and S3 access are platform internals and are **not** task inputs.
+The restored instance reuses the platform-managed root Secret (named `mariadb`,
+key `password`) — the same convention every managed MariaDB in a namespace
+follows — returned as `credentialsRef` in the result.
 
 ## Examples
 

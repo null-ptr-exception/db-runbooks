@@ -44,7 +44,8 @@ case "$verb" in
       *items*spec.image*) printf '%s' "${MOCK_SOURCE_IMAGES:-}"; exit 0 ;; # distinct-image scan
       *spec.image*)    echo "${MOCK_SOURCE_IMAGE:-}";          exit 0 ;;   # single instance image
       *storage.size*)  echo "${MOCK_SOURCE_STORAGE:-}";        exit 0 ;;
-      *) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
+      *"get mariadb"*) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;  # target existence probe
+      *) echo "mock kubectl: unhandled get: $args" >&2; exit 1 ;;          # fail loudly on a new get
     esac ;;
   apply) cat > "${MOCK_APPLY_CAPTURE}"; exit 0 ;;
   wait)  exit 0 ;;
@@ -102,6 +103,19 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
+@test "restore rejects a malformed context" {
+  run_restore RESTORE_IMAGE=mariadb:11.4 K8S_CONTEXT="bad context!"
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"context"* ]]
+}
+
+@test "restore accepts a well-formed context" {
+  run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 K8S_CONTEXT=kind-cluster-dbs
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
+}
+
 @test "restore dry_run renders the manifest without confirm or apply" {
   run_restore DRY_RUN=true CONFIRM=false RESTORE_TARGET=mariadb-restored RESTORE_IMAGE=mariadb:11.4
   [ "$status" -eq 0 ]
@@ -109,8 +123,8 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.data.dryRun')" = "true" ]
   [ "$(result_field '.data.restored')" = "false" ]
   [ ! -f "${CAPTURE}" ]
-  [[ "$(result_field '.data.manifest')" == *"kind: MariaDB"* ]]
-  [[ "$(result_field '.data.manifest')" == *"backupContentType: Physical"* ]]
+  [ "$(result_field '.data.manifest | fromjson | .kind')" = "MariaDB" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.backupContentType')" = "Physical" ]
 }
 
 @test "restore resolves internals and returns a connection endpoint" {
@@ -124,11 +138,11 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.data.connection.port')" = "3306" ]
   [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
 
-  grep -q "backupContentType: Physical" "${CAPTURE}"
-  grep -q "prefix: mariadb/mariadb-bg" "${CAPTURE}"
-  ! grep -q "replication:" "${CAPTURE}"
-  ! grep -q "multiCluster:" "${CAPTURE}"
-  ! grep -q "targetRecoveryTime" "${CAPTURE}"
+  [ "$(jq -r '.spec.bootstrapFrom.backupContentType' "${CAPTURE}")" = "Physical" ]
+  [ "$(jq -r '.spec.bootstrapFrom.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-bg" ]
+  [ "$(jq -r '.spec | has("replication")' "${CAPTURE}")" = "false" ]
+  [ "$(jq -r '.spec | has("multiCluster")' "${CAPTURE}")" = "false" ]
+  [ "$(jq -r '.spec.bootstrapFrom | has("targetRecoveryTime")' "${CAPTURE}")" = "false" ]
 }
 
 @test "restore with target_time injects point-in-time recovery" {
@@ -137,7 +151,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "true" ]
   [ "$(result_field '.data.pointInTimeRecovery.targetRecoveryTime')" = "2026-06-14T03:21:00Z" ]
-  grep -q 'targetRecoveryTime: "2026-06-14T03:21:00Z"' "${CAPTURE}"
+  [ "$(jq -r '.spec.bootstrapFrom.targetRecoveryTime' "${CAPTURE}")" = "2026-06-14T03:21:00Z" ]
 }
 
 @test "restore auto-generates a target name when omitted" {
@@ -155,7 +169,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.source')" = "mariadb-green" ]
   [ "$(result_field '.data.image')" = "mariadb:10.11" ]
-  [[ "$(result_field '.data.manifest')" == *"size: 5Gi"* ]]
+  [ "$(result_field '.data.manifest | fromjson | .spec.storage.size')" = "5Gi" ]
 }
 
 @test "restore fails when the source is gone and no image is given" {

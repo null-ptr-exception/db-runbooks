@@ -118,6 +118,17 @@ mdbt_validate_region() {
   fi
 }
 
+# mdbt_validate_context <name> <value> <op>
+# A kubectl context name (e.g. kind-cluster-dbs). Empty is handled by the
+# caller (empty → current/in-cluster config); this only guards a non-empty
+# value so a malformed context can't silently select the wrong cluster.
+mdbt_validate_context() {
+  local name="$1" value="$2" op="$3"
+  if [[ ! "$value" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    mdbt_fail "$op" "${name} must match ^[A-Za-z0-9._-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  fi
+}
+
 mdbt_validate_image() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^[A-Za-z0-9._:/@-]+$ ]]; then

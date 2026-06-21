@@ -657,6 +657,11 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
       - name: target_time
         env: TARGET_TIME
         required: false

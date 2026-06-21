@@ -137,44 +137,57 @@ mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
-
-# Only emit targetRecoveryTime when a PITR target was given; an empty line in
-# the manifest is harmless YAML.
-RECOVERY_LINE=""
-if [[ -n "$TARGET_TIME" ]]; then
-  RECOVERY_LINE="    targetRecoveryTime: \"${TARGET_TIME}\""
+# K8S_CONTEXT is empty on the normal in-cluster path: aqsh runs inside
+# cluster-dbs, so the in-cluster config already targets the MariaDB cluster.
+# Out-of-cluster / multi-cluster callers pass `context` explicitly; validate it
+# so a malformed value can't silently provision into the wrong cluster
+# (per CLAUDE.md: "Always specify --context").
+if [[ -n "$K8S_CONTEXT" ]]; then
+  mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
 fi
 
-MANIFEST="$(cat <<EOF
-apiVersion: k8s.mariadb.com/v1alpha1
-kind: MariaDB
-metadata:
-  name: ${TARGET}
-  namespace: ${NAMESPACE}
-spec:
-  image: ${IMAGE}
-  rootPasswordSecretKeyRef:
-    name: ${ROOT_SECRET_NAME}
-    key: ${ROOT_SECRET_KEY}
-  storage:
-    size: ${STORAGE_SIZE}
-  replicas: ${REPLICAS}
-  bootstrapFrom:
-    backupContentType: Physical
-${RECOVERY_LINE}
-    s3:
-      bucket: ${BACKUP_BUCKET}
-      prefix: ${BACKUP_PREFIX}
-      endpoint: ${BACKUP_ENDPOINT}
-      region: ${BACKUP_REGION}
-      accessKeyIdSecretKeyRef:
-        name: ${BACKUP_ACCESS_SECRET}
-        key: ${BACKUP_ACCESS_KEY}
-      secretAccessKeySecretKeyRef:
-        name: ${BACKUP_ACCESS_SECRET}
-        key: ${BACKUP_SECRET_KEY}
-EOF
-)"
+# Build the MariaDB CR programmatically with jq rather than interpolating values
+# into a YAML heredoc: kubectl apply accepts JSON, so there is no string-injection
+# surface even if a field's validation is relaxed later. targetRecoveryTime is
+# emitted only when a PITR target was given.
+MANIFEST="$(jq -n \
+  --arg target "$TARGET" \
+  --arg namespace "$NAMESPACE" \
+  --arg image "$IMAGE" \
+  --arg rootSecret "$ROOT_SECRET_NAME" \
+  --arg rootKey "$ROOT_SECRET_KEY" \
+  --arg storageSize "$STORAGE_SIZE" \
+  --argjson replicas "$REPLICAS" \
+  --arg bucket "$BACKUP_BUCKET" \
+  --arg prefix "$BACKUP_PREFIX" \
+  --arg endpoint "$BACKUP_ENDPOINT" \
+  --arg region "$BACKUP_REGION" \
+  --arg accessSecret "$BACKUP_ACCESS_SECRET" \
+  --arg accessKey "$BACKUP_ACCESS_KEY" \
+  --arg secretKey "$BACKUP_SECRET_KEY" \
+  --arg targetTime "$TARGET_TIME" \
+  '{
+    apiVersion: "k8s.mariadb.com/v1alpha1",
+    kind: "MariaDB",
+    metadata: {name: $target, namespace: $namespace},
+    spec: {
+      image: $image,
+      rootPasswordSecretKeyRef: {name: $rootSecret, key: $rootKey},
+      storage: {size: $storageSize},
+      replicas: $replicas,
+      bootstrapFrom: ({
+        backupContentType: "Physical",
+        s3: {
+          bucket: $bucket,
+          prefix: $prefix,
+          endpoint: $endpoint,
+          region: $region,
+          accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
+          secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+        }
+      } + (if $targetTime == "" then {} else {targetRecoveryTime: $targetTime} end))
+    }
+  }')"
 
 # The restored instance is reachable at the operator-managed primary Service;
 # its root credentials live in the platform-managed Secret (returned by ref).

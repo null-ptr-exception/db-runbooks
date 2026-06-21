@@ -649,6 +649,61 @@ _wait_for_rs_healthy() {
   [ "$g6_pass" = "true" ]
 }
 
+# ── Wrong profile / path mismatch (documents the silent-failure mode) ───────
+#
+# mongo-1 here is a standard mongo:N deployment (volume "data" at /data/db).
+# If a caller mistakenly supplies the Bitnami profile's paths instead — e.g.
+# because RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT were set for
+# the wrong profile — `du`/`df` against the nonexistent path return nothing,
+# and the gates must degrade to a non-blocking warning rather than erroring
+# loudly. tests/unit/mongodb/recovery.bats already proves this against a
+# mocked kubectl; these two prove it against this real cluster.
+
+@test "recovery/pre-check G5 silently degrades to warn (not block) when called with the wrong profile's data_path" {
+  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/bitnami/mongodb/data/db","mount_path":"/bitnami/mongodb"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  local g5_pass g5_warn g5_data_mb
+  g5_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .pass' 2>/dev/null || echo "null")
+  g5_warn=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .warn' 2>/dev/null || echo "null")
+  g5_data_mb=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .data_mb' 2>/dev/null || echo "null")
+  # `du /bitnami/mongodb/data/db` inside a standard pod finds nothing — G5
+  # never blocks on this; it silently reports data_mb=0 and warns instead.
+  assert_equal "$g5_pass" "true"
+  assert_equal "$g5_warn" "true"
+  assert_equal "$g5_data_mb" "0"
+}
+
+@test "recovery/pre-check G6 still passes via the PVC-name fallback despite the wrong profile's mount_path" {
+  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/bitnami/mongodb/data/db","mount_path":"/bitnami/mongodb"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  local g6_pass g6_warn
+  g6_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .pass' 2>/dev/null || echo "null")
+  g6_warn=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .warn' 2>/dev/null || echo "null")
+  # `df /bitnami/mongodb` fails inside a standard pod, but G6 falls back to
+  # the PVC's own capacity (matched by name, e.g. data-mongodb-2 — see the
+  # candidate list in _recovery_gate_g6), which is unaffected by the wrong
+  # mount_path. Unlike G5, G6's design happens to stay accurate here — this
+  # test documents that asymmetry rather than assuming both gates degrade.
+  assert_equal "$g6_pass" "true"
+  assert_equal "$g6_warn" "null"
+}
+
 @test "recovery/pre-check G7 blocks when target is mongodb-0 (primary)" {
   # mongodb-0 is deterministically primary (priority 2 set in _init_mongodb_rs).
   # G7 checks db.hello().isWritablePrimary regardless of ordinal → TARGET_IS_PRIMARY.

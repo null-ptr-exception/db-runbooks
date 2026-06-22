@@ -10,8 +10,7 @@ set -euo pipefail
 # point-in-time), not *where/how* it is stored. Everything a managed database
 # controls — credentials, S3 endpoint/region/credentials, the backup location,
 # the engine version, and the storage size — is resolved internally from
-# platform conventions or from the source instance, and is overridable only as
-# an advanced option.
+# platform conventions or from the source instance, never passed by the caller.
 #
 # AWS-style semantics: a restore always provisions a NEW MariaDB instance and
 # never overwrites in place (RestoreDBInstanceFromDBSnapshot /
@@ -21,11 +20,11 @@ set -euo pipefail
 # `bootstrapFrom.targetRecoveryTime` performs point-in-time recovery; without
 # it, the latest backup under the prefix is restored.
 #
-# NOTE: the per-namespace backup prefix (mariadb/<namespace>) is a forward-
-# looking convention. Until the physical-backup task writes to that layout,
-# point `backup_prefix`/`backup_bucket` at where the backup actually lives.
-# The source must be a mariadb-operator PhysicalBackup / mariabackup layout;
-# the logical `backup` task is not a valid source.
+# NOTE: the per-namespace backup location (s3://db-backups/mariadb/<namespace>)
+# is a forward-looking convention resolved internally. Until the physical-backup
+# task writes to that layout, restore reads from a location nothing writes to yet
+# (tracked as a follow-up). The source must be a mariadb-operator PhysicalBackup
+# / mariabackup layout; the logical `backup` task is not a valid source.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -45,20 +44,24 @@ OP="restore"
 NAMESPACE="${DB_NAMESPACE:-}"          # the only required input
 TARGET_TIME="${TARGET_TIME:-}"         # optional: omit → latest backup; set → PITR
 TARGET="${RESTORE_TARGET:-}"           # optional: auto-generated when empty
+SOURCE_NAME="${RESTORE_SOURCE:-}"      # optional: source instance for version/storage
 IMAGE="${RESTORE_IMAGE:-}"             # optional: derived from the source when empty
-STORAGE_SIZE="${STORAGE_SIZE:-}"       # optional: derived from the source when empty
 CONFIRM="${CONFIRM:-false}"
 DRY_RUN="${DRY_RUN:-true}"
-WAIT_READY="${WAIT_READY:-true}"
+# wait_timeout doubles as the wait switch: "0" → return without waiting; any
+# positive duration (e.g. 10m) → wait up to that long for Ready.
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 K8S_CONTEXT="${K8S_CONTEXT:-}"
 
-# --- Advanced overrides (default to the platform convention) -----------------
-BACKUP_BUCKET="${BACKUP_BUCKET:-db-backups}"
-BACKUP_PREFIX="${BACKUP_PREFIX:-}"     # defaulted to mariadb/<namespace> below
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-minio.db-ops.svc.cluster.local:9000}"
-
 # --- Platform internals (NOT user-facing) ------------------------------------
+# The storage size is derived from the source instance, never defaulted: a
+# physical restore must match the source's PVC size or it risks truncating data
+# (see resolution below). STORAGE_SIZE stays env-readable as a last-resort
+# override but is not a task input.
+STORAGE_SIZE="${STORAGE_SIZE:-}"
+BACKUP_BUCKET="db-backups"
+BACKUP_PREFIX="mariadb/${NAMESPACE}"   # per-namespace backup location convention
+BACKUP_ENDPOINT="minio.db-ops.svc.cluster.local:9000"
 ROOT_SECRET_NAME="mariadb"
 ROOT_SECRET_KEY="password"
 BACKUP_REGION="us-east-1"
@@ -66,10 +69,6 @@ BACKUP_ACCESS_SECRET="minio"
 BACKUP_ACCESS_KEY="access-key-id"
 BACKUP_SECRET_KEY="secret-access-key"
 REPLICAS="1"                           # restore is standalone by design
-DEFAULT_STORAGE_SIZE="1Gi"             # only used when the source instance is gone
-
-# shellcheck disable=SC2034  # consumed by _kubectl in k8s.sh (sourced indirectly)
-K8S_NAMESPACE="$NAMESPACE"
 
 # Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
@@ -79,40 +78,58 @@ fi
 # Namespace is the one input the caller must provide.
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
 
-# Per-namespace backup location convention.
-BACKUP_PREFIX="${BACKUP_PREFIX:-mariadb/${NAMESPACE}}"
+# K8S_CONTEXT is empty on the normal in-cluster path: aqsh runs inside
+# cluster-dbs, so the in-cluster config already targets the MariaDB cluster.
+# Out-of-cluster / multi-cluster callers pass `context` explicitly; validate it
+# so a malformed value can't silently provision into the wrong cluster
+# (per CLAUDE.md: "Always specify --context"). Validate before any kubectl call.
+if [[ -n "$K8S_CONTEXT" ]]; then
+  mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
+fi
+
+# Wire the cluster/namespace target through the canonical entry point (the same
+# one blue-green uses via bg_init_target) rather than poking K8S_* directly, so
+# restore can't silently drift if that setup grows.
+mariadb_set_target "$K8S_CONTEXT" "$NAMESPACE"
 
 # Name the restored instance for the caller when they didn't.
 if [[ -z "$TARGET" ]]; then
   TARGET="${NAMESPACE}-restore-$(date +%Y%m%d%H%M%S)"
 fi
 
-# Resolve the engine version (and storage) for the restored instance:
+# Resolve the engine version and storage for the restored instance:
 #  - explicit `source`             → derive from that instance
 #  - exactly one MariaDB instance  → derive from it
 #  - several, all the same image   → use that version (restore's own clones, etc.)
 #  - mixed versions / none         → fail asking for `source`/`image` (never guess)
-SOURCE_NAME="${RESTORE_SOURCE:-}"
+# Both must match the source: a physical restore is version- and size-sensitive,
+# so neither the engine nor the PVC size is ever silently defaulted.
 if [[ -z "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
   if SOURCE_NAME="$(mariadb_resolve_name)"; then :; else SOURCE_NAME=""; fi
 fi
 
+# Fetch the source spec once (image + storage) to halve the API calls and avoid
+# a race window if the source is mutated between two separate gets.
+if [[ -n "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
+  SOURCE_JSON="$(_kubectl get mariadb "$SOURCE_NAME" -o json 2>/dev/null || true)"
+  if [[ -n "$SOURCE_JSON" ]]; then
+    [[ -z "$IMAGE" ]]        && IMAGE="$(jq -r '.spec.image // empty' <<<"$SOURCE_JSON")"
+    [[ -z "$STORAGE_SIZE" ]] && STORAGE_SIZE="$(jq -r '.spec.storage.size // empty' <<<"$SOURCE_JSON")"
+  fi
+fi
+
 if [[ -z "$IMAGE" ]]; then
-  if [[ -n "$SOURCE_NAME" ]]; then
-    IMAGE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.image}' 2>/dev/null || true)"
-  else
-    # No single source (multiple instances or none): a physical restore is
-    # version-sensitive, so accept a derived version only when every instance
-    # agrees — a namespace should not run mixed versions outside a blue-green
-    # upgrade, and that window is exactly when the caller must disambiguate.
-    NS_IMAGES="$(_kubectl get mariadb -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}' 2>/dev/null | sed '/^$/d' | sort -u || true)"
-    NS_IMAGE_COUNT="$(printf '%s\n' "$NS_IMAGES" | grep -c . || true)"
-    if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
-      IMAGE="$NS_IMAGES"
-    elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
-      mdbt_fail "$OP" "multiple MariaDB versions in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
-        "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
-    fi
+  # No single source (multiple instances or none): a physical restore is
+  # version-sensitive, so accept a derived version only when every instance
+  # agrees — a namespace should not run mixed versions outside a blue-green
+  # upgrade, and that window is exactly when the caller must disambiguate.
+  NS_IMAGES="$(_kubectl get mariadb -o jsonpath='{range .items[*]}{.spec.image}{"\n"}{end}' 2>/dev/null | sed '/^$/d' | sort -u || true)"
+  NS_IMAGE_COUNT="$(printf '%s\n' "$NS_IMAGES" | grep -c . || true)"
+  if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
+    IMAGE="$NS_IMAGES"
+  elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
+    mdbt_fail "$OP" "multiple MariaDB versions in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
+      "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
   fi
   if [[ -z "$IMAGE" ]]; then
     mdbt_fail "$OP" "could not determine the source MariaDB version (no MariaDB instance in '${NAMESPACE}'); pass 'image' explicitly" \
@@ -120,11 +137,10 @@ if [[ -z "$IMAGE" ]]; then
   fi
 fi
 
+# Storage is never guessed: an undersized PVC would truncate the restored data.
 if [[ -z "$STORAGE_SIZE" ]]; then
-  if [[ -n "$SOURCE_NAME" ]]; then
-    STORAGE_SIZE="$(_kubectl get mariadb "$SOURCE_NAME" -o jsonpath='{.spec.storage.size}' 2>/dev/null || true)"
-  fi
-  STORAGE_SIZE="${STORAGE_SIZE:-$DEFAULT_STORAGE_SIZE}"
+  mdbt_fail "$OP" "could not determine the storage size from a source instance in '${NAMESPACE}'; a physical restore must match the source's PVC size, so pass 'source' (or 'storage_size') explicitly" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
 fi
 
 # Validate the resolved user-facing + override values (internals are trusted).
@@ -136,14 +152,6 @@ mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
-fi
-# K8S_CONTEXT is empty on the normal in-cluster path: aqsh runs inside
-# cluster-dbs, so the in-cluster config already targets the MariaDB cluster.
-# Out-of-cluster / multi-cluster callers pass `context` explicitly; validate it
-# so a malformed value can't silently provision into the wrong cluster
-# (per CLAUDE.md: "Always specify --context").
-if [[ -n "$K8S_CONTEXT" ]]; then
-  mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
 fi
 
 # Build the MariaDB CR programmatically with jq rather than interpolating values
@@ -239,8 +247,15 @@ fi
 
 printf '%s\n' "$MANIFEST" | _kubectl apply -f -
 
-if [[ "$WAIT_READY" != "false" ]]; then
-  mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"
+# wait_timeout="0" returns immediately; otherwise wait for Ready. The instance is
+# already provisioned at this point, so a wait timeout must NOT lose the result —
+# emit a partial result (with the connection endpoint + credential ref) so the
+# caller can still reach the not-yet-Ready instance, then exit non-zero.
+if [[ "$WAIT_TIMEOUT" != "0" ]]; then
+  if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
+    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" "$(restore_result true false)" 1)"
+    exit 1
+  fi
 fi
 
 mdbt_write_result "$(response_ok "$OP" "MariaDB restored into new instance ${TARGET}" "$(restore_result true false)")"

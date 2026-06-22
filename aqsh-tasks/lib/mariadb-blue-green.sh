@@ -49,14 +49,11 @@ bg_validate_uint() { mdbt_validate_uint "$@"; }
 bg_validate_enum() { mdbt_validate_enum "$@"; }
 bg_wait_mariadb_ready() { mdbt_wait_mariadb_ready "$@"; }
 
+# Thin alias over the shared confirm gate, binding the blue/green confirm value
+# so it can't drift from mdbt_require_confirm.
+bg_require_confirm() { mdbt_require_confirm "$1" "$BG_CONFIRM"; }
+
 # Blue/green-specific helpers (kept local).
-bg_require_confirm() {
-  local op="$1"
-  case "$BG_CONFIRM" in
-    true | TRUE | yes | YES | 1) ;;
-    *) bg_fail "$op" "confirm=true is required for this mutating blue/green task" "{\"confirm\":\"$BG_CONFIRM\"}" 2 ;;
-  esac
-}
 
 bg_sql_string() {
   local escaped

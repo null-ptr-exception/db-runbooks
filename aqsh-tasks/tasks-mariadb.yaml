@@ -681,34 +681,13 @@ tasks:
         env: RESTORE_IMAGE
         required: false
         type: string
-      - name: storage_size
-        env: STORAGE_SIZE
-        required: false
-        type: string
-      - name: backup_bucket
-        env: BACKUP_BUCKET
-        required: false
-        type: string
-        default: db-backups
-      - name: backup_prefix
-        env: BACKUP_PREFIX
-        required: false
-        type: string
-      - name: backup_endpoint
-        env: BACKUP_ENDPOINT
-        required: false
-        type: string
-        default: minio.db-ops.svc.cluster.local:9000
-      - name: wait_ready
-        env: WAIT_READY
-        required: false
-        type: string
-        default: "true"
       - name: dry_run
         env: DRY_RUN
         required: false
         type: string
         default: "true"
+      # wait_timeout doubles as the wait switch: "0" returns without waiting,
+      # any positive duration (e.g. 10m) waits up to that long for Ready.
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false

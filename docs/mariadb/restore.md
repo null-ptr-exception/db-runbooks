@@ -30,11 +30,11 @@ restored.
 |------|--------|
 | Plan (default) | With `dry_run=true` (the default) the task renders the MariaDB manifest and returns without applying; `confirm` is not required. |
 | Guard | To apply, set `dry_run=false` **and** `confirm=true` (mutating). |
-| Resolve | `target` is auto-named; `image`/`storage_size` are derived from the namespace's source instance (auto-detected, or `source`; a single shared version is accepted across instances); the backup location, credentials, and S3 config come from platform convention. |
+| Resolve | `target` is auto-named; the engine version and PVC size are derived from the namespace's source instance (auto-detected, or `source`; a single shared version is accepted across instances) and are **never** silently defaulted; the backup location, credentials, and S3 config come from platform convention. |
 | Guard | If a MariaDB named `target` already exists, the task fails — restore never overwrites in place. |
 | Validate | `target_time`, when given, must be a range-checked RFC3339 instant (e.g. `2026-06-14T03:21:00Z`). |
 | Apply | Creates a standalone `MariaDB` CR via `bootstrapFrom.s3` (`backupContentType: Physical`), `replicas=1`, no replication/multiCluster. |
-| Wait | Waits for `condition=Ready` (skipped with `wait_ready=false`). |
+| Wait | Waits for `condition=Ready` (skip with `wait_timeout=0`). A wait timeout still returns a result carrying the connection endpoint + credential ref (status `error`), so the not-yet-Ready instance is never lost. |
 
 ## Inputs
 
@@ -48,19 +48,22 @@ The only required input is `namespace`.
 | `source` | `RESTORE_SOURCE` | | auto | Source MariaDB instance (for version/storage). Auto-detected from the namespace; only needed when the namespace runs **mixed versions** (e.g. mid blue-green upgrade). |
 | `target` | `RESTORE_TARGET` | | auto | New instance name. Auto-named `<namespace>-restore-<ts>` when omitted. |
 | `image` | `RESTORE_IMAGE` | | source | MariaDB image, derived from the source instance. The version is **never guessed** — if the source is gone or ambiguous, pass `image` explicitly. |
-| `storage_size` | `STORAGE_SIZE` | | source | PVC size. Derived from the source instance; `1Gi` if it is gone. |
-| `backup_bucket` | `BACKUP_BUCKET` | | `db-backups` | Advanced override. |
-| `backup_prefix` | `BACKUP_PREFIX` | | `mariadb/<namespace>` | Advanced override (per-namespace convention). |
-| `backup_endpoint` | `BACKUP_ENDPOINT` | | platform MinIO | Advanced override. |
-| `wait_ready` | `WAIT_READY` | | `true` | Set `false` to return without waiting for Ready. |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default; set `false` (with `confirm=true`) to apply. |
-| `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Ready wait timeout. |
+| `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Ready wait timeout. `0` returns immediately without waiting. |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |
 
-Credentials and S3 access are platform internals and are **not** task inputs.
-The restored instance reuses the platform-managed root Secret (named `mariadb`,
-key `password`) — the same convention every managed MariaDB in a namespace
-follows — returned as `credentialsRef` in the result.
+Platform internals — **not** task inputs:
+
+- **Storage size** is derived from the source instance and never defaulted (an
+  undersized PVC would truncate the restored data); if no source exists to
+  derive it from, the task fails asking for `source`.
+- **Credentials / S3 access** are resolved internally. The restored instance
+  reuses the platform-managed root Secret (named `mariadb`, key `password`) —
+  the same convention every managed MariaDB in a namespace follows — returned
+  as `credentialsRef` in the result.
+- **Backup location** (`s3://db-backups/mariadb/<namespace>`, MinIO endpoint,
+  region) is resolved from platform convention — the caller never specifies
+  where backups live.
 
 ## Examples
 
@@ -114,9 +117,11 @@ source's users and passwords).
 
 ## Notes
 
-- **Forward-looking backup convention.** `backup_prefix` defaults to
-  `mariadb/<namespace>`. Until the physical-backup task writes to that layout,
-  point `backup_prefix`/`backup_bucket` at where the backup actually lives.
+- **Forward-looking backup convention.** Restore reads from
+  `s3://db-backups/mariadb/<namespace>` (resolved internally). This is a
+  forward-looking convention: until the physical-backup *write* side adopts the
+  same layout, restore reads from a location nothing writes to yet. Closing that
+  gap (and dropping this note) is tracked as a follow-up.
 - **PITR depends on the operator + backup retaining the recovery point.** A
   `target_time` outside the available backup/binlog window will fail at the
   operator level.

@@ -26,16 +26,24 @@
 [[ -n "${_MONGODB_RECOVERY_LIB_LOADED:-}" ]] && return 0
 _MONGODB_RECOVERY_LIB_LOADED=1
 
-# Data paths vary by MongoDB deployment type; resolved 3 tiers deep:
-#   1. RECOVERY_DATA_PATH/RECOVERY_MOUNT_PATH task input (explicit per-call override)
-#   2. RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT (deploy-time internal
-#      config — /etc/aqsh/config/mongodb.env — see CLAUDE.md "Configuration Layers")
+# Data paths vary by MongoDB deployment type; resolved 3 tiers deep. Not a
+# task input (see CLAUDE.md "Configuration Layers" — recovery/* deliberately
+# doesn't expose deployment-naming-convention fields at the API layer; only
+# internal config remains as an explicit override):
+#   1. RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT (deploy-time internal
+#      config — /etc/aqsh/config/mongodb.env)
+#   2. Auto-detect (queries the live mongod for its real dbPath — see
+#      _recovery_detect_data_path below). Cannot run at module-load time (needs
+#      credentials + a target pod), so it only widens tier 1 here; callers
+#      apply it explicitly via recovery_resolve_data_paths after loading creds.
 #   3. Library fallback — Bitnami helm chart paths
 # Sourced here (not just by callers) because this assignment runs at module-load
 # time, before a calling script reaches its own internal-config sourcing line.
 [[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
-_RECOVERY_DATA_PATH="${RECOVERY_DATA_PATH:-${RECOVERY_DATA_PATH_DEFAULT:-/bitnami/mongodb/data/db}}"
-_RECOVERY_MOUNT_PATH="${RECOVERY_MOUNT_PATH:-${RECOVERY_MOUNT_PATH_DEFAULT:-/bitnami/mongodb}}"
+_RECOVERY_DATA_PATH_EXPLICIT="${RECOVERY_DATA_PATH_DEFAULT:-}"
+_RECOVERY_MOUNT_PATH_EXPLICIT="${RECOVERY_MOUNT_PATH_DEFAULT:-}"
+_RECOVERY_DATA_PATH="${_RECOVERY_DATA_PATH_EXPLICIT:-/bitnami/mongodb/data/db}"
+_RECOVERY_MOUNT_PATH="${_RECOVERY_MOUNT_PATH_EXPLICIT:-/bitnami/mongodb}"
 readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 
@@ -161,6 +169,331 @@ _recovery_mongosh_host() {
 }
 
 # ===========================================================================
+# Auto-detect functions
+#
+# Sit between "internal config" and "hardcoded literal" in the resolution
+# chain (CLAUDE.md "Configuration Layers"): sts_name/recovery_configmap/
+# credential secret-and-keys/data_path/mount_path are NOT task inputs — when
+# no /etc/aqsh/config/mongodb.env *_DEFAULT is set, these discover the real
+# naming convention from live cluster state instead of guessing a Bitnami-vs-
+# official-image profile. Every function fails soft (empty stdout, return 1)
+# when it can't find a confident signal — callers always fall through to the
+# next tier rather than risk a wrong guess succeeding silently.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# _recovery_get_sts_json <sts_name>
+# Fetches `kubectl get statefulset <sts_name> -o json`. Each call site (e.g.
+# detect_configmap, detect_credentials) is invoked via command substitution
+# by its caller, which forks a subshell — a same-process cache here would
+# only ever populate inside that subshell and vanish on return, never
+# reaching sibling calls. So this intentionally re-fetches every time rather
+# than carry a cache that can't actually work under that calling convention.
+# ---------------------------------------------------------------------------
+_recovery_get_sts_json() {
+  local sts_name="${1:?}"
+  _kubectl get statefulset "$sts_name" -o json 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_sts_name [target_pod]
+# With a target_pod: read its ownerReferences (authoritative — a pod's owning
+# StatefulSet is a Kubernetes-managed fact, not a convention to guess).
+# Without one (status/reset/fix-no-primary have no target_pod input): list
+# StatefulSets in the namespace; only resolve if exactly one exists, since
+# guessing among several would risk silently operating on the wrong one.
+# ---------------------------------------------------------------------------
+_recovery_detect_sts_name() {
+  local target_pod="${1:-}"
+  local name
+  if [[ -n "$target_pod" ]]; then
+    name=$(_kubectl get pod "$target_pod" \
+      -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null) || return 1
+    [[ -z "$name" ]] && return 1
+    printf '%s' "$name"
+    return 0
+  fi
+  local names
+  names=$(_kubectl get statefulsets -o jsonpath='{.items[*].metadata.name}' 2>/dev/null) || return 1
+  [[ -z "$names" ]] && return 1
+  [[ "$(wc -w <<< "$names")" -eq 1 ]] || return 1
+  printf '%s' "$names"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_configmap <sts_name>
+# The recovery ConfigMap's real name is already wired into the StatefulSet's
+# own pod template (setup-data-recovery.sh mounts it into the data-recovery
+# init container at /recovery-config) — read it back instead of assuming
+# "mongodb-recovery-config". Returns empty if the init container/volume
+# binding isn't there (G1 will report that clearly on its own).
+# ---------------------------------------------------------------------------
+_recovery_detect_configmap() {
+  local sts_name="${1:?}"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+  local cm_name
+  cm_name=$(printf '%s' "$sts_json" | jq -r --arg ic "$_RECOVERY_INIT_CONTAINER_NAME" '
+    (.spec.template.spec.initContainers[]? | select(.name==$ic)
+      | .volumeMounts[]? | select(.mountPath=="/recovery-config") | .name) as $volname
+    | (.spec.template.spec.volumes[]? | select(.name==$volname) | .configMap.name) // empty
+  ' 2>/dev/null | head -1) || return 1
+  [[ -z "$cm_name" ]] && return 1
+  printf '%s' "$cm_name"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_secret_ref_from_file <sts_json> <file_path>
+# Resolves a literal file path (from a *_FILE env var — see
+# _recovery_detect_credentials) back to the Secret object + key that backs
+# it: find the container's volumeMount whose mountPath prefixes file_path
+# (longest match wins, in case of nested mounts), then the volume of that
+# name, then its secret.secretName. Hardened/recent Bitnami images project
+# each credential as a file under a Secret-backed volume instead of
+# injecting it via secretKeyRef directly into env (avoids the password
+# showing up in `kubectl describe pod` / `/proc/<pid>/environ`) — the env
+# var only holds the path, e.g. MONGODB_ROOT_PASSWORD_FILE=/opt/bitnami/
+# mongodb/secrets/mongodb-root-password. Kubernetes projects each Secret
+# key as a same-named file directly under the mount (no subdirectories),
+# so the key is just the file's basename.
+# Prints "secret<US>key" on success.
+# ---------------------------------------------------------------------------
+_recovery_secret_ref_from_file() {
+  local sts_json="$1" file_path="${2:?}"
+  local secret_name
+  secret_name=$(printf '%s' "$sts_json" | jq -r --arg fp "$file_path" '
+    . as $root
+    | (($root.spec.template.spec.containers[0].volumeMounts // [])
+        | map(select(.mountPath as $mp | ($fp == $mp or ($fp | startswith($mp + "/")))))
+        | sort_by(.mountPath | length) | last) as $vm
+    | if $vm == null then empty else
+        ($vm.name) as $volname
+        | ($root.spec.template.spec.volumes[]? | select(.name==$volname) | .secret.secretName) // empty
+      end
+  ' 2>/dev/null) || return 1
+  [[ -z "$secret_name" ]] && return 1
+  local key="${file_path##*/}"
+  [[ -z "$key" ]] && return 1
+  printf '%s\x1f%s' "$secret_name" "$key"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_credentials <sts_name>
+# Root credentials are typically already wired into the mongod container's
+# own env for its bootstrap (official image: MONGO_INITDB_ROOT_USERNAME/
+# PASSWORD; Bitnami chart: MONGODB_ROOT_USER/PASSWORD) — read that binding
+# back rather than assuming "mongodb-credentials" / MONGO_ROOT_USER /
+# MONGO_ROOT_PASS. Username may be a literal env value instead of a secret
+# key (common when the username isn't treated as sensitive). If neither var
+# is wired via secretKeyRef, also checks the Bitnami file-mounted-secret
+# convention (a *_FILE-suffixed env var holding a literal path into a
+# Secret-backed volume — see _recovery_secret_ref_from_file) before giving up.
+#
+# On success, prints "secret<US>direct_user<US>user_key<US>pass_key" (US =
+# ASCII unit separator \x1f, NOT a tab — tab/space/newline are always
+# collapsed by bash's IFS word-splitting even when IFS is set to just one of
+# them, which silently drops empty fields like an unset direct_user) — this
+# is the shape _mongo_load_credentials expects (direct_user wins over
+# user_key when non-empty). Fails soft (empty + return 1) when the password
+# isn't sourced from a secretKeyRef or a *_FILE mount at all (e.g. mongod
+# started directly with credentials provisioned out-of-band — nothing live
+# to read), or when username/password resolve to two different secrets (an
+# unsupported split that would otherwise silently mix two conventions).
+# ---------------------------------------------------------------------------
+_recovery_detect_credentials() {
+  local sts_name="${1:?}"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+
+  local pass_secret pass_key
+  pass_secret=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_PASSWORD" or .name=="MONGODB_ROOT_PASSWORD")
+      | .valueFrom.secretKeyRef.name // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  pass_key=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_PASSWORD" or .name=="MONGODB_ROOT_PASSWORD")
+      | .valueFrom.secretKeyRef.key // empty][0] // empty
+  ' 2>/dev/null) || return 1
+
+  if [[ -z "$pass_secret" || -z "$pass_key" ]]; then
+    local pass_file_path pass_file_ref
+    pass_file_path=$(printf '%s' "$sts_json" | jq -r '
+      [.spec.template.spec.containers[0].env[]?
+        | select(.name=="MONGO_INITDB_ROOT_PASSWORD_FILE" or .name=="MONGODB_ROOT_PASSWORD_FILE")
+        | .value // empty][0] // empty
+    ' 2>/dev/null) || return 1
+    if [[ -n "$pass_file_path" ]]; then
+      pass_file_ref=$(_recovery_secret_ref_from_file "$sts_json" "$pass_file_path") || return 1
+      IFS=$'\x1f' read -r pass_secret pass_key <<< "$pass_file_ref"
+    fi
+  fi
+  [[ -z "$pass_secret" || -z "$pass_key" ]] && return 1
+
+  local user_secret user_key direct_user
+  user_secret=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | .valueFrom.secretKeyRef.name // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  user_key=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | .valueFrom.secretKeyRef.key // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  direct_user=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | select(.valueFrom.secretKeyRef == null) | .value // empty][0] // empty
+  ' 2>/dev/null) || return 1
+
+  if [[ -z "$user_secret$user_key$direct_user" ]]; then
+    local user_file_path user_file_ref
+    user_file_path=$(printf '%s' "$sts_json" | jq -r '
+      [.spec.template.spec.containers[0].env[]?
+        | select(.name=="MONGO_INITDB_ROOT_USERNAME_FILE" or .name=="MONGODB_ROOT_USER_FILE")
+        | .value // empty][0] // empty
+    ' 2>/dev/null) || return 1
+    if [[ -n "$user_file_path" ]]; then
+      user_file_ref=$(_recovery_secret_ref_from_file "$sts_json" "$user_file_path") || return 1
+      IFS=$'\x1f' read -r user_secret user_key <<< "$user_file_ref"
+    fi
+  fi
+  [[ -z "$user_secret$user_key$direct_user" ]] && return 1   # no username signal at all
+
+  # Username/password sourced from two different secrets is an unsupported,
+  # hand-rolled split — fall through rather than mix conventions.
+  [[ -n "$user_secret" && "$user_secret" != "$pass_secret" ]] && return 1
+
+  printf '%s\x1f%s\x1f%s\x1f%s' "$pass_secret" "$direct_user" "$user_key" "$pass_key"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_data_path <target_pod> <user> <pass>
+# Ask mongod itself where its dbPath is (db.serverCmdLineOpts().parsed.
+# storage.dbPath) instead of guessing a Bitnami-vs-official-image profile.
+# Correct for any image/layout since it's the live config mongod is actually
+# running with, not a convention. Requires credentials to already be
+# resolved, so this cannot run at module-load time — see
+# recovery_resolve_data_paths.
+#
+# serverCmdLineOpts().parsed only reflects an EXPLICIT --dbpath flag or
+# storage.dbPath config-file setting — it's empty when a deployment relies
+# on mongod's own compiled-in default instead of configuring one explicitly
+# (a real, common case, not just a hypothetical: any StatefulSet whose PVC
+# happens to be mounted at the default path needs no --dbpath flag at all).
+# Falling back to "/data/db" here is mongod's own well-documented, stable
+# default across all versions — not a Bitnami/official-image guess.
+# ---------------------------------------------------------------------------
+_recovery_detect_data_path() {
+  local target_pod="${1:?}" user="${2:?}" pass="${3:?}"
+  local out
+  # _recovery_mongosh_pod merges kubectl's own stderr into its stdout
+  # (2>&1), so a kubectl-layer failure (pod not found, container not ready,
+  # connection refused) before mongosh ever runs would otherwise show up as
+  # ordinary non-empty output here — indistinguishable from a real path.
+  # The DBPATH: sentinel is only ever printed by the JS's own print(), so
+  # any kubectl/mongosh error text (which won't carry the prefix) is
+  # correctly rejected as "no confident signal" rather than accepted as a
+  # detected path.
+  out=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
+    "try{var o=db.serverCmdLineOpts().parsed;var p=(o&&o.storage&&o.storage.dbPath)?o.storage.dbPath:'/data/db';print('DBPATH:'+p);}catch(e){print('');}" \
+    2>/dev/null | tail -1 | tr -d '\r') || return 1
+  [[ "$out" == DBPATH:* ]] || return 1
+  printf '%s' "${out#DBPATH:}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_sts_name <explicit> [target_pod]
+# <explicit> is whatever the caller already resolved from the internal-config
+# tier (empty if unset — sts_name is not a task input; see CLAUDE.md
+# "Configuration Layers"). Centralizes the detect-then-fallback step so every
+# recovery/*.sh script doesn't reimplement it inline.
+# ---------------------------------------------------------------------------
+recovery_resolve_sts_name() {
+  local explicit="${1:-}" target_pod="${2:-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  local detected
+  detected=$(_recovery_detect_sts_name "$target_pod") || detected=""
+  printf '%s' "${detected:-mongodb}"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_configmap <explicit> <sts_name>
+# ---------------------------------------------------------------------------
+recovery_resolve_configmap() {
+  local explicit="${1:-}" sts_name="${2:?}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  local detected
+  detected=$(_recovery_detect_configmap "$sts_name") || detected=""
+  printf '%s' "${detected:-mongodb-recovery-config}"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_credentials <secret> <direct_user> <user_key> <pass_key> <sts_name>
+# All 4 args are whatever the caller already resolved from the internal-
+# config tier (credentials are not a task input; see CLAUDE.md "Configuration
+# Layers"). Detection only runs when ALL FOUR are empty — a deployment that
+# declared even one credential field via internal config has signaled it
+# already knows its convention, so partial detection (which could silently
+# mix a detected secret name with an unrelated fallback key) never kicks in.
+# Prints "secret<US>direct_user<US>user_key<US>pass_key" (US = \x1f — see
+# _recovery_detect_credentials for why not a tab) with the final
+# hardcoded-literal tier applied.
+# ---------------------------------------------------------------------------
+recovery_resolve_credentials() {
+  local secret="${1:-}" direct_user="${2:-}" user_key="${3:-}" pass_key="${4:-}" sts_name="${5:?}"
+  if [[ -z "$secret" && -z "$direct_user" && -z "$user_key" && -z "$pass_key" ]]; then
+    local detected
+    detected=$(_recovery_detect_credentials "$sts_name") || detected=""
+    if [[ -n "$detected" ]]; then
+      IFS=$'\x1f' read -r secret direct_user user_key pass_key <<< "$detected"
+    fi
+  fi
+  secret="${secret:-mongodb-credentials}"
+  user_key="${user_key:-MONGO_ROOT_USER}"
+  pass_key="${pass_key:-MONGO_ROOT_PASS}"
+  printf '%s\x1f%s\x1f%s\x1f%s' "$secret" "$direct_user" "$user_key" "$pass_key"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_data_paths <target_pod> <user> <pass>
+# Upgrades the module-level _RECOVERY_DATA_PATH/_RECOVERY_MOUNT_PATH globals
+# via live detection — but only when neither was set by an explicit task
+# input nor an internal-config default (tracked via the *_EXPLICIT sentinels
+# set at module load). A caller/operator who already declared a value always
+# wins; detection only fills the gap when nobody declared anything.
+# `df` reports stats for whichever filesystem backs a given path even if
+# it's a subdirectory of the actual mountpoint, so the same detected path
+# is reused for both data_path (G5 `du`) and mount_path (G6 `df`) — no
+# separate mount-point lookup needed.
+# ---------------------------------------------------------------------------
+recovery_resolve_data_paths() {
+  local target_pod="${1:?}" user="${2:?}" pass="${3:?}"
+  [[ -n "$_RECOVERY_DATA_PATH_EXPLICIT" && -n "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]] && return 0
+  local detected
+  detected=$(_recovery_detect_data_path "$target_pod" "$user" "$pass") || return 0
+  [[ -z "$detected" ]] && return 0
+  [[ -z "$_RECOVERY_DATA_PATH_EXPLICIT" ]] && _RECOVERY_DATA_PATH="$detected"
+  [[ -z "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]] && _RECOVERY_MOUNT_PATH="$detected"
+  return 0
+}
+
+# ===========================================================================
 # Gate functions
 # Each gate prints a single-line JSON object to stdout:
 #   {"gate":"Gn","pass":true|false,"warn":true|false,"message":"...","code":"...",...}
@@ -174,7 +507,7 @@ _recovery_gate_g1() {
   local ic_names
   ic_names=$(_kubectl get statefulset "$sts_name" \
     -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null) || {
-    printf '{"gate":"G1","pass":false,"code":"STS_NOT_FOUND","message":"StatefulSet %s not found","suggestion":"Verify namespace and sts_name inputs"}' \
+    printf '{"gate":"G1","pass":false,"code":"STS_NOT_FOUND","message":"StatefulSet %s not found","suggestion":"Verify namespace; if sts_name auto-detection picked the wrong name, set MONGO_STS_NAME_DEFAULT in internal config"}' \
       "$sts_name"; return 1
   }
   if printf '%s' "$ic_names" | tr ' ' '\n' | grep -qx "$_RECOVERY_INIT_CONTAINER_NAME"; then

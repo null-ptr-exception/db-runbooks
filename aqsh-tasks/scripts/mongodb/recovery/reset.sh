@@ -11,8 +11,11 @@ set -euo pipefail
 #
 # Inputs (injected from tasks.yaml):
 #   DB_NAMESPACE       — target namespace, e.g. "mongo-1"
-#   MONGO_STS_NAME     — StatefulSet name (default: mongodb)
-#   RECOVERY_CONFIGMAP — recovery ConfigMap name (default: mongodb-recovery-config)
+#
+# sts_name/recovery_configmap are not task inputs (see CLAUDE.md
+# "Configuration Layers") — they resolve internal config (/etc/aqsh/config/
+# mongodb.env) -> live cluster auto-detect (single StatefulSet in the
+# namespace) -> hardcoded literal fallback.
 # =============================================================================
 
 LIB_DIR="/tasks/lib"
@@ -24,8 +27,8 @@ source "${LIB_DIR}/mongodb-recovery.sh"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 # mongodb-recovery.sh (sourced above) already loads /etc/aqsh/config/mongodb.env
 # before this point — see its header comment for why it must run there.
-_STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
-_CM="${RECOVERY_CONFIGMAP:-${RECOVERY_CONFIGMAP_DEFAULT:-mongodb-recovery-config}}"
+_STS=$(recovery_resolve_sts_name "${MONGO_STS_NAME_DEFAULT:-}")
+_CM=$(recovery_resolve_configmap "${RECOVERY_CONFIGMAP_DEFAULT:-}" "$_STS")
 
 log_info "recovery-reset" "Resetting recovery state for STS ${_STS} in namespace ${DB_NAMESPACE}"
 

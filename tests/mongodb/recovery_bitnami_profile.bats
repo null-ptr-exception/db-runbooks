@@ -20,10 +20,11 @@
 # the path/volume/uid mechanics --profile bitnami controls, independent of
 # whichever container image a real deployment happens to use.
 #
-# It coexists with mongo-1 (profile=standard, which already claims this
-# cluster's RECOVERY_*_DEFAULT) to prove a second deployment can legitimately
-# use a different profile via explicit data_path/mount_path task inputs —
-# see CLAUDE.md "Configuration Layers".
+# It coexists with mongo-1 (profile=standard) to prove a second deployment
+# can legitimately use a different profile with zero naming/path inputs —
+# data_path/mount_path are not task inputs (see CLAUDE.md "Configuration
+# Layers"); detection reads the real --dbpath this profile's mongod was
+# started with directly, no per-call override needed.
 #
 # Reuses mongo-1's own object names (mongodb / mongodb-credentials /
 # mongodb-recovery-config) but in namespace mongo-bitnami, so the existing
@@ -428,8 +429,7 @@ _wipe_target() {
 
 @test "G1 reports the data-recovery init container present after --profile bitnami" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    "{\"namespace\":\"${BNS}\",\"target_pod\":\"mongodb-1\",
-      \"data_path\":\"/bitnami/mongodb/data/db\",\"mount_path\":\"/bitnami/mongodb\"}"
+    "{\"namespace\":\"${BNS}\",\"target_pod\":\"mongodb-1\"}"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -444,13 +444,12 @@ _wipe_target() {
 
 # ── recovery/pre-check: full gate pipeline against the real Bitnami layout ──
 
-@test "recovery/pre-check passes all 8 gates against the Bitnami-profile layout with explicit bitnami paths" {
+@test "recovery/pre-check passes all 8 gates against the Bitnami-profile layout via live detection" {
   local target
   target=$(_wipe_target "$BNS" "$CTX_A")
 
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    "{\"namespace\":\"${BNS}\",\"target_pod\":\"${target}\",
-      \"data_path\":\"/bitnami/mongodb/data/db\",\"mount_path\":\"/bitnami/mongodb\"}"
+    "{\"namespace\":\"${BNS}\",\"target_pod\":\"${target}\"}"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -483,8 +482,7 @@ _wipe_target() {
     get pod "$target" -o jsonpath='{.metadata.uid}')
 
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
-    "{\"namespace\":\"${BNS}\",\"target_pod\":\"${target}\",\"wait_timeout\":\"300\",
-      \"data_path\":\"/bitnami/mongodb/data/db\",\"mount_path\":\"/bitnami/mongodb\"}"
+    "{\"namespace\":\"${BNS}\",\"target_pod\":\"${target}\",\"wait_timeout\":\"300\"}"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id

@@ -8,14 +8,13 @@ set -euo pipefail
 #
 # Inputs (injected from tasks.yaml):
 #   DB_NAMESPACE          — target namespace, e.g. "mongo-1"
-#   MONGO_STS_NAME        — StatefulSet name (default: mongodb)
 #   RECOVERY_TARGET_POD   — pod to wipe, e.g. "mongodb-2"
-#   RECOVERY_CONFIGMAP    — recovery ConfigMap name (default: mongodb-recovery-config)
-#   MONGO_CRED_SECRET     — Secret name (default: mongodb-credentials)
-#   MONGO_CRED_USER       — Username value (optional; if set, MONGO_CRED_USER_KEY is ignored)
-#   MONGO_CRED_USER_KEY   — Secret key for username (default: MONGO_ROOT_USER)
-#   MONGO_CRED_PASS_KEY   — Secret key for password (default: MONGO_ROOT_PASS)
 #   FORCE_WIPE            — "true" to bypass 100GB gate (default: false)
+#
+# sts_name/recovery_configmap/credential secret-and-keys/data-and-mount-path
+# are not task inputs (see CLAUDE.md "Configuration Layers") — they resolve
+# internal config (/etc/aqsh/config/mongodb.env) -> live cluster auto-detect
+# -> hardcoded literal fallback.
 # =============================================================================
 
 LIB_DIR="/tasks/lib"
@@ -26,20 +25,25 @@ source "${LIB_DIR}/mongodb.sh"
 source "${LIB_DIR}/mongodb-recovery.sh"
 
 export K8S_NAMESPACE="${DB_NAMESPACE}"
-# mongodb-recovery.sh (sourced above) already loads /etc/aqsh/config/mongodb.env
-# before this point — see its header comment for why it must run there.
-_STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
-_CM="${RECOVERY_CONFIGMAP:-${RECOVERY_CONFIGMAP_DEFAULT:-mongodb-recovery-config}}"
-_SECRET="${MONGO_CRED_SECRET:-${MONGO_CRED_SECRET_DEFAULT:-mongodb-credentials}}"
-_DIRECT_USER="${MONGO_CRED_USER:-${MONGO_CRED_USER_DEFAULT:-}}"
-_USER_KEY="${MONGO_CRED_USER_KEY:-${MONGO_CRED_USER_KEY_DEFAULT:-MONGO_ROOT_USER}}"
-_PASS_KEY="${MONGO_CRED_PASS_KEY:-${MONGO_CRED_PASS_KEY_DEFAULT:-MONGO_ROOT_PASS}}"
 _TARGET="${RECOVERY_TARGET_POD:?RECOVERY_TARGET_POD is required (e.g. mongodb-2)}"
 export FORCE_WIPE="${FORCE_WIPE:-false}"
+
+# mongodb-recovery.sh (sourced above) already loads /etc/aqsh/config/mongodb.env
+# before this point — see its header comment for why it must run there.
+_STS=$(recovery_resolve_sts_name "${MONGO_STS_NAME_DEFAULT:-}" "$_TARGET")
+_CM=$(recovery_resolve_configmap "${RECOVERY_CONFIGMAP_DEFAULT:-}" "$_STS")
+_CRED_ROW=$(recovery_resolve_credentials \
+  "${MONGO_CRED_SECRET_DEFAULT:-}" \
+  "${MONGO_CRED_USER_DEFAULT:-}" \
+  "${MONGO_CRED_USER_KEY_DEFAULT:-}" \
+  "${MONGO_CRED_PASS_KEY_DEFAULT:-}" \
+  "$_STS")
+IFS=$'\x1f' read -r _SECRET _DIRECT_USER _USER_KEY _PASS_KEY <<< "$_CRED_ROW"
 
 log_info "recovery-wipe" "Starting wipe for pod ${_TARGET} in namespace ${DB_NAMESPACE}"
 
 _mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
+recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS"
 
 # --- Phase 1: run gates (gate mode — exits on first blocking failure) ---
 log_info "recovery-wipe" "Running pre-flight gates (gate mode)"

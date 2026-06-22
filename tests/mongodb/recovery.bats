@@ -526,7 +526,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check returns 202 for a secondary pod" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -536,7 +536,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check result contains 8 gates" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -552,7 +552,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G1 reports init container present after STS patch" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -568,7 +568,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G2 reports ConfigMap present" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -584,7 +584,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G3 reports healthy sync source and primary available" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -600,7 +600,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G4 reports oplog window sufficient" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -618,7 +618,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G5 reports data size within limit" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -634,7 +634,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G6 reports PVC space sufficient" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -649,72 +649,20 @@ _wait_for_rs_healthy() {
   [ "$g6_pass" = "true" ]
 }
 
-# ── Wrong profile / path mismatch (documents the silent-failure mode) ───────
-#
-# mongo-1 here is a standard mongo:N deployment (volume "data" at /data/db).
-# If a caller mistakenly supplies the Bitnami profile's paths instead — e.g.
-# because RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT were set for
-# the wrong profile — `du` against the nonexistent data_path returns nothing,
-# and G5 degrades to a non-blocking warning (data_mb=0) rather than erroring
-# loudly. G6 then ALSO degrades, but for a different reason than its own
-# `df`/PVC-name fallback: recovery_run_gates() only calls _recovery_gate_g6
-# at all when G5 reports data_mb > 0 (see the `if [[ "$data_mb" -gt 0 ]]`
-# branch in recovery_run_gates) — once G5's measurement comes back as 0,
-# G6 is skipped outright with a hardcoded warning, never reaching its own
-# PVC-fallback logic. tests/unit/mongodb/recovery.bats already proves the G5
-# half against a mocked kubectl; these two prove the real end-to-end chain.
-
-@test "recovery/pre-check G5 silently degrades to warn (not block) when called with the wrong profile's data_path" {
-  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/bitnami/mongodb/data/db","mount_path":"/bitnami/mongodb"}'
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  local g5_pass g5_warn g5_data_mb
-  g5_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .pass' 2>/dev/null || echo "null")
-  g5_warn=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .warn' 2>/dev/null || echo "null")
-  g5_data_mb=$(echo "$result" | jq -r '.gates[] | select(.gate=="G5") | .data_mb' 2>/dev/null || echo "null")
-  # `du /bitnami/mongodb/data/db` inside a standard pod finds nothing — G5
-  # never blocks on this; it silently reports data_mb=0 and warns instead.
-  assert_equal "$g5_pass" "true"
-  assert_equal "$g5_warn" "true"
-  assert_equal "$g5_data_mb" "0"
-}
-
-@test "recovery/pre-check G6 is skipped with a warn once G5's data_mb comes back 0 from the wrong data_path" {
-  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/bitnami/mongodb/data/db","mount_path":"/bitnami/mongodb"}'
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  local g6_pass g6_warn g6_message
-  g6_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .pass' 2>/dev/null || echo "null")
-  g6_warn=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .warn' 2>/dev/null || echo "null")
-  g6_message=$(echo "$result" | jq -r '.gates[] | select(.gate=="G6") | .message' 2>/dev/null || echo "null")
-  # G6 never even runs its own df/PVC-fallback logic here: recovery_run_gates
-  # only calls _recovery_gate_g6 when data_mb > 0, and G5 already reported
-  # data_mb=0 for this wrong data_path. G6's warning is the generic
-  # "data size unknown" skip, not a PVC-capacity result of its own.
-  assert_equal "$g6_pass" "true"
-  assert_equal "$g6_warn" "true"
-  assert_equal "$g6_message" "PVC space check skipped: data size unknown"
-}
+# Wrong-profile / data_path-mismatch coverage (data_path was previously a
+# task input, so a caller could trigger this on purpose) moved to
+# tests/unit/mongodb/recovery.bats's mocked-kubectl G5/G6 path-mismatch
+# tests — data_path/mount_path are no longer task inputs (see CLAUDE.md
+# "Configuration Layers"), so there's no longer an API-level way to pass a
+# mismatched path; the only way for a real deployment to hit this is a
+# detection bug, which the live e2e detection tests (recovery_autodetect*
+# .bats) already pressure-test as a positive case (data_mb > 0).
 
 @test "recovery/pre-check G7 blocks when target is mongodb-0 (primary)" {
   # mongodb-0 is deterministically primary (priority 2 set in _init_mongodb_rs).
   # G7 checks db.hello().isWritablePrimary regardless of ordinal → TARGET_IS_PRIMARY.
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-0"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -732,7 +680,7 @@ _wait_for_rs_healthy() {
 
 @test "recovery/pre-check G7 passes when target is a secondary (mongodb-2)" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -746,53 +694,16 @@ _wait_for_rs_healthy() {
   assert_equal "$g7_pass" "true"
 }
 
-# ── credential_user: supply username directly instead of via secret key ─────
-
-@test "recovery/pre-check passes when credential_user is supplied directly" {
-  local user pass
-  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
-
-  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    "{\"namespace\":\"mongo-1\",\"target_pod\":\"mongodb-2\",
-      \"credential_user\":\"${user}\",
-      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result g3_pass
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  g3_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G3") | .pass' 2>/dev/null || echo "null")
-  assert_equal "$g3_pass" "true"
-}
-
-@test "recovery/pre-check credential_user overrides a wrong credential_user_key" {
-  local user pass
-  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
-
-  # credential_user_key points at a key that does not exist in the secret —
-  # credential_user must make that lookup irrelevant.
-  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    "{\"namespace\":\"mongo-1\",\"target_pod\":\"mongodb-2\",
-      \"credential_user\":\"${user}\",\"credential_user_key\":\"NONEXISTENT_KEY\",
-      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result g3_pass
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  g3_pass=$(echo "$result" | jq -r '.gates[] | select(.gate=="G3") | .pass' 2>/dev/null || echo "null")
-  assert_equal "$g3_pass" "true"
-}
+# credential_user/credential_user_key task-input override coverage removed:
+# they're no longer task inputs (see CLAUDE.md "Configuration Layers"). The
+# underlying _mongo_load_credentials direct_user mechanism they exercised is
+# still covered — now via detection — by tests/unit/mongodb/recovery-detect
+# .bats and the live e2e recovery_autodetect*.bats fixtures (literal-username
+# detection paths).
 
 @test "recovery/pre-check G8 reports no RECOVERING members on healthy cluster" {
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -848,24 +759,6 @@ _wait_for_rs_healthy() {
   [ "$HTTP_CODE" != "202" ]
 }
 
-@test "recovery/fix-no-primary diagnose works with credential_user" {
-  local user pass
-  { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
-
-  http_post "${AQSH_URL}/tasks/recovery%2Ffix-no-primary" \
-    "{\"namespace\":\"mongo-1\",\"level\":\"diagnose\",\"credential_user\":\"${user}\"}"
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result diagnosis
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  diagnosis=$(echo "$result" | jq -r '.diagnosis // empty')
-  assert_equal "$diagnosis" "PRIMARY_EXISTS"
-}
-
 # ── recovery/reset (idempotent — safe to run on a clean cluster) ──────────────
 
 @test "recovery/reset clears wipe-target and resets partition" {
@@ -908,7 +801,7 @@ _wait_for_rs_healthy() {
     get pod mongodb-2 -o jsonpath='{.metadata.uid}')
 
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -968,7 +861,7 @@ _wait_for_rs_healthy() {
   _wait_for_rs_healthy "mongo-1" "mongodb-2" "$CTX_A" 180
 
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-2","wait_timeout":"300"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -1047,7 +940,7 @@ _wait_for_rs_healthy() {
     get pod mongodb-1 -o jsonpath='{.metadata.uid}')
 
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-1","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-1","wait_timeout":"300"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -1105,7 +998,7 @@ _wait_for_rs_healthy() {
   echo "New primary after stepdown: ${primary_pod}" >&2
 
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${primary_pod}\",\"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${primary_pod}\"}"
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -1125,7 +1018,7 @@ _wait_for_rs_healthy() {
   # pod-0 should still be secondary from the previous test's stepdown.
   # G7 must return pass=true: Running but not PRIMARY → safe to wipe.
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-0"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -1159,7 +1052,7 @@ _wait_for_rs_healthy() {
 
   # Run pre-check to confirm G7 currently BLOCKS on pod-0 (it is primary).
   http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-0","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-0"}'
   local precheck_id
   precheck_id=$(echo "$HTTP_BODY" | jq -r '.id')
   wait_for_task "$AQSH_URL" "$precheck_id" 120 || true
@@ -1184,7 +1077,7 @@ _wait_for_rs_healthy() {
   _stepdown_pod0 "mongo-1" "$ctx" 120
 
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
-    '{"namespace":"mongo-1","target_pod":"mongodb-0","wait_timeout":"300","data_path":"/data/db","mount_path":"/data/db"}'
+    '{"namespace":"mongo-1","target_pod":"mongodb-0","wait_timeout":"300"}'
   assert_equal "$HTTP_CODE" "202"
 
   local task_id
@@ -1238,8 +1131,7 @@ _wait_for_rs_healthy() {
     get pod "$target" -o jsonpath='{.metadata.uid}')
 
   http_post "${AQSH_URL}/tasks/recovery%2Fwipe" \
-    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${target}\",
-      \"data_path\":\"/data/db\",\"mount_path\":\"/data/db\"}"
+    "{\"namespace\":\"mongo-1\",\"target_pod\":\"${target}\"}"
   assert_equal "$HTTP_CODE" "202"
 
   local wipe_task_id

@@ -117,4 +117,4 @@ EOF
 )"
 
 echo "Done. Partition is locked at ${REPLICAS} — no pods restart until a wipe lowers it."
-echo "This script does not read /etc/aqsh/config/mongodb.env — make sure RECOVERY_DATA_PATH_DEFAULT=${WIPE_PATH} and RECOVERY_MOUNT_PATH_DEFAULT=${MOUNT_PATH} are set there to match this profile (or pass \"data_path\"/\"mount_path\" per call)."
+echo "This script does not read /etc/aqsh/config/mongodb.env. recovery/* tasks auto-detect data_path/mount_path live from mongod's real dbPath, so no action is normally needed — only set RECOVERY_DATA_PATH_DEFAULT=${WIPE_PATH} / RECOVERY_MOUNT_PATH_DEFAULT=${MOUNT_PATH} there if detection can't resolve this deployment's convention (data_path/mount_path are not task inputs; see CLAUDE.md \"Configuration Layers\")."

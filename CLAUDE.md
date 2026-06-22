@@ -68,11 +68,15 @@ When adding a new task parameter, decide which layer it belongs to:
 values for X, but one environment wants the *same* value of X on every call,
 X is internal config, not a task input. `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `sts_name`, `recovery_configmap`,
-`data_path`, `mount_path` (MongoDB recovery/account/sanity-check tasks) follow
-this pattern.
+`data_path`, `mount_path` (MongoDB account/sanity-check tasks) follow this
+pattern as optional task inputs with internal-config + hardcoded-literal
+fallback. MongoDB `recovery/*` tasks go a step further and don't expose these
+fields as task inputs *at all* — see "Auto-detect tier" below.
 
 **Resolution order** (3 tiers, implemented per-script — see
-`aqsh-tasks/scripts/mongodb/recovery/pre-check.sh` for a worked example):
+`aqsh-tasks/scripts/mongodb/sanity-check.sh` for a worked example; MongoDB
+`recovery/*` tasks use a variant of this without the task-input tier — see
+"Auto-detect tier" below):
 
 1. Task input — only non-empty if the caller explicitly passed it (YAML
    `default: ""`, not a literal)
@@ -88,6 +92,48 @@ _STS="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
 A distinct `*_DEFAULT` variable name (rather than reusing the task-input env
 var name) is deliberate: sourcing the internal config file can never silently
 clobber an explicit caller override, because it writes to a different name.
+
+**Auto-detect tier (MongoDB `recovery/*` tasks only)**: `pre-check`, `wipe`,
+`reset`, `status`, `fix-no-primary`, and `recover` do NOT declare `sts_name`,
+`recovery_configmap`, `credential_secret`, `credential_user`,
+`credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
+task inputs at all — these tasks operate on something close to a destructive
+action (wipe a pod's data), so the API surface is deliberately kept to just
+`namespace` + the genuinely per-call operational decisions (`target_pod`,
+`force_wipe`, `level`/`force_primary_pod`, `wait_timeout`). Resolution is a
+3-tier chain with no task-input override:
+
+1. Internal config — `*_DEFAULT`-suffixed env var, set once per deployment
+2. Auto-detect — query live cluster state instead of guessing a
+   Bitnami-vs-official-image profile: `sts_name` from the target pod's
+   `ownerReferences`, `credential_*` from the StatefulSet's own container env
+   (`secretKeyRef` for `MONGO_INITDB_ROOT_USERNAME/PASSWORD` or
+   `MONGODB_ROOT_USER/PASSWORD`, or the Bitnami file-mounted-secret
+   convention — a `*_FILE`-suffixed env var holding a path into a
+   Secret-backed volume mount), `recovery_configmap` from the
+   `data-recovery` init container's own volume binding, and
+   `data_path`/`mount_path` by asking mongod itself for its real dbPath
+   (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
+   mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
+   setting was given) rather than reusing one value for both `du` and `df`
+   checks. See the `_recovery_detect_*` / `recovery_resolve_*` functions in
+   `aqsh-tasks/lib/mongodb-recovery.sh`.
+3. Library hardcoded fallback — Bitnami helm chart paths
+
+Detection always fails *soft*: if it can't find a confident signal (e.g. a
+StatefulSet with no env-based credential wiring, or more than one StatefulSet
+in the namespace with no target pod to disambiguate), it returns nothing and
+resolution falls through to tier 3 exactly as before — it never guesses.
+This doesn't change what RBAC permits: the ClusterRole's `resourceNames`
+must already match the *real* object names for the deployment to work at
+all (see below), regardless of whether the script learns those names from
+config or by detecting them live.
+
+If a deployment's naming convention is so unusual that neither auto-detect
+nor the hardcoded fallback can resolve it (e.g. credentials provisioned with
+no live signal in the StatefulSet spec at all), internal config remains the
+only override — there is no per-call escape hatch for `recovery/*` tasks by
+design.
 
 If a value like this also gates RBAC (e.g. `resourceNames` pinned to a
 StatefulSet/Secret/ConfigMap name), template the RBAC chart from the same

@@ -1,8 +1,10 @@
 # MongoDB Data Recovery (aqsh-mongodb)
 
 Automated recovery workflow for corrupted or out-of-sync MongoDB StatefulSet
-replicas (Bitnami helm chart by default; standard `mongo:N` images via the
-`data_path` / `mount_path` inputs).  Works without `kubectl delete pod`,
+replicas. Works against any image/layout (Bitnami helm chart, standard
+`mongo:N` images, hardened Bitnami images with file-mounted secrets) — the
+naming/credential/path convention is resolved automatically from live
+cluster state, not declared per call. Works without `kubectl delete pod`,
 `kubectl delete pvc`, or node cordon — only ConfigMap and StatefulSet `patch`
 permissions are needed.
 
@@ -75,26 +77,59 @@ The `data-recovery` init container runs on every pod start.  It reads
 - **Hostname matches**: wipe the data directory → MongoDB starts empty → auto initial-sync
 - **Hostname not in list**: skip, proceed normally
 
-### Data Paths per Deployment Type
+### Data Paths and Credentials Are Auto-Detected, Not Task Inputs
 
 The gates (`du` for G5, `df` for G6) and the init container must agree on
-where the data lives.  This is a deployment convention, not a per-call
-choice — set `RECOVERY_DATA_PATH_DEFAULT` / `RECOVERY_MOUNT_PATH_DEFAULT` once
-in this cluster's internal config (`/etc/aqsh/config/mongodb.env`; see
-CLAUDE.md "Configuration Layers") so every call gets it automatically. The
-`data_path` / `mount_path` task inputs remain available to override a single
-call (e.g. one StatefulSet that doesn't match the cluster's usual image
-type). With no internal config set, the library falls back to Bitnami paths:
+where the data lives, and the gates must authenticate as a real MongoDB
+user. None of `sts_name`, `recovery_configmap`, `credential_secret`,
+`credential_user`, `credential_user_key`, `credential_pass_key`,
+`data_path`, or `mount_path` are task inputs — there is no per-call way to
+pass any of them (see CLAUDE.md "Configuration Layers" for why: these
+tasks operate on something close to a destructive action, so the API
+surface is deliberately kept to `namespace` + the genuinely per-call
+operational decisions). Resolution is a 3-tier chain with no task-input
+override:
 
-| Deployment | `data_path` (du target) | `mount_path` (df target) |
+1. **Internal config** — set once per cluster in
+   `/etc/aqsh/config/mongodb.env`'s `*_DEFAULT` keys
+   (`RECOVERY_DATA_PATH_DEFAULT`, `MONGO_CRED_SECRET_DEFAULT`, etc.) when a
+   deployment's convention can't be (or shouldn't be) discovered live.
+2. **Live auto-detect** — query the StatefulSet/mongod directly instead of
+   guessing a Bitnami-vs-official-image profile:
+   - `sts_name` — from the target pod's `ownerReferences`
+   - `recovery_configmap` — from the `data-recovery` init container's own
+     volume binding
+   - `credential_secret`/`credential_user`/keys — from the StatefulSet's
+     container env: `secretKeyRef` for `MONGO_INITDB_ROOT_USERNAME/PASSWORD`
+     (official image) or `MONGODB_ROOT_USER/PASSWORD` (Bitnami), or the
+     hardened-Bitnami file-mounted-secret convention (a `*_FILE`-suffixed
+     env var holding a path into a Secret-backed volume mount)
+   - `data_path`/`mount_path` — by asking mongod itself for its real dbPath
+     (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
+     mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
+     setting was given), reusing the same value for both `du` and `df`
+3. **Library hardcoded fallback** — Bitnami helm chart paths
+   (`/bitnami/mongodb/data/db` / `/bitnami/mongodb`), `mongodb-credentials`
+   secret with keys `MONGO_ROOT_USER`/`MONGO_ROOT_PASS`, StatefulSet name
+   `mongodb`, ConfigMap `mongodb-recovery-config`
+
+Detection always fails *soft*: if it can't find a confident signal (no
+env-based credential wiring at all, more than one StatefulSet in the
+namespace with no target pod to disambiguate), it falls through to tier 3
+exactly as before — it never guesses. If a deployment's convention is so
+unusual that neither detection nor the hardcoded fallback can resolve it,
+internal config remains the only override.
+
+| Deployment | Real `data_path`/`mount_path` | Resolved via |
 |---|---|---|
-| Bitnami helm chart (default) | `/bitnami/mongodb/data/db` | `/bitnami/mongodb` |
-| Standard `mongo:N` image (this repo's test fixture) | `/data/db` | `/data/db` |
+| Bitnami helm chart | `/bitnami/mongodb/data/db` / `/bitnami/mongodb` | live detect (explicit `--dbpath`) or hardcoded fallback |
+| Standard `mongo:N` image (this repo's test fixture) | `/data/db` / `/data/db` | live detect (mongod's compiled-in default) |
 
-> If `data_path` points at the wrong location, `du` returns nothing and the
-> size gates **silently degrade**: G5 passes with a warn ("size unknown") and
-> G4/G6 are skipped.  A pre-check that passes with `warn > 0` may not have
-> actually verified oplog or disk space — read the per-gate messages.
+> If detection or internal config ever resolves the wrong path, `du` returns
+> nothing and the size gates **silently degrade**: G5 passes with a warn
+> ("size unknown") and G4/G6 are skipped.  A pre-check that passes with
+> `warn > 0` may not have actually verified oplog or disk space — read the
+> per-gate messages.
 
 ### StatefulSet Partition for Targeted Restart
 
@@ -190,10 +225,11 @@ aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
 > container yet; it materialises on the target pod the first time a wipe lowers
 > the partition.
 
-> Set this namespace's `data_path`/`mount_path` convention once in internal
-> config (`RECOVERY_DATA_PATH_DEFAULT`/`RECOVERY_MOUNT_PATH_DEFAULT`) rather
-> than passing `data_path`/`mount_path` on every call — see "Data Paths per
-> Deployment Type" above and CLAUDE.md "Configuration Layers".
+> `data_path`/`mount_path` are not task inputs — recovery tasks detect the
+> real path live from mongod (see "Data Paths and Credentials Are
+> Auto-Detected" above). Internal config (`RECOVERY_DATA_PATH_DEFAULT`/
+> `RECOVERY_MOUNT_PATH_DEFAULT`) remains available only for deployments
+> where detection can't resolve it. See CLAUDE.md "Configuration Layers".
 
 ---
 
@@ -206,14 +242,16 @@ Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
 
 > **`sts_name`, `credential_secret`, `credential_user`, `credential_user_key`,
 > `credential_pass_key`, `recovery_configmap`, `data_path`, `mount_path`** are
-> deployment conventions, not per-call choices. Set them once for this
-> cluster in internal config (`/etc/aqsh/config/mongodb.env`'s `*_DEFAULT`
-> keys) and most calls below need only `namespace`/`target_pod` — the
-> "Default" column shows the library's last-resort fallback, used only when
-> neither the caller nor internal config sets a value. These task inputs
-> stay available to override a single call (e.g. one StatefulSet that
-> doesn't match this cluster's usual convention). See CLAUDE.md
-> "Configuration Layers" for the full precedence rule.
+> **not task inputs** — every call below needs only `namespace` plus the
+> genuinely per-call fields shown in each task's Input table (`target_pod`,
+> `force_wipe`, `level`, etc.). These naming/credential/path values resolve
+> automatically: internal config (`/etc/aqsh/config/mongodb.env`'s
+> `*_DEFAULT` keys) → live cluster auto-detect → hardcoded library fallback.
+> There is no per-call override; if a deployment's convention is too unusual
+> for detection to resolve, internal config is the only escape hatch. See
+> CLAUDE.md "Configuration Layers" for the full precedence rule and the
+> "Data Paths and Credentials Are Auto-Detected" section above for how
+> detection works.
 
 There are two ways to drive recovery:
 
@@ -260,29 +298,13 @@ response tells you to monitor it with `recovery/status`.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
 | `wait_timeout` | `RECOVERY_WAIT_TIMEOUT` | no | `"300"` (seconds) |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
 
-> ¹ **Standard `mongo:N` image users**: set `RECOVERY_DATA_PATH_DEFAULT=/data/db`
-> and `RECOVERY_MOUNT_PATH_DEFAULT=/data/db` once in internal config instead of
-> passing `data_path`/`mount_path` on every call. Mismatched paths cause
-> G5/G6 to silently degrade ("size unknown") and the init container to wipe
-> the wrong directory.
-
-> ² **`credential_user`**: if your secret stores only the password (no username
-> key), pass the username directly here, e.g. `"credential_user":"root"`.
-> When set, `credential_user_key` is ignored and only the password is read
-> from the secret.  If omitted, the username is read from the secret using
-> `credential_user_key` (default behaviour).
+`sts_name`/`recovery_configmap`/credential secret-and-keys/`data_path`/
+`mount_path` are not task inputs — see "Data Paths and Credentials Are
+Auto-Detected" above.
 
 > `wait_timeout` only covers the restart-and-reach-Running poll. Keep it well
 > under the aqsh task timeout (12m for `recovery/recover`) so the gates and
@@ -340,8 +362,9 @@ partition, and pod phases.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
+
+`sts_name`/`recovery_configmap` are not task inputs — see "Data Paths and
+Credentials Are Auto-Detected" above.
 
 **Output**
 
@@ -373,26 +396,18 @@ full report without making any changes.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` ¹ |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` ¹ |
 
-> ¹ Standard `mongo:N` image users: set this once via `RECOVERY_DATA_PATH_DEFAULT`/
-> `RECOVERY_MOUNT_PATH_DEFAULT` in internal config, or pass `"data_path":"/data/db","mount_path":"/data/db"` per call.
+`sts_name`/`recovery_configmap`/credential secret-and-keys/`data_path`/
+`mount_path` are not task inputs — see "Data Paths and Credentials Are
+Auto-Detected" above.
 
-> ² `credential_user`: pass the username value directly if the secret only stores the password. Omit to read from the secret via `credential_user_key`.
-
-> The credentials in `credential_secret` must be a **real MongoDB user**
-> (root role) present in `admin.system.users` — the gates authenticate via
-> mongosh even when the deployment runs without `--auth`, and MongoDB rejects
-> authentication for nonexistent users regardless of the authorization mode.
+> The detected/configured credentials must resolve to a **real MongoDB
+> user** (root role) present in `admin.system.users` — the gates
+> authenticate via mongosh even when the deployment runs without `--auth`,
+> and MongoDB rejects authentication for nonexistent users regardless of
+> the authorization mode.
 
 **Output**
 
@@ -452,8 +467,8 @@ the data directory.
 If the StatefulSet patch fails after the ConfigMap was already updated, the
 ConfigMap is rolled back automatically so no stale wipe-target is left behind.
 
-**Input**: same as `recovery/pre-check` (including `force_wipe`,
-`data_path`, `mount_path`).
+**Input**: same as `recovery/pre-check` (`namespace`, `target_pod`,
+`force_wipe`).
 
 **Output**
 
@@ -496,8 +511,9 @@ partial failure cannot leave a wipe armed.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
+
+`sts_name`/`recovery_configmap` are not task inputs — see "Data Paths and
+Credentials Are Auto-Detected" above.
 
 **Output**
 
@@ -526,13 +542,13 @@ with per-pod `results`).
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user` | `MONGO_CRED_USER` | no | `""` (read from secret) ² |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `level` | `RECOVERY_LEVEL` | **yes** | — |
 | `force_primary_pod` | `RECOVERY_FORCE_POD` | no (required if level=force-primary) | `""` |
+
+`sts_name`/credential secret-and-keys are not task inputs — see "Data Paths
+and Credentials Are Auto-Detected" above. Without a `target_pod` input,
+`sts_name` detection falls back to namespace-listing (only resolves when
+exactly one StatefulSet exists in the namespace).
 
 Valid `level` values: `diagnose` | `unfreeze` | `reconfig` | `force-primary`
 
@@ -790,11 +806,13 @@ rules:
 > (`tests/chart/templates/mongodb-rbac.yaml`, driven by `.Values.mongodb.stsName`
 > / `credentialSecret` / `recoveryConfigmap`), defaulting to today's literals
 > (`mongodb`, `mongodb-credentials`, `mongodb-recovery-config`). Set those
-> values to match this cluster's naming convention — the same convention set
-> in internal config (`MONGO_STS_NAME_DEFAULT` etc. in
-> `/etc/aqsh/config/mongodb.env`) — so the `sts_name`/`credential_secret`/
-> `recovery_configmap` task-input overrides actually work instead of being
-> denied by RBAC. See CLAUDE.md "Configuration Layers".
+> values to match this cluster's *real* naming convention so RBAC permits
+> the actual objects detection will discover and operate on — this is a
+> deploy-time concern independent of whether the script learns the name via
+> internal config or by detecting it live; `sts_name`/`credential_secret`/
+> `recovery_configmap` are not task inputs, so there is no caller-supplied
+> name that needs separate RBAC consideration. See CLAUDE.md "Configuration
+> Layers".
 
 **Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
 `configmaps` create/update/list.
@@ -843,13 +861,29 @@ curl -s -X POST "$URL/tasks/recovery/fix-no-primary" \
 
 Integration tests (`tests/mongodb/recovery.bats`) exercise the full
 `recovery/recover` path against a real 3-member RS — including both
-mongodb-1 and mongodb-2 as targets, the `recovery/wipe` + manual
-`recovery/reset` split flow, and `credential_user` end-to-end through
-`pre-check` and `fix-no-primary`. They also pin down that `setup_file`'s own
+mongodb-1 and mongodb-2 as targets, and the `recovery/wipe` + manual
+`recovery/reset` split flow. They also pin down that `setup_file`'s own
 RS bootstrap is idempotent — re-running `rs.initiate()` against an
 already-initialised set and `createUser` against an existing root user must
-not crash. The following paths are deliberately **not** covered by
-integration tests and rely on unit tests + this runbook:
+not crash.
+
+`tests/mongodb/recovery_autodetect.bats` and
+`recovery_autodetect_file_mount.bats` prove live auto-detection end-to-end
+against fixtures deliberately shaped to differ from the hardcoded-literal
+fallback (non-default credential key names, a literal username, a real
+dbPath that mismatches the Bitnami-literal default, and — in the
+file-mount variant — the hardened-Bitnami `*_PASSWORD_FILE` convention):
+`recovery/pre-check` is called with only `namespace`+`target_pod` and must
+still resolve credentials/data_path correctly purely via detection.
+`recovery_bitnami_profile.bats` and `recovery_custom_naming.bats` cover the
+internal-config override tier the same way. `tests/unit/mongodb/
+recovery-detect.bats` covers the `_recovery_detect_*`/`recovery_resolve_*`
+functions directly (mocked kubectl), including every fail-soft path
+(ambiguous StatefulSet count, no env-based credential wiring, mismatched
+username/password secrets).
+
+The following paths are deliberately **not** covered by integration tests
+and rely on unit tests + this runbook:
 
 - `fix-no-primary` levels `unfreeze` / `reconfig` / `force-primary`
   (require deliberately breaking the cluster)

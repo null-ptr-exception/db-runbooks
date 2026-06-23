@@ -363,6 +363,48 @@ KUBECTL_EOF
   [ "$pass_key" = "MONGO_ROOT_PASS" ]
 }
 
+@test "resolve_credentials skips detection when only direct_user is declared" {
+  export MOCK_STS_JSON='{"spec":{"template":{"spec":{"containers":[{"env":[
+    {"name":"MONGO_INITDB_ROOT_USERNAME","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"u"}}},
+    {"name":"MONGO_INITDB_ROOT_PASSWORD","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"p"}}}
+  ]}]}}}}'
+  run recovery_resolve_credentials "" "explicit-user" "" "" "mongodb"
+  [ "$status" -eq 0 ]
+  IFS=$'\x1f' read -r secret direct_user user_key pass_key <<< "$output"
+  # secret stays the hardcoded literal (not "detected-secret") — proves
+  # detection never ran just because direct_user was declared.
+  [ "$secret" = "mongodb-credentials" ]
+  [ "$direct_user" = "explicit-user" ]
+  [ "$user_key" = "MONGO_ROOT_USER" ]
+  [ "$pass_key" = "MONGO_ROOT_PASS" ]
+}
+
+@test "resolve_credentials skips detection when only credential_user_key is declared" {
+  export MOCK_STS_JSON='{"spec":{"template":{"spec":{"containers":[{"env":[
+    {"name":"MONGO_INITDB_ROOT_USERNAME","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"u"}}},
+    {"name":"MONGO_INITDB_ROOT_PASSWORD","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"p"}}}
+  ]}]}}}}'
+  run recovery_resolve_credentials "" "" "explicit-user-key" "" "mongodb"
+  [ "$status" -eq 0 ]
+  IFS=$'\x1f' read -r secret direct_user user_key pass_key <<< "$output"
+  [ "$secret" = "mongodb-credentials" ]
+  [ "$user_key" = "explicit-user-key" ]
+  [ "$pass_key" = "MONGO_ROOT_PASS" ]
+}
+
+@test "resolve_credentials skips detection when only credential_pass_key is declared" {
+  export MOCK_STS_JSON='{"spec":{"template":{"spec":{"containers":[{"env":[
+    {"name":"MONGO_INITDB_ROOT_USERNAME","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"u"}}},
+    {"name":"MONGO_INITDB_ROOT_PASSWORD","valueFrom":{"secretKeyRef":{"name":"detected-secret","key":"p"}}}
+  ]}]}}}}'
+  run recovery_resolve_credentials "" "" "" "explicit-pass-key" "mongodb"
+  [ "$status" -eq 0 ]
+  IFS=$'\x1f' read -r secret direct_user user_key pass_key <<< "$output"
+  [ "$secret" = "mongodb-credentials" ]
+  [ "$pass_key" = "explicit-pass-key" ]
+  [ "$user_key" = "MONGO_ROOT_USER" ]
+}
+
 @test "resolve_credentials detects when all four fields are empty" {
   export MOCK_STS_JSON='{"spec":{"template":{"spec":{"containers":[{"env":[
     {"name":"MONGODB_ROOT_USER","valueFrom":{"secretKeyRef":{"name":"app-secret","key":"u"}}},

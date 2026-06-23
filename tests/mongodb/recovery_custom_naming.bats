@@ -124,6 +124,21 @@ setup() {
   load '../test_helper/bats-assert/load'
 }
 
+# Runs after every test in this file. Only the wrong-data_path test below
+# sets _TEST_ENV_RESTORE (right before it mutates aqsh-config); for every
+# other test this is a no-op. Using teardown() instead of a manual restore
+# inline in the test body guarantees the ConfigMap/Deployment get restored
+# even if an earlier assertion or helper call in the test body fails and
+# aborts the test function before reaching its own restore code.
+teardown() {
+  if [[ -n "${_TEST_ENV_RESTORE:-}" ]]; then
+    kubectl --context "$CTX_A" -n mongo-core patch configmap aqsh-config --type=merge \
+      -p "$(jq -n --arg v "$_TEST_ENV_RESTORE" '{"data":{"mongodb.env":$v}}')" 2>/dev/null || true
+    kubectl --context "$CTX_A" -n mongo-core rollout restart deployment/aqsh 2>/dev/null || true
+    kubectl --context "$CTX_A" -n mongo-core rollout status deployment/aqsh --timeout=120s 2>/dev/null || true
+  fi
+}
+
 kexec() {
   kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
 }
@@ -178,4 +193,64 @@ wait_for_task() {
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   fail_count=$(echo "$result" | jq -r '.fail // "missing"')
   [ "$fail_count" = "0" ] || { echo "gates: $result" >&2; false; }
+}
+
+# data_path/mount_path used to be task inputs, so the now-removed
+# "G5 silently degrades to warn" / "G6 is skipped with a warn" integration
+# tests in recovery.bats triggered the wrong-path failure mode by passing
+# them directly in the request body. They're not task inputs anymore (see
+# CLAUDE.md "Configuration Layers" / "Auto-detect tier") — internal config
+# is the only lever left to make resolution land on a wrong path, so this
+# reproduces the same scenario through that remaining lever instead.
+@test "recovery/pre-check G5/G6 degrade to warn (not block) when internal config points at the wrong data_path" {
+  local ctx="$CTX_A"
+  local pre_env
+  pre_env=$(kubectl --context "$ctx" -n mongo-core get configmap aqsh-config \
+    -o jsonpath='{.data.mongodb\.env}')
+  # Not `local` — teardown() (defined above) reads this after this function
+  # returns, whether it returns normally or via a failed assert_equal/
+  # wait_for_task aborting the test early. This guarantees the ConfigMap and
+  # aqsh Deployment get restored to this file's own custom convention
+  # regardless of how this test exits.
+  _TEST_ENV_RESTORE="$pre_env"
+
+  # Layer a wrong data_path/mount_path on top of this file's already-swapped
+  # custom credential convention. mongo-1 runs the standard mongo:N image at
+  # /data/db; /bitnami/mongodb is the Bitnami chart's path and does not
+  # exist inside this pod, so `du` finds nothing. Replace (not append) the
+  # two keys setup_file already set, so the env file never carries two
+  # conflicting values for the same key.
+  local wrong_env
+  wrong_env=$(printf '%s\n' "$pre_env" \
+    | sed -E 's#^RECOVERY_DATA_PATH_DEFAULT=.*#RECOVERY_DATA_PATH_DEFAULT=/bitnami/mongodb/data/db#' \
+    | sed -E 's#^RECOVERY_MOUNT_PATH_DEFAULT=.*#RECOVERY_MOUNT_PATH_DEFAULT=/bitnami/mongodb#')
+  kubectl --context "$ctx" -n mongo-core patch configmap aqsh-config --type=merge \
+    -p "$(jq -n --arg v "$wrong_env" '{"data":{"mongodb.env":$v}}')"
+  kubectl --context "$ctx" -n mongo-core rollout restart deployment/aqsh
+  kubectl --context "$ctx" -n mongo-core rollout status deployment/aqsh --timeout=120s
+
+  http_post "${AQSH_URL}/tasks/recovery%2Fpre-check" \
+    '{"namespace":"mongo-1","target_pod":"mongodb-2"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result row g5_pass g5_warn g5_data_mb g6_pass g6_warn g6_message
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  row=$(echo "$result" | jq -r '
+    (.gates[] | select(.gate=="G5")) as $g5
+    | (.gates[] | select(.gate=="G6")) as $g6
+    | [$g5.pass, $g5.warn, $g5.data_mb, $g6.pass, $g6.warn, $g6.message]
+    | map(tostring) | join("")
+  ' 2>/dev/null)
+  IFS=$'\x1f' read -r g5_pass g5_warn g5_data_mb g6_pass g6_warn g6_message <<< "$row"
+
+  assert_equal "$g5_pass" "true"
+  assert_equal "$g5_warn" "true"
+  assert_equal "$g5_data_mb" "0"
+  assert_equal "$g6_pass" "true"
+  assert_equal "$g6_warn" "true"
+  assert_equal "$g6_message" "PVC space check skipped: data size unknown"
 }

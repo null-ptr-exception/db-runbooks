@@ -115,9 +115,11 @@ action (wipe a pod's data), so the API surface is deliberately kept to just
    `data_path`/`mount_path` by asking mongod itself for its real dbPath
    (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
    mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
-   setting was given) rather than reusing one value for both `du` and `df`
-   checks. See the `_recovery_detect_*` / `recovery_resolve_*` functions in
-   `aqsh-tasks/lib/mongodb-recovery.sh`.
+   setting was given), reusing that single detected value for both `du`
+   (G5) and `df` (G6) checks since `df` reports stats for whichever
+   filesystem backs a path even when it's a subdirectory of the real
+   mountpoint. See the `_recovery_detect_*` / `recovery_resolve_*` functions
+   in `aqsh-tasks/lib/mongodb-recovery.sh`.
 3. Library hardcoded fallback — Bitnami helm chart paths
 
 Detection always fails *soft*: if it can't find a confident signal (e.g. a

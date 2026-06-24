@@ -8,6 +8,14 @@ cluster state, not declared per call. Works without `kubectl delete pod`,
 `kubectl delete pvc`, or node cordon — only ConfigMap and StatefulSet `patch`
 permissions are needed.
 
+If the `data-recovery` init container itself hasn't been installed yet,
+`recovery/wipe` and `recovery/recover` self-heal it automatically (live
+volume/mount/`runAsUser` detection, partition locked so no other pod
+restarts) and `recovery/reset` reverts the StatefulSet back to its original
+shape once the cycle completes — see "Gate G1 Self-Heal" below. The One-Time
+Setup script remains available for deployments self-heal can't resolve, or
+for operators who prefer to install it permanently up front.
+
 ---
 
 ## Table of Contents
@@ -131,6 +139,52 @@ internal config remains the only override.
 > `warn > 0` may not have actually verified oplog or disk space — read the
 > per-gate messages.
 
+### Gate G1 Self-Heal: Missing Init Container Is Patched In Live
+
+`recovery/wipe` and `recovery/recover` (gate mode — **not** `pre-check`,
+which always stays read-only) no longer require the One-Time Setup script to
+have run first. If G1 finds the `data-recovery` init container missing, it
+self-heals once before reporting the gate:
+
+1. Reads the main container's own existing `volumeMounts` to find which
+   volume/mount path already backs the live-detected `data_path` (the exact
+   binding in place today — not a Bitnami-vs-official profile guess) and the
+   container/pod `securityContext.runAsUser` (falling back to an image-name
+   guess — 1001 for `bitnami` images, 999 otherwise — only when neither is set)
+2. Patches the init container + its ConfigMap volume into the StatefulSet in
+   the **same** `kubectl patch` call that locks
+   `updateStrategy.rollingUpdate.partition` at the current replica count —
+   so no pod, including ones already `Running`, restarts as a side effect
+3. Annotates the StatefulSet `recovery/auto-patched: "true"` to mark this as
+   a *temporary* addition (as opposed to a permanent install via the
+   One-Time Setup script below, which never sets this annotation)
+4. `recovery_reset` — called automatically at the end of `recover`'s cycle,
+   or by any later standalone `reset` call — checks for that annotation and,
+   if present, removes exactly that init container + volume (by name, via a
+   strategic-merge `$patch: delete`) and clears the annotation, restoring
+   the StatefulSet to its original shape. This happens while the partition
+   is locked, so the revert itself never restarts anything either.
+
+This uses no RBAC beyond the StatefulSet `patch` verb already required for
+the partition-lock/unlock cycle below — see "RBAC Requirements". It fails
+*soft* exactly like the detection tier above: if the recovery ConfigMap
+doesn't exist yet either (patching in a container that mounts a nonexistent
+ConfigMap would hang the next pod recreation instead of wiping data), or no
+confident volume-mount signal is found, G1 just fails exactly as it always
+has, with the same `INIT_CONTAINER_MISSING` code and manual-setup
+suggestion — the One-Time Setup script remains the fallback. `wipe`'s and
+`recover`'s gate-mode JSON includes `"auto_patched": true` when this ran;
+`reset`'s response includes `"auto_patch_reverted": true` when it found and
+removed one.
+
+> **Interaction with the quorum warning below**: self-heal's *first* use
+> against a given StatefulSet is exactly the moment every pod is equally
+> stale relative to the brand-new template (none has individually rolled
+> onto it yet) — so the "Quorum warning for lower-ordinal targets" a few
+> paragraphs down applies in full on that first call. Target the highest
+> ordinal first (as the integration tests do) to avoid restarting more than
+> the one pod being recovered.
+
 ### StatefulSet Partition for Targeted Restart
 
 `spec.updateStrategy.rollingUpdate.partition: N` means only pods with
@@ -182,18 +236,30 @@ that file for a working reference of every step below.
 
 1. StatefulSet has `replicas ≥ 2` and pods are running with `--replSet <name>`
 2. Replica set is initiated (`rs.initiate()` has been called and a primary has been elected)
-3. `data-recovery` init container is present in the STS spec (G1)
-4. `mongodb-recovery-config` ConfigMap exists in the namespace (G2)
+3. `mongodb-recovery-config` ConfigMap exists in the namespace (G2) —
+   `wipe`/`recover` only self-heal G1 (the init container), not G2; create
+   the ConfigMap first
+4. `data-recovery` init container is present in the STS spec (G1) — **or**
+   let `wipe`/`recover` self-heal it on first use; see "Gate G1 Self-Heal"
+   above
 
 ---
 
 ## One-Time Setup
 
+> **Optional as of the G1 self-heal mechanism** (see "Gate G1 Self-Heal"
+> above): `recovery/wipe` and `recovery/recover` patch the init container in
+> automatically the first time G1 finds it missing, as long as the
+> ConfigMap below already exists. Run this script up front only when you
+> want the init container installed permanently, or when self-heal can't
+> resolve an unusual layout (no volumeMount backs the live data path).
+>
 > **This repo's MongoDB test fixture uses the standard `mongo:N` image.**
 > `tests/mongodb/recovery.bats`'s `setup_file` runs the same script below
 > (`--profile standard`) against the `mongo-1` namespace before any recovery
-> test runs. Run it manually only when setting up a namespace outside that
-> test flow.
+> test runs — proving the *permanent* install path stays exercised even
+> though `tests/mongodb/recovery_auto_patch.bats` now also proves the
+> self-heal path against a StatefulSet that deliberately skips this script.
 
 Apply the recovery ConfigMap (satisfies G2) and patch the StatefulSet to add
 the `data-recovery` init container (satisfies G1) using the canonical setup
@@ -322,9 +388,18 @@ Auto-Detected" above.
   "sync_source_set": false,
   "partition_restored": 3,
   "elapsed_seconds": 47,
+  "auto_patched": false,
+  "auto_patch_reverted": false,
   "next_step": "Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)"
 }
 ```
+
+> `auto_patched: true` means G1 found the `data-recovery` init container
+> missing and self-healed it live (see "Gate G1 Self-Heal"); `false` means
+> it was already there. `auto_patch_reverted: true` means this same call's
+> internal `reset` step found and removed that temporary patch, restoring
+> the StatefulSet's original shape — it is only ever `true` when
+> `auto_patched` was also `true` earlier in the same call.
 
 **Output (gate abort)** — nothing was changed:
 
@@ -478,9 +553,15 @@ ConfigMap is rolled back automatically so no stale wipe-target is left behind.
   "ordinal": 2,
   "partition_set": 2,
   "configmap": "mongodb-recovery-config",
+  "auto_patched": false,
   "next_step": "Monitor pod restart; run recovery/reset once pod is Running and before sync completes"
 }
 ```
+
+> `auto_patched: true` means G1 found the init container missing and
+> self-healed it during this call's gates (see "Gate G1 Self-Heal") — the
+> wipe that follows still applies normally either way. `wipe` does not
+> revert the patch itself; the eventual `recovery/reset` call does.
 
 **Post-wipe workflow**:
 
@@ -521,9 +602,18 @@ Credentials Are Auto-Detected" above.
 {
   "sts": "mongodb",
   "configmap": "mongodb-recovery-config",
-  "partition": 3
+  "partition": 3,
+  "auto_patch_reverted": false
 }
 ```
+
+> `auto_patch_reverted: true` means this call found the
+> `recovery/auto-patched` annotation (left by a prior G1 self-heal) and
+> removed the temporary init container/volume, restoring the StatefulSet to
+> its original shape — see "Gate G1 Self-Heal". `false` covers both "nothing
+> to revert" and a best-effort revert failure (safe to call `reset` again;
+> the safety-critical wipe-target clear + partition lock above always
+> succeed independently of this step).
 
 ---
 
@@ -600,7 +690,7 @@ first blocking failure).
 
 | Gate | Check | Failure behavior | Suggestion |
 |---|---|---|---|
-| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Apply the One-Time Setup patch above |
+| **G1** | Init container `data-recovery` is in the STS spec | BLOCK (self-healed automatically by `wipe`/`recover` — see "Gate G1 Self-Heal"; `pre-check` stays read-only) | Apply the One-Time Setup patch above (fallback for deployments self-heal can't resolve) |
 | **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Apply the One-Time Setup ConfigMap above |
 | **G3** | ≥1 healthy sync source (health=1) and a PRIMARY is elected | BLOCK | Run `recovery/fix-no-primary level=diagnose` |
 | **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
@@ -817,6 +907,15 @@ rules:
 **Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
 `configmaps` create/update/list.
 
+> **G1 self-heal needs no RBAC beyond the above**: patching in the missing
+> init container/volume uses the *same* `statefulsets` `patch` verb already
+> required for the partition-lock/unlock cycle (RBAC's `patch` verb is not
+> field-scoped — anything `recovery_wipe_pod`/`recovery_reset` could already
+> patch, self-heal can too). It deliberately does **not** create the
+> ConfigMap (`configmaps` `create` stays unneeded) — if G2 is also missing,
+> self-heal fails soft and G1/G2 report exactly as before. See "Gate G1
+> Self-Heal" above.
+
 ---
 
 ## API Examples
@@ -881,6 +980,20 @@ recovery-detect.bats` covers the `_recovery_detect_*`/`recovery_resolve_*`
 functions directly (mocked kubectl), including every fail-soft path
 (ambiguous StatefulSet count, no env-based credential wiring, mismatched
 username/password secrets).
+
+`tests/mongodb/recovery_auto_patch.bats` proves the G1 self-heal mechanism
+end-to-end against a StatefulSet that deliberately never runs
+setup-data-recovery.sh: `recovery/pre-check` stays read-only (asserts the
+StatefulSet's `resourceVersion` is unchanged) while `recovery/wipe` and
+`recovery/recover` self-heal the missing init container, wipe the target,
+and (via `recovery/reset`, manually or as part of `recover`'s own cycle)
+revert the StatefulSet back to having no init container/annotation — all
+while asserting the *other* replica's pod UID never changes, proving no
+collateral restart. `tests/unit/mongodb/recovery-auto-patch.bats` covers
+`_recovery_detect_data_mount`/`_recovery_detect_run_as_user`/
+`_recovery_auto_patch_init_container`/`_recovery_revert_auto_patch` directly
+(mocked kubectl), including every fail-soft path (ConfigMap missing,
+no matching volumeMount, zero replicas, patch failure).
 
 The following paths are deliberately **not** covered by integration tests
 and rely on unit tests + this runbook:

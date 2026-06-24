@@ -412,6 +412,217 @@ _recovery_detect_data_path() {
 }
 
 # ---------------------------------------------------------------------------
+# _recovery_detect_data_mount <sts_json> <data_path>
+# Finds the main container's EXISTING volumeMount whose mountPath is a
+# prefix of the live-detected data_path (longest match wins, same technique
+# as _recovery_secret_ref_from_file) — the exact volume name + mount path an
+# auto-injected init container must reuse to see the same data directory the
+# main container already does. Reading this from the live spec replaces
+# guessing a Bitnami ("datadir","/bitnami/mongodb")-vs-official
+# ("data","/data/db") profile: it is correct for any convention because it's
+# the real binding already in place, not an assumption about which image
+# this is. Used only by _recovery_auto_patch_init_container.
+# Prints "volume_name<US>mount_path" on success.
+# ---------------------------------------------------------------------------
+_recovery_detect_data_mount() {
+  local sts_json="$1" data_path="${2:?}"
+  local row
+  row=$(printf '%s' "$sts_json" | jq -r --arg dp "$data_path" '
+    ((.spec.template.spec.containers[0].volumeMounts // [])
+      | map(select(.mountPath as $mp | ($dp == $mp or ($dp | startswith($mp + "/")))))
+      | sort_by(.mountPath | length) | last) as $vm
+    | if $vm == null then empty else ($vm.name + "" + $vm.mountPath) end
+  ' 2>/dev/null) || return 1
+  [[ -z "$row" ]] && return 1
+  printf '%s' "$row"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_run_as_user <sts_json>
+# Reuses the main container's own runAsUser (container-level, falling back
+# to pod-level securityContext) so an auto-injected init container's wipe
+# step has the same filesystem permissions the running mongod already has —
+# correct for any image, not just the two conventions this repo has
+# fixtures for. Only when neither is set does it fall back to a profile
+# guess from the image string (Bitnami images run as 1001 by convention);
+# this is the one place an actual Bitnami-vs-official guess remains,
+# because an image with no runAsUser set at all gives no live signal to
+# read instead. Always returns a value (never fails).
+# ---------------------------------------------------------------------------
+_recovery_detect_run_as_user() {
+  local sts_json="$1"
+  local uid
+  uid=$(printf '%s' "$sts_json" | jq -r '
+    .spec.template.spec.containers[0].securityContext.runAsUser
+    // .spec.template.spec.securityContext.runAsUser // empty
+  ' 2>/dev/null)
+  if [[ -n "$uid" && "$uid" != "null" ]]; then
+    printf '%s' "$uid"
+    return 0
+  fi
+  local image
+  image=$(printf '%s' "$sts_json" | jq -r '.spec.template.spec.containers[0].image // empty' 2>/dev/null)
+  if [[ "$image" == *bitnami* ]]; then
+    printf '1001'
+  else
+    printf '999'
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_auto_patch_init_container <sts_name> <cm_name>
+#
+# Self-heals G1 in gate mode only (see recovery_run_gates): when the
+# data-recovery init container is missing, patches it in live instead of
+# requiring an operator to run setup-data-recovery.sh first — using only
+# RBAC the aqsh service account already has (the same StatefulSet `patch`
+# verb recovery_wipe_pod/recovery_reset already use; see CLAUDE.md
+# "Auto-detect tier" and docs/mongodb/recovery.md "RBAC Requirements").
+#
+# Shape mirrors setup-data-recovery.sh's wipe-script exactly, but every
+# value is read live instead of taken from an operator --profile flag:
+#   - volume name + mount path: _recovery_detect_data_mount against the
+#     already-resolved _RECOVERY_DATA_PATH
+#   - wipe target: _RECOVERY_DATA_PATH itself
+#   - runAsUser: _recovery_detect_run_as_user
+#   - image/replicas: read straight from the StatefulSet's own spec
+#
+# Partition is locked to the current replica count in the SAME patch that
+# adds the init container, so no pod (including the ones already Running)
+# restarts as a result — only a later, separate wipe lowers the partition
+# for one targeted pod. The StatefulSet is also annotated
+# `recovery/auto-patched: "true"` so recovery_reset (called at the end of
+# this same recovery cycle, or by a later standalone reset.sh call) knows
+# to revert exactly this temporary addition — see _recovery_revert_auto_patch.
+#
+# Fails soft (return 1, no mutation) when:
+#   - the init container is already present (nothing to do — returns 0
+#     instead, since this is the common/expected case, not a failure)
+#   - the recovery ConfigMap doesn't exist yet either (G2 will report this
+#     clearly; patching in a volume that mounts a nonexistent ConfigMap
+#     would hang the next pod recreation in CreateContainerConfigError
+#     instead of wiping data)
+#   - image/replicas can't be read, or no confident volume-mount signal
+#     matches the live data path
+# In every failure case, G1 below just fails exactly as it always has, with
+# the same manual-setup suggestion.
+#
+# Prints "patched" on success; empty otherwise. Exit 0 covers both "already
+# present" (nothing to do) and "just patched"; exit 1 means "could not
+# self-heal, fall through to the normal G1 failure."
+# ---------------------------------------------------------------------------
+_recovery_auto_patch_init_container() {
+  local sts_name="${1:?}" cm_name="${2:?}"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+
+  local has_ic
+  has_ic=$(printf '%s' "$sts_json" | jq -r --arg ic "$_RECOVERY_INIT_CONTAINER_NAME" '
+    [.spec.template.spec.initContainers[]? | select(.name==$ic)] | length' 2>/dev/null) || return 1
+  [[ "${has_ic:-0}" -gt 0 ]] && return 0
+
+  _kubectl get configmap "$cm_name" &>/dev/null || return 1
+
+  local image replicas
+  image=$(printf '%s' "$sts_json" | jq -r '.spec.template.spec.containers[0].image // empty' 2>/dev/null)
+  replicas=$(printf '%s' "$sts_json" | jq -r '.spec.replicas // empty' 2>/dev/null)
+  [[ -n "$image" ]] || return 1
+  [[ "$replicas" =~ ^[0-9]+$ && "$replicas" -gt 0 ]] || return 1
+
+  local mount_row volume_name mount_path
+  mount_row=$(_recovery_detect_data_mount "$sts_json" "$_RECOVERY_DATA_PATH") || return 1
+  IFS=$'\x1f' read -r volume_name mount_path <<< "$mount_row"
+  [[ -z "$volume_name" || -z "$mount_path" ]] && return 1
+
+  local run_as_user
+  run_as_user=$(_recovery_detect_run_as_user "$sts_json")
+
+  _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
+{
+  "metadata": {"annotations": {"recovery/auto-patched": "true"}},
+  "spec": {
+    "updateStrategy": {"rollingUpdate": {"partition": ${replicas}}},
+    "template": {
+      "spec": {
+        "initContainers": [{
+          "name": "${_RECOVERY_INIT_CONTAINER_NAME}",
+          "image": "${image}",
+          "command": ["/bin/bash", "-c"],
+          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo \"[RECOVERY] Wiping data for \$MY_NAME\"; find ${_RECOVERY_DATA_PATH} -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo \"[RECOVERY] \$MY_NAME not in wipe targets, skip.\"; fi"],
+          "volumeMounts": [
+            {"name": "${volume_name}", "mountPath": "${mount_path}"},
+            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
+          ],
+          "securityContext": {"runAsUser": ${run_as_user}, "runAsNonRoot": true}
+        }],
+        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "${cm_name}"}}]
+      }
+    }
+  }
+}
+EOF
+)" >/dev/null 2>&1 || return 1
+
+  log_info "_recovery_auto_patch_init_container" "Self-healed StatefulSet ${sts_name}: added ${_RECOVERY_INIT_CONTAINER_NAME} init container (volume=${volume_name}, mount=${mount_path}, runAsUser=${run_as_user}, partition locked at ${replicas}) — recovery_reset will revert this once the cycle completes"
+  printf 'patched'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_revert_auto_patch <sts_name>
+#
+# Surgically removes exactly the init container + volume that
+# _recovery_auto_patch_init_container added (matched by name via the
+# strategic-merge-patch "$patch":"delete" directive — never touches any
+# other initContainers/volumes that may coexist) and clears the tracking
+# annotation. Only acts when the `recovery/auto-patched` annotation is
+# present, so a permanent, operator-installed init container (via
+# setup-data-recovery.sh) is never touched — that path never sets the
+# annotation. Called from recovery_reset, which always restores the
+# partition to the (locked) replica count either immediately before or
+# after this call, so removing the init container/volume here can never
+# trigger a pod restart: every currently-Running pod's template already
+# differs from this "current" one only by the entry being deleted, and a
+# StatefulSet controller only acts on pods at ordinals >= partition.
+#
+# Safe to call unconditionally — checks its own precondition and no-ops
+# otherwise. Prints "reverted" on success; empty otherwise. Exit 0 covers
+# both "nothing to revert" and "reverted"; exit 1 means the revert patch
+# itself failed (the caller treats this as best-effort and retries on the
+# next reset call).
+# ---------------------------------------------------------------------------
+_recovery_revert_auto_patch() {
+  local sts_name="${1:?}"
+  local sts_json marked
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+  marked=$(printf '%s' "$sts_json" | jq -r '.metadata.annotations["recovery/auto-patched"] // empty' 2>/dev/null)
+  [[ "$marked" != "true" ]] && return 0
+
+  _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
+{
+  "metadata": {"annotations": {"recovery/auto-patched": null}},
+  "spec": {
+    "template": {
+      "spec": {
+        "initContainers": [{"name": "${_RECOVERY_INIT_CONTAINER_NAME}", "\$patch": "delete"}],
+        "volumes": [{"name": "recovery-config-vol", "\$patch": "delete"}]
+      }
+    }
+  }
+}
+EOF
+)" >/dev/null 2>&1 || return 1
+
+  log_info "_recovery_revert_auto_patch" "Reverted the temporary self-heal patch on StatefulSet ${sts_name} — init container and volume removed, original StatefulSet shape restored"
+  printf 'reverted'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # recovery_resolve_sts_name <explicit> [target_pod]
 # <explicit> is whatever the caller already resolved from the internal-config
 # tier (empty if unset — sts_name is not a task input; see CLAUDE.md
@@ -836,6 +1047,7 @@ recovery_run_gates() {
 
   local -a gate_results=()
   local fail_count=0 warn_count=0 data_mb=0
+  local auto_patched="false"
 
   # Helper: run a gate, collect result, optionally exit in gate mode
   _run_gate() {
@@ -861,7 +1073,17 @@ recovery_run_gates() {
     return 0
   }
 
-  # G1: init container present
+  # G1: init container present. In gate mode (wipe/recover — pre-check's
+  # report mode must stay read-only) a missing container is self-healed once
+  # via _recovery_auto_patch_init_container before the recorded check below
+  # runs — see CLAUDE.md "Auto-detect tier". Fails soft: if it can't
+  # self-heal (ConfigMap missing too, or no confident mount signal), G1
+  # below just fails exactly as it always has.
+  if [[ "$mode" == "gate" ]]; then
+    local auto_patch_out
+    auto_patch_out=$(_recovery_auto_patch_init_container "$sts_name" "$cm_name" 2>/dev/null) || auto_patch_out=""
+    [[ "$auto_patch_out" == "patched" ]] && auto_patched="true"
+  fi
   _run_gate _recovery_gate_g1 true "$sts_name" || return 1
 
   # G2: recovery ConfigMap exists
@@ -930,11 +1152,11 @@ recovery_run_gates() {
   local pass_count=$(( ${#gate_results[@]} - fail_count ))
   if [[ "$fail_count" -gt 0 ]]; then
     response_err "$op" "Pre-flight checks failed: ${fail_count} gate(s) blocked wipe" \
-      "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":${fail_count},\"warn\":${warn_count},\"target_pod\":\"${target_pod}\"}" 1
+      "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":${fail_count},\"warn\":${warn_count},\"target_pod\":\"${target_pod}\",\"auto_patched\":${auto_patched}}" 1
     return 1
   fi
   response_ok "$op" "All pre-flight gates passed (${warn_count} warning(s))" \
-    "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":0,\"warn\":${warn_count},\"target_pod\":\"${target_pod}\"}"
+    "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":0,\"warn\":${warn_count},\"target_pod\":\"${target_pod}\",\"auto_patched\":${auto_patched}}"
   return 0
 }
 
@@ -1007,8 +1229,18 @@ recovery_reset() {
     return 1
   fi
 
+  # 3. Revert a temporary self-heal patch from _recovery_auto_patch_init_container,
+  #    if any — now that partition is locked again (step 2), removing the
+  #    init container/volume here cannot trigger any pod restart. Best-effort:
+  #    the safety-critical wipe-target clear + partition lock above already
+  #    succeeded either way; a failed revert just gets retried on the next
+  #    reset call (this function is always safe to call again).
+  local revert_out auto_patch_reverted="false"
+  revert_out=$(_recovery_revert_auto_patch "$sts_name" 2>/dev/null) || revert_out=""
+  [[ "$revert_out" == "reverted" ]] && auto_patch_reverted="true"
+
   response_ok "$op" "Recovery state cleared: wipe-targets empty, partition reset to ${replicas}" \
-    "{\"sts\":\"${sts_name}\",\"configmap\":\"${cm_name}\",\"partition\":${replicas}}"
+    "{\"sts\":\"${sts_name}\",\"configmap\":\"${cm_name}\",\"partition\":${replicas},\"auto_patch_reverted\":${auto_patch_reverted}}"
   return 0
 }
 
@@ -1414,7 +1646,9 @@ recovery_recover() {
   old_uid=$(_recovery_pod_uid "$target_pod")
   log_info "$op" "Pre-wipe UID of ${target_pod}: '${old_uid:-<none>}'"
 
-  # 2. Gates (gate mode)
+  # 2. Gates (gate mode) — captures whether G1's self-heal patched a missing
+  # init container in, so the final response can report it without the
+  # caller needing to separately inspect the StatefulSet.
   local gates_result
   if ! gates_result=$(recovery_run_gates "$sts" "$target_pod" "$cm" "$user" "$pass" "gate"); then
     local gdata
@@ -1423,6 +1657,9 @@ recovery_recover() {
       "{\"phase\":\"gates\",\"gates\":${gdata:-null},\"target_pod\":\"${target_pod}\"}" 1
     return 1
   fi
+  local auto_patched
+  auto_patched=$(printf '%s' "$gates_result" | grep -o '"auto_patched":[a-z]*' | head -1 | cut -d':' -f2)
+  auto_patched="${auto_patched:-false}"
 
   # 3. Wipe — discard the inner JSON response (we emit our own); keep exit status
   if ! recovery_wipe_pod "$sts" "$target_pod" "$cm" >/dev/null; then
@@ -1461,12 +1698,17 @@ recovery_recover() {
   fi
 
   # 5b. Reset immediately (closes the re-wipe race) — before anything else,
-  # including set-sync-source which may retry for ~30s. Discard the inner JSON.
-  if ! recovery_reset "$sts" "$cm" "$replicas" >/dev/null; then
+  # including set-sync-source which may retry for ~30s. Captures whether the
+  # G1 self-heal patch (if any) was reverted, for the final response.
+  local reset_result
+  if ! reset_result=$(recovery_reset "$sts" "$cm" "$replicas"); then
     response_err "$op" "Pod ${target_pod} is Running but recovery/reset failed — wipe-target may still be set" \
       "{\"phase\":\"reset\",\"target_pod\":\"${target_pod}\",\"action_required\":\"Run recovery/reset manually NOW to prevent re-wipe on next restart\"}" 1
     return 1
   fi
+  local auto_patch_reverted
+  auto_patch_reverted=$(printf '%s' "$reset_result" | grep -o '"auto_patch_reverted":[a-z]*' | head -1 | cut -d':' -f2)
+  auto_patch_reverted="${auto_patch_reverted:-false}"
 
   # 5c. Direct sync source: prefer secondary, fall back to primary (non-fatal)
   local sync_src_ok="false"
@@ -1478,6 +1720,6 @@ recovery_recover() {
 
   log_info "$op" "Recovery orchestration complete for ${target_pod}; initial sync now in progress"
   response_ok "$op" "Recovery complete for ${target_pod}: data wiped, pod restarted, recovery state cleared. Initial sync is now running." \
-    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"sync_source_set\":${sync_src_ok},\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
+    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"sync_source_set\":${sync_src_ok},\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"auto_patched\":${auto_patched},\"auto_patch_reverted\":${auto_patch_reverted},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
   return 0
 }

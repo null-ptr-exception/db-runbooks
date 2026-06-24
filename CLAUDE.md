@@ -137,6 +137,29 @@ no live signal in the StatefulSet spec at all), internal config remains the
 only override — there is no per-call escape hatch for `recovery/*` tasks by
 design.
 
+**G1 self-heal**: `wipe`/`recover` (gate mode only — `pre-check` stays
+read-only) go one step further than detection when the `data-recovery` init
+container itself is missing: instead of just failing G1 with a manual-setup
+suggestion, they patch it in live — volume name/mount path detected from the
+main container's own existing `volumeMounts` against the already-detected
+`data_path` (works for any layout, not a Bitnami-vs-official guess), and
+`runAsUser` read from the container/pod `securityContext` (falling back to
+an image-name guess only when neither is set). The same patch call locks
+`updateStrategy.rollingUpdate.partition` at the current replica count, so no
+pod — including the ones already `Running` — restarts as a side effect; only
+a later, separate wipe lowers the partition for the one targeted pod. This
+uses no RBAC beyond the StatefulSet `patch` verb `recovery_wipe_pod`/
+`recovery_reset` already required. The StatefulSet is annotated
+`recovery/auto-patched: "true"` so `recovery_reset` (called automatically at
+the end of `recover`'s cycle, or by a later standalone `reset` call) knows to
+revert exactly this temporary addition, restoring the StatefulSet to its
+original shape — see `_recovery_auto_patch_init_container`/
+`_recovery_revert_auto_patch` in `aqsh-tasks/lib/mongodb-recovery.sh`. Fails
+soft exactly like detection: if the recovery ConfigMap doesn't exist yet
+either, or no confident volume-mount signal is found, G1 just fails as it
+always has — the One-Time Setup script below remains the fallback for
+deployments self-heal can't resolve.
+
 If a value like this also gates RBAC (e.g. `resourceNames` pinned to a
 StatefulSet/Secret/ConfigMap name), template the RBAC chart from the same
 chart values that produce the internal config, so a non-default convention

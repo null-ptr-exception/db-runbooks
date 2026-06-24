@@ -46,12 +46,16 @@ _mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_K
 recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS"
 
 # --- Phase 1: run gates (gate mode — exits on first blocking failure) ---
+# G1 self-heals a missing init container here (see CLAUDE.md "Auto-detect
+# tier"); _AUTO_PATCHED carries that into the final output below so a
+# caller doesn't need to separately inspect the StatefulSet to know.
 log_info "recovery-wipe" "Running pre-flight gates (gate mode)"
 gates_result=$(recovery_run_gates "$_STS" "$_TARGET" "$_CM" "$_MONGO_USER" "$_MONGO_PASS" "gate") || {
   printf '%s\n' "$gates_result" | jq -c '.data // {"error":.message,"gates_status":"failed"}' \
     > "$AQSH_RESULT_FILE"
   exit 1
 }
+_AUTO_PATCHED=$(printf '%s' "$gates_result" | jq -r '.data.auto_patched // false')
 
 # --- Phase 2: apply wipe ---
 log_info "recovery-wipe" "All gates passed — applying wipe for pod ${_TARGET}"
@@ -61,4 +65,5 @@ wipe_result=$(recovery_wipe_pod "$_STS" "$_TARGET" "$_CM") || {
 }
 
 log_info "recovery-wipe" "Wipe initiated for pod ${_TARGET}"
-printf '%s\n' "$wipe_result" | jq -c '.data // {"error":.message}' > "$AQSH_RESULT_FILE"
+printf '%s\n' "$wipe_result" | jq -c --argjson auto_patched "$_AUTO_PATCHED" \
+  '(.data // {"error":.message}) + {"auto_patched": $auto_patched}' > "$AQSH_RESULT_FILE"

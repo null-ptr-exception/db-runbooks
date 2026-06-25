@@ -187,20 +187,27 @@ STS_EOF
 
   local mongo_user mongo_pass
   { IFS= read -r mongo_user; IFS= read -r mongo_pass; } < <(_mongo_creds "$BNS" "$ctx")
-  local user_elapsed=0 user_ready=false
+  # _init_rs gives all members equal priority (no deterministic primary —
+  # see its header comment), so createUser must be tried against every pod
+  # each round: whichever one is actually primary accepts it, the other
+  # fails fast with "not primary" rather than blocking the round.
+  local user_elapsed=0 user_ready=false pod
   while (( user_elapsed < 60 )); do
-    if kubectl --context "$ctx" -n "$BNS" exec mongodb-0 -- mongosh --quiet --norc \
-      "mongodb://localhost:27017/admin" --eval "
-        try {
-          db.getSiblingDB('admin').createUser({user:'${mongo_user}', pwd:'${mongo_pass}', roles:[{role:'root',db:'admin'}]});
-          print('root user created');
-        } catch(e) {
-          if (/already exists/.test(e.message)) { print('root user exists'); }
-          else { throw e; }
-        }" >/dev/null 2>&1; then
-      user_ready=true
-      break
-    fi
+    for pod in mongodb-0 mongodb-1; do
+      if kubectl --context "$ctx" -n "$BNS" exec "$pod" -- mongosh --quiet --norc \
+        "mongodb://localhost:27017/admin" --eval "
+          try {
+            db.getSiblingDB('admin').createUser({user:'${mongo_user}', pwd:'${mongo_pass}', roles:[{role:'root',db:'admin'}]});
+            print('root user created');
+          } catch(e) {
+            if (/already exists/.test(e.message)) { print('root user exists'); }
+            else { throw e; }
+          }" >/dev/null 2>&1; then
+        user_ready=true
+        break
+      fi
+    done
+    [[ "$user_ready" == true ]] && break
     sleep 5; user_elapsed=$((user_elapsed + 5))
   done
   if [[ "$user_ready" != true ]]; then

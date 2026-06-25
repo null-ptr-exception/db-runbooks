@@ -462,6 +462,12 @@ _wait_for_rs_healthy() {
   local mongo_user mongo_pass
   { IFS= read -r mongo_user; IFS= read -r mongo_pass; } < <(_mongo_creds "mongo-1" "$CTX_A")
 
+  # createUser must run on the primary. The previous test's _init_mongodb_rs
+  # may have just force-reconfigured priorities (if a prior recovery run left
+  # them desynced), which can briefly cost mongodb-0 its primary status while
+  # the election resettles — wait for it to win back before the one-shot check.
+  _wait_for_pod0_primary "mongo-1" "$CTX_A" 30
+
   local out
   out=$(kubectl --context "$CTX_A" -n mongo-1 exec mongodb-0 -- mongosh --quiet --norc \
     "mongodb://localhost:27017/admin" --eval "

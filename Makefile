@@ -1,13 +1,18 @@
-.PHONY: up down deploy test
+.PHONY: preflight test-mongodb test-mariadb test-unit teardown
 
-up:
-	scripts/setup.sh
+preflight:
+	scripts/preflight.sh
 
-down:
-	scripts/teardown.sh
+test-mongodb:
+	bats tests/mongodb/
 
-deploy:
-	scripts/deploy.sh
+test-mariadb:
+	bats tests/mariadb/
 
-test:
-	scripts/test.sh
+test-unit:
+	bats --recursive tests/unit
+
+teardown:
+	kind delete cluster --name cluster-a
+	kind delete cluster --name cluster-b
+	docker rm -f registry

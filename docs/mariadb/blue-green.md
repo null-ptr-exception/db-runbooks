@@ -42,29 +42,24 @@ accidentally skip guardrails or run the steps out of order.
 
 ## Prerequisites
 
-Create the dual Kind environment with MinIO and install the latest
-`mariadb-operator` from the official Helm repo. Blue/green requires
-`mariadb-operator` 26.6.0 or newer.
+`bats tests/mariadb/` already brings up both sides of this: cluster-a runs
+Blue (`mariadb-1` namespace, MariaDB CR `mariadb`) plus its own aqsh, and
+cluster-b — normally just the client cluster for other suites — additionally
+runs its own `mariadb-1` namespace + aqsh (for Green) and MinIO (for the
+shared backup target). No separate setup is needed beyond running the suite.
+
+Calls must originate from inside the cluster (`*.kind-a.test`/`*.kind-b.test`
+only resolve via the clusters' own CoreDNS), so they run via `kubectl exec`
+into the `test-client` pod, same as every other task in this repo:
 
 ```bash
-DB_MODE=dual ENABLE_MINIO=true USE_MARIADB_OPERATOR=true ./scripts/setup-clusters.sh
-DB_MODE=dual ENABLE_MINIO=true USE_MARIADB_OPERATOR=true ./scripts/deploy-infra.sh
-```
+CTX_B="kind-cluster-b"
+NS="db-ops"
+TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
+AQSH_A_URL="http://aqsh-mariadb.kind-a.test:30080"   # Blue cluster
+AQSH_B_URL="http://aqsh-mariadb.kind-b.test:30080"   # Green cluster
 
-For local demos, the helper script can create the full sample topology in one
-step:
-
-```bash
-./scripts/mariadb-blue-green-demo.sh apply
-```
-
-Get tokens and endpoint URLs:
-
-```bash
-source .env
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
-MARIADB_AQSH_A_URL="http://${CLUSTER_DBS_A_IP}:30081"   # Blue cluster
-MARIADB_AQSH_B_URL="http://${CLUSTER_DBS_B_IP}:30081"   # Green cluster
+kexec() { kubectl --context "$CTX_B" -n "$NS" exec deploy/test-client -- sh -c "$1"; }
 ```
 
 The same `$TOKEN` works against both AQSH endpoints, so it can be passed to the
@@ -77,23 +72,23 @@ the Blue physical backup locally, then bootstraps and (optionally) upgrades
 Green over the peer connection.
 
 ```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fcreate" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
+kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fcreate' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
   -d '{
-    "namespace": "mariadb-bg",
-    "blue_name": "mariadb-blue",
-    "green_name": "mariadb-green",
-    "green_image": "mariadb:10.6",
-    "target_image": "mariadb:10.11",
-    "peer_aqsh_url": "'"${MARIADB_AQSH_B_URL}"'",
-    "peer_token": "'"${TOKEN}"'",
-    "backup_bucket": "multi-cluster",
-    "backup_prefix": "mariadb-bg/blue",
-    "backup_endpoint": "'"${CLUSTER_MINIO_IP}"':30092",
-    "backup_region": "us-east-1",
-    "confirm": "true"
-  }'
+    \"namespace\": \"mariadb-1\",
+    \"blue_name\": \"mariadb\",
+    \"green_name\": \"mariadb-green\",
+    \"green_image\": \"mariadb:10.6\",
+    \"target_image\": \"mariadb:10.11\",
+    \"peer_aqsh_url\": \"${AQSH_B_URL}\",
+    \"peer_token\": \"${TOKEN}\",
+    \"backup_bucket\": \"db-backups\",
+    \"backup_prefix\": \"blue-green-demo\",
+    \"backup_endpoint\": \"http://minio.kind-b.test:30080\",
+    \"backup_region\": \"us-east-1\",
+    \"confirm\": \"true\"
+  }'"
 ```
 
 The `backup_*` fields describe the shared S3/MinIO location; the orchestrator
@@ -127,18 +122,18 @@ post-promotion verification fails, Green remains primary and the task reports
 the failure for manual inspection.
 
 ```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fswitchover" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
+kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fswitchover' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
   -d '{
-    "namespace": "mariadb-bg",
-    "blue_name": "mariadb-blue",
-    "green_name": "mariadb-green",
-    "peer_aqsh_url": "'"${MARIADB_AQSH_B_URL}"'",
-    "peer_token": "'"${TOKEN}"'",
-    "expected_green_version": "10.11",
-    "confirm": "true"
-  }'
+    \"namespace\": \"mariadb-1\",
+    \"blue_name\": \"mariadb\",
+    \"green_name\": \"mariadb-green\",
+    \"peer_aqsh_url\": \"${AQSH_B_URL}\",
+    \"peer_token\": \"${TOKEN}\",
+    \"expected_green_version\": \"10.11\",
+    \"confirm\": \"true\"
+  }'"
 ```
 
 Guardrails that must pass before any change:
@@ -163,29 +158,30 @@ retiring — running it against the wrong cluster deletes the wrong database.
 Retire the old Blue after a successful switchover (run on the **Blue** AQSH):
 
 ```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fdelete" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
+kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fdelete' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
   -d '{
-    "namespace": "mariadb-bg",
-    "mdb": "mariadb-blue",
-    "blue_name": "mariadb-green",
-    "confirm": "true"
-  }'
+    \"namespace\": \"mariadb-1\",
+    \"mdb\": \"mariadb\",
+    \"blue_name\": \"mariadb-green\",
+    \"confirm\": \"true\"
+  }'"
 ```
 
-Clean up a failed or abandoned Green bootstrap (run on the **Green** AQSH):
+Clean up a failed or abandoned Green bootstrap (run on the **Green** AQSH —
+this is also the task's default `mdb`):
 
 ```bash
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fdelete" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
+kexec "curl -s -X POST '${AQSH_B_URL}/tasks/blue-green%2Fdelete' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
   -d '{
-    "namespace": "mariadb-bg",
-    "mdb": "mariadb-green",
-    "blue_name": "mariadb-blue",
-    "confirm": "true"
-  }'
+    \"namespace\": \"mariadb-1\",
+    \"mdb\": \"mariadb-green\",
+    \"blue_name\": \"mariadb\",
+    \"confirm\": \"true\"
+  }'"
 ```
 
 `delete_external` (default `true`) also removes the ExternalMariaDB references
@@ -208,15 +204,15 @@ still connected to Blue see a read-only, cordoned database.
 Read either cluster's state:
 
 ```bash
-curl -s -X POST "${MARIADB_AQSH_A_URL}/tasks/blue-green%2Fstatus" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-blue"}'
+kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fstatus' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
+  -d '{\"namespace\": \"mariadb-1\", \"mdb\": \"mariadb\"}'"
 
-curl -s -X POST "${MARIADB_AQSH_B_URL}/tasks/blue-green%2Fstatus" \
-  -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d '{"namespace": "mariadb-bg", "mdb": "mariadb-green"}'
+kexec "curl -s -X POST '${AQSH_B_URL}/tasks/blue-green%2Fstatus' \
+  -H 'Authorization: Bearer ${TOKEN}' \
+  -H 'Content-Type: application/json' \
+  -d '{\"namespace\": \"mariadb-1\", \"mdb\": \"mariadb-green\"}'"
 ```
 
 Successful switchover has these properties:

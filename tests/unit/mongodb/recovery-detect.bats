@@ -16,6 +16,15 @@
 #                            "Error from server (NotFound): pods \"x\" not
 #                            found") instead of clean JS output — takes
 #                            precedence over MOCK_DBPATH when set
+#   MOCK_DBPATH_FAIL_PODS names  space-separated pod names whose exec'd
+#                            serverCmdLineOpts probe returns nothing (as if
+#                            unreachable) regardless of MOCK_DBPATH/
+#                            MOCK_EXEC_ERROR_TEXT — simulates "this specific
+#                            pod is broken" for recovery_resolve_data_paths's
+#                            peer-fallback path
+#   MOCK_POD_LIST     names  newline-or-space-separated pod names returned by
+#                            `kubectl get pods -l ...` (the StatefulSet's
+#                            member list, for the peer-fallback path)
 # =============================================================================
 
 setup() {
@@ -31,6 +40,8 @@ setup() {
   export MOCK_STS_JSON='{"spec":{"template":{"spec":{"containers":[{"env":[]}],"initContainers":[],"volumes":[]}}}}'
   export MOCK_DBPATH=""
   export MOCK_EXEC_ERROR_TEXT=""
+  export MOCK_DBPATH_FAIL_PODS=""
+  export MOCK_POD_LIST=""
 
   mkdir -p "${TEST_TMPDIR}/bin"
 
@@ -57,20 +68,30 @@ case "$cmd" in
           printf '%s' "${MOCK_OWNER_STS:-}"
         fi
         exit 0 ;;
+      pods)
+        if [[ -n "${MOCK_POD_LIST:-}" ]]; then
+          printf '%s\n' ${MOCK_POD_LIST}
+        fi
+        exit 0 ;;
       statefulsets)
         printf '%s' "${MOCK_STS_LIST:-}"
         exit 0 ;;
       statefulset|sts)
-        if [[ "$flags" == *"-o json"* || "$flags" == *"json"* ]]; then
+        if [[ "$flags" == *"go-template"* ]]; then
+          printf 'app=mongodb,'
+        elif [[ "$flags" == *"-o json"* || "$flags" == *"json"* ]]; then
           printf '%s' "${MOCK_STS_JSON:-{\}}"
         fi
         exit 0 ;;
     esac
     exit 0 ;;
   exec)
+    pod="${args[1]:-}"
     js="${flags}"
     if [[ "$js" == *"serverCmdLineOpts"* ]]; then
-      if [[ -n "${MOCK_EXEC_ERROR_TEXT:-}" ]]; then
+      if [[ " ${MOCK_DBPATH_FAIL_PODS:-} " == *" ${pod} "* ]]; then
+        : # simulate this pod being unreachable — print nothing
+      elif [[ -n "${MOCK_EXEC_ERROR_TEXT:-}" ]]; then
         printf '%s' "${MOCK_EXEC_ERROR_TEXT}"
       elif [[ -n "${MOCK_DBPATH:-}" ]]; then
         printf 'DBPATH:%s' "${MOCK_DBPATH}"
@@ -488,6 +509,60 @@ KUBECTL_EOF
   _RECOVERY_DATA_PATH="/bitnami/mongodb/data/db"
   _RECOVERY_MOUNT_PATH="/bitnami/mongodb"
   export MOCK_DBPATH=""
+
+  recovery_resolve_data_paths "mongodb-0" "user" "pass"
+
+  [ "$_RECOVERY_DATA_PATH" = "/bitnami/mongodb/data/db" ]
+  [ "$_RECOVERY_MOUNT_PATH" = "/bitnami/mongodb" ]
+}
+
+@test "resolve_data_paths falls back to a healthy peer pod when the target pod itself is unreachable" {
+  # target_pod is frequently the broken pod recovery exists to fix — every
+  # member of the StatefulSet shares the same pod template, so a healthy
+  # peer's dbPath stands in for what the target would report if it could
+  # answer.
+  _RECOVERY_DATA_PATH_EXPLICIT=""
+  _RECOVERY_MOUNT_PATH_EXPLICIT=""
+  _RECOVERY_DATA_PATH="/bitnami/mongodb/data/db"
+  _RECOVERY_MOUNT_PATH="/bitnami/mongodb"
+  export MOCK_DBPATH_FAIL_PODS="mongodb-0"
+  export MOCK_POD_LIST="mongodb-0 mongodb-1 mongodb-2"
+  export MOCK_DBPATH="/data/db"
+
+  recovery_resolve_data_paths "mongodb-0" "user" "pass" "mongodb"
+
+  [ "$_RECOVERY_DATA_PATH" = "/data/db" ]
+  [ "$_RECOVERY_MOUNT_PATH" = "/data/db" ]
+}
+
+@test "resolve_data_paths keeps the hardcoded literal when the target and every peer are unreachable" {
+  _RECOVERY_DATA_PATH_EXPLICIT=""
+  _RECOVERY_MOUNT_PATH_EXPLICIT=""
+  _RECOVERY_DATA_PATH="/bitnami/mongodb/data/db"
+  _RECOVERY_MOUNT_PATH="/bitnami/mongodb"
+  export MOCK_DBPATH_FAIL_PODS="mongodb-0 mongodb-1 mongodb-2"
+  export MOCK_POD_LIST="mongodb-0 mongodb-1 mongodb-2"
+  export MOCK_DBPATH="/data/db"
+
+  recovery_resolve_data_paths "mongodb-0" "user" "pass" "mongodb"
+
+  [ "$_RECOVERY_DATA_PATH" = "/bitnami/mongodb/data/db" ]
+  [ "$_RECOVERY_MOUNT_PATH" = "/bitnami/mongodb" ]
+}
+
+@test "resolve_data_paths does not attempt peer fallback when sts_name is not given" {
+  # Same as detection failing outright in the no-fallback tests above, but
+  # explicitly proves a healthy peer existing in MOCK_POD_LIST is never
+  # consulted unless the caller passes sts_name (matches every existing
+  # call site, but keeps the 3-arg form — used by callers/tests that don't
+  # need the fallback — working exactly as before).
+  _RECOVERY_DATA_PATH_EXPLICIT=""
+  _RECOVERY_MOUNT_PATH_EXPLICIT=""
+  _RECOVERY_DATA_PATH="/bitnami/mongodb/data/db"
+  _RECOVERY_MOUNT_PATH="/bitnami/mongodb"
+  export MOCK_DBPATH_FAIL_PODS="mongodb-0"
+  export MOCK_POD_LIST="mongodb-0 mongodb-1"
+  export MOCK_DBPATH="/data/db"
 
   recovery_resolve_data_paths "mongodb-0" "user" "pass"
 

@@ -28,6 +28,14 @@ rules:
     resources: ["configmaps"]
     resourceNames: [{{ .Values.mongodb.recoveryConfigmap | default "mongodb-recovery-config" | quote }}]
     verbs: ["get", "patch"]
+  # create cannot be scoped by resourceNames (Kubernetes RBAC ignores
+  # resourceNames for create requests — there's no object yet to match
+  # against), so this is intentionally namespace-wide for configmaps, not
+  # pinned to recoveryConfigmap. G1 self-heal uses it to create the recovery
+  # ConfigMap when it's missing entirely, not just the init container.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get"]

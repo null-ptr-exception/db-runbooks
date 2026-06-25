@@ -118,8 +118,14 @@ action (wipe a pod's data), so the API surface is deliberately kept to just
    setting was given), reusing that single detected value for both `du`
    (G5) and `df` (G6) checks since `df` reports stats for whichever
    filesystem backs a path even when it's a subdirectory of the real
-   mountpoint. See the `_recovery_detect_*` / `recovery_resolve_*` functions
-   in `aqsh-tasks/lib/mongodb-recovery.sh`.
+   mountpoint. `data_path`/`mount_path` detection queries the *target pod*
+   first, but `target_pod` is frequently the broken pod recovery exists to
+   fix — its mongod may not answer at all. When the direct query fails and
+   the StatefulSet name is known, `recovery_resolve_data_paths` falls back
+   to asking any OTHER pod in the same StatefulSet: every member shares the
+   same pod template, so a healthy peer's dbPath is the value target_pod
+   would report if it could answer. See the `_recovery_detect_*` /
+   `recovery_resolve_*` functions in `aqsh-tasks/lib/mongodb-recovery.sh`.
 3. Library hardcoded fallback — Bitnami helm chart paths
 
 Detection always fails *soft*: if it can't find a confident signal (e.g. a
@@ -147,18 +153,29 @@ main container's own existing `volumeMounts` against the already-detected
 an image-name guess only when neither is set). The same patch call locks
 `updateStrategy.rollingUpdate.partition` at the current replica count, so no
 pod — including the ones already `Running` — restarts as a side effect; only
-a later, separate wipe lowers the partition for the one targeted pod. This
-uses no RBAC beyond the StatefulSet `patch` verb `recovery_wipe_pod`/
-`recovery_reset` already required. The StatefulSet is annotated
-`recovery/auto-patched: "true"` so `recovery_reset` (called automatically at
-the end of `recover`'s cycle, or by a later standalone `reset` call) knows to
-revert exactly this temporary addition, restoring the StatefulSet to its
-original shape — see `_recovery_auto_patch_init_container`/
-`_recovery_revert_auto_patch` in `aqsh-tasks/lib/mongodb-recovery.sh`. Fails
-soft exactly like detection: if the recovery ConfigMap doesn't exist yet
-either, or no confident volume-mount signal is found, G1 just fails as it
-always has — the One-Time Setup script below remains the fallback for
-deployments self-heal can't resolve.
+a later, separate wipe lowers the partition for the one targeted pod. If the
+recovery ConfigMap itself doesn't exist either (a deployment that has never
+had the One-Time Setup run on it at all), self-heal creates it too (`kubectl
+create --dry-run=client -o yaml | apply -f -`, so a concurrent create is a
+no-op, not a race) — a fully fresh StatefulSet self-heals end-to-end in one
+`wipe`/`recover` call, with no separate manual step. This needs one RBAC
+verb beyond the StatefulSet `patch` verb `recovery_wipe_pod`/`recovery_reset`
+already required: `create` on `configmaps`, namespace-wide rather than
+pinned by `resourceNames` — Kubernetes RBAC ignores `resourceNames` for
+`create` requests, since there's no existing object yet to match against
+(see `tests/chart/templates/mongodb-rbac.yaml`). The StatefulSet is
+annotated `recovery/auto-patched: "true"` so `recovery_reset` (called
+automatically at the end of `recover`'s cycle, or by a later standalone
+`reset` call) knows to revert exactly the temporary init-container/volume
+addition, restoring the StatefulSet to its original shape — see
+`_recovery_auto_patch_init_container`/`_recovery_revert_auto_patch` in
+`aqsh-tasks/lib/mongodb-recovery.sh`. (The ConfigMap self-heal may have
+created is never reverted — it's harmless, reusable state, not something
+tied to one recovery cycle.) Fails soft exactly like detection: if the
+ConfigMap can't be read or created (e.g. RBAC denies it), or no confident
+volume-mount signal is found, G1 just fails as it always has — the One-Time
+Setup script below remains available for deployments self-heal can't
+resolve, but is no longer a required first step.
 
 If a value like this also gates RBAC (e.g. `resourceNames` pinned to a
 StatefulSet/Secret/ConfigMap name), template the RBAC chart from the same

@@ -51,7 +51,7 @@ IFS=$'\x1f' read -r _SECRET _DIRECT_USER _USER_KEY _PASS_KEY <<< "$_CRED_ROW"
 log_info "recovery-recover" "Orchestrated recovery for pod ${_TARGET} in namespace ${DB_NAMESPACE}"
 
 _mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
-recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS"
+recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS" "$_STS"
 
 # Determine replica count for partition restore
 _REPLICAS=$(kubectl -n "${DB_NAMESPACE}" get statefulset "${_STS}" \

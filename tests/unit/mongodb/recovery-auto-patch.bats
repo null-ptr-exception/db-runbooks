@@ -18,9 +18,12 @@
 # a real cluster by tests/mongodb/recovery_auto_patch.bats.
 #
 # Mock control env vars:
-#   MOCK_STS_JSON   json   full `kubectl get statefulset <name> -o json` body
-#   MOCK_CM_EXISTS  1|0    whether `kubectl get configmap <name>` succeeds
-#   MOCK_PATCH_FAIL 1|0    kubectl patch returns error
+#   MOCK_STS_JSON      json   full `kubectl get statefulset <name> -o json` body
+#   MOCK_CM_EXISTS     1|0    whether `kubectl get configmap <name>` succeeds
+#   MOCK_CM_CREATE_FAIL 1|0   whether `kubectl apply` (creating a missing
+#                             recovery ConfigMap) fails — simulates RBAC
+#                             denying the `create` verb on configmaps
+#   MOCK_PATCH_FAIL    1|0    kubectl patch returns error
 # =============================================================================
 
 setup() {
@@ -33,10 +36,12 @@ setup() {
 
   export MOCK_STS_JSON='{"spec":{"replicas":3,"template":{"spec":{"containers":[{"image":"mongo:7"}]}}}}'
   export MOCK_CM_EXISTS=1
+  export MOCK_CM_CREATE_FAIL=0
   export MOCK_PATCH_FAIL=0
 
   mkdir -p "${TEST_TMPDIR}/bin"
   : > "${TEST_TMPDIR}/patch-calls.log"
+  : > "${TEST_TMPDIR}/cm-create-calls.log"
 
   cat > "${TEST_TMPDIR}/bin/kubectl" << 'KUBECTL_EOF'
 #!/usr/bin/env bash
@@ -64,6 +69,17 @@ case "$cmd" in
         [[ "${MOCK_CM_EXISTS:-1}" == "0" ]] && exit 1
         exit 0 ;;
     esac
+    exit 0 ;;
+  create)
+    case "$sub" in
+      configmap|cm)
+        printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: %s\n' "${args[2]:-}"
+        exit 0 ;;
+    esac
+    exit 0 ;;
+  apply)
+    [[ "${MOCK_CM_CREATE_FAIL:-0}" == "1" ]] && { printf 'forbidden\n' >&2; exit 1; }
+    printf 'applied\n' >> "${TEST_TMPDIR}/cm-create-calls.log"
     exit 0 ;;
   patch)
     [[ "${MOCK_PATCH_FAIL:-0}" == "1" ]] && { printf 'patch forbidden\n' >&2; exit 1; }
@@ -174,8 +190,23 @@ _compact() { tr -d '[:space:]'; }
   [ ! -s "${TEST_TMPDIR}/patch-calls.log" ]
 }
 
-@test "auto_patch_init_container fails soft when the recovery ConfigMap does not exist yet" {
+@test "auto_patch_init_container creates the recovery ConfigMap when it does not exist yet, then still patches the init container" {
+  export _RECOVERY_DATA_PATH="/data/db"
   export MOCK_CM_EXISTS=0
+  export MOCK_STS_JSON='{"spec":{"replicas":3,"template":{"spec":{"containers":[{"image":"mongo:7","securityContext":{"runAsUser":999},"volumeMounts":[{"name":"data","mountPath":"/data/db"}]}]}}}}'
+  run _recovery_auto_patch_init_container "mongodb" "mongodb-recovery-config"
+  [ "$status" -eq 0 ]
+  [ "$output" = "patched" ]
+  [ -s "${TEST_TMPDIR}/cm-create-calls.log" ]
+
+  local body
+  body=$(cat "${TEST_TMPDIR}/patch-calls.log" | _compact)
+  [[ "$body" == *'"name":"data-recovery"'* ]] || { echo "$body" >&2; false; }
+}
+
+@test "auto_patch_init_container fails soft when the recovery ConfigMap does not exist and cannot be created (RBAC denies create)" {
+  export MOCK_CM_EXISTS=0
+  export MOCK_CM_CREATE_FAIL=1
   run _recovery_auto_patch_init_container "mongodb" "mongodb-recovery-config"
   [ "$status" -eq 1 ]
   [ -z "$output" ]

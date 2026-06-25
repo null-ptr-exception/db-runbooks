@@ -43,7 +43,7 @@ IFS=$'\x1f' read -r _SECRET _DIRECT_USER _USER_KEY _PASS_KEY <<< "$_CRED_ROW"
 log_info "recovery-wipe" "Starting wipe for pod ${_TARGET} in namespace ${DB_NAMESPACE}"
 
 _mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
-recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS"
+recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS" "$_STS"
 
 # --- Phase 1: run gates (gate mode — exits on first blocking failure) ---
 # G1 self-heals a missing init container here (see CLAUDE.md "Auto-detect

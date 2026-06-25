@@ -431,7 +431,7 @@ _recovery_detect_data_mount() {
     ((.spec.template.spec.containers[0].volumeMounts // [])
       | map(select(.mountPath as $mp | ($dp == $mp or ($dp | startswith($mp + "/")))))
       | sort_by(.mountPath | length) | last) as $vm
-    | if $vm == null then empty else ($vm.name + "" + $vm.mountPath) end
+    | if $vm == null then empty else ($vm.name + "\u001f" + $vm.mountPath) end
   ' 2>/dev/null) || return 1
   [[ -z "$row" ]] && return 1
   printf '%s' "$row"
@@ -476,10 +476,17 @@ _recovery_detect_run_as_user() {
 #
 # Self-heals G1 in gate mode only (see recovery_run_gates): when the
 # data-recovery init container is missing, patches it in live instead of
-# requiring an operator to run setup-data-recovery.sh first — using only
-# RBAC the aqsh service account already has (the same StatefulSet `patch`
-# verb recovery_wipe_pod/recovery_reset already use; see CLAUDE.md
-# "Auto-detect tier" and docs/mongodb/recovery.md "RBAC Requirements").
+# requiring an operator to run setup-data-recovery.sh first. Also creates
+# the recovery ConfigMap itself if that's missing too — a deployment that
+# has never had setup-data-recovery.sh run on it at all (neither the
+# ConfigMap nor the init container exist) self-heals fully in one call,
+# with no separate manual step. This needs one RBAC verb beyond what
+# recovery_wipe_pod/recovery_reset already require: `create` on configmaps
+# (unscoped — Kubernetes RBAC ignores resourceNames for create requests, so
+# it can't be pinned to just the recovery ConfigMap's name; see
+# tests/chart/templates/mongodb-rbac.yaml and CLAUDE.md "Auto-detect tier").
+# The ConfigMap is created via apply (not create), so a concurrent caller
+# creating the same one is a no-op, not a race.
 #
 # Shape mirrors setup-data-recovery.sh's wipe-script exactly, but every
 # value is read live instead of taken from an operator --profile flag:
@@ -496,14 +503,16 @@ _recovery_detect_run_as_user() {
 # `recovery/auto-patched: "true"` so recovery_reset (called at the end of
 # this same recovery cycle, or by a later standalone reset.sh call) knows
 # to revert exactly this temporary addition — see _recovery_revert_auto_patch.
+# Reverting only ever removes the init container/volume, never the
+# ConfigMap this function may have created — the ConfigMap is harmless,
+# reusable state (just an empty wipe-targets file), not something that
+# needs to track "do I own this" the way the init container patch does.
 #
 # Fails soft (return 1, no mutation) when:
 #   - the init container is already present (nothing to do — returns 0
 #     instead, since this is the common/expected case, not a failure)
-#   - the recovery ConfigMap doesn't exist yet either (G2 will report this
-#     clearly; patching in a volume that mounts a nonexistent ConfigMap
-#     would hang the next pod recreation in CreateContainerConfigError
-#     instead of wiping data)
+#   - the recovery ConfigMap can't be read AND can't be created either
+#     (e.g. RBAC denies `create` on configmaps)
 #   - image/replicas can't be read, or no confident volume-mount signal
 #     matches the live data path
 # In every failure case, G1 below just fails exactly as it always has, with
@@ -515,32 +524,63 @@ _recovery_detect_run_as_user() {
 # ---------------------------------------------------------------------------
 _recovery_auto_patch_init_container() {
   local sts_name="${1:?}" cm_name="${2:?}"
+  local _op="_recovery_auto_patch_init_container"
   local sts_json
-  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
-  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+  sts_json=$(_recovery_get_sts_json "$sts_name") || {
+    log_info "$_op" "Self-heal skipped: could not read StatefulSet ${sts_name}"
+    return 1
+  }
+  if [[ -z "$sts_json" || "$sts_json" == "null" ]]; then
+    log_info "$_op" "Self-heal skipped: StatefulSet ${sts_name} returned empty/null spec"
+    return 1
+  fi
 
   local has_ic
   has_ic=$(printf '%s' "$sts_json" | jq -r --arg ic "$_RECOVERY_INIT_CONTAINER_NAME" '
-    [.spec.template.spec.initContainers[]? | select(.name==$ic)] | length' 2>/dev/null) || return 1
+    [.spec.template.spec.initContainers[]? | select(.name==$ic)] | length' 2>/dev/null) || {
+    log_info "$_op" "Self-heal skipped: could not parse initContainers from StatefulSet ${sts_name}"
+    return 1
+  }
   [[ "${has_ic:-0}" -gt 0 ]] && return 0
 
-  _kubectl get configmap "$cm_name" &>/dev/null || return 1
+  if ! _kubectl get configmap "$cm_name" &>/dev/null; then
+    if ! _kubectl create configmap "$cm_name" \
+        --from-literal=wipe-targets="" --from-literal=recovery-version="0" \
+        --dry-run=client -o yaml 2>/dev/null | _kubectl apply -f - >/dev/null 2>&1; then
+      log_info "$_op" "Self-heal skipped: recovery ConfigMap ${cm_name} does not exist and could not be created (check RBAC: configmaps create verb)"
+      return 1
+    fi
+    log_info "$_op" "Self-heal: created missing recovery ConfigMap ${cm_name}"
+  fi
 
   local image replicas
   image=$(printf '%s' "$sts_json" | jq -r '.spec.template.spec.containers[0].image // empty' 2>/dev/null)
   replicas=$(printf '%s' "$sts_json" | jq -r '.spec.replicas // empty' 2>/dev/null)
-  [[ -n "$image" ]] || return 1
-  [[ "$replicas" =~ ^[0-9]+$ && "$replicas" -gt 0 ]] || return 1
+  if [[ -z "$image" ]]; then
+    log_info "$_op" "Self-heal skipped: could not read container image from StatefulSet ${sts_name}"
+    return 1
+  fi
+  if [[ ! "$replicas" =~ ^[0-9]+$ || "$replicas" -le 0 ]]; then
+    log_info "$_op" "Self-heal skipped: could not read a valid replica count from StatefulSet ${sts_name} (got '${replicas}')"
+    return 1
+  fi
 
   local mount_row volume_name mount_path
-  mount_row=$(_recovery_detect_data_mount "$sts_json" "$_RECOVERY_DATA_PATH") || return 1
+  mount_row=$(_recovery_detect_data_mount "$sts_json" "$_RECOVERY_DATA_PATH")
+  local mount_row_status=$?
   IFS=$'\x1f' read -r volume_name mount_path <<< "$mount_row"
-  [[ -z "$volume_name" || -z "$mount_path" ]] && return 1
+  if [[ "$mount_row_status" -ne 0 || -z "$volume_name" || -z "$mount_path" ]]; then
+    local candidates
+    candidates=$(printf '%s' "$sts_json" | jq -rc \
+      '[.spec.template.spec.containers[0].volumeMounts[]? | "\(.name)=\(.mountPath)"]' 2>/dev/null)
+    log_info "$_op" "Self-heal skipped: no volumeMount on StatefulSet ${sts_name} matches data path '${_RECOVERY_DATA_PATH}' — containers[0].volumeMounts: ${candidates:-[]}"
+    return 1
+  fi
 
   local run_as_user
   run_as_user=$(_recovery_detect_run_as_user "$sts_json")
 
-  _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
+  if ! _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
 {
   "metadata": {"annotations": {"recovery/auto-patched": "true"}},
   "spec": {
@@ -564,9 +604,12 @@ _recovery_auto_patch_init_container() {
   }
 }
 EOF
-)" >/dev/null 2>&1 || return 1
+)" >/dev/null 2>&1; then
+    log_info "$_op" "Self-heal skipped: kubectl patch failed for StatefulSet ${sts_name}"
+    return 1
+  fi
 
-  log_info "_recovery_auto_patch_init_container" "Self-healed StatefulSet ${sts_name}: added ${_RECOVERY_INIT_CONTAINER_NAME} init container (volume=${volume_name}, mount=${mount_path}, runAsUser=${run_as_user}, partition locked at ${replicas}) — recovery_reset will revert this once the cycle completes"
+  log_info "$_op" "Self-healed StatefulSet ${sts_name}: added ${_RECOVERY_INIT_CONTAINER_NAME} init container (volume=${volume_name}, mount=${mount_path}, runAsUser=${run_as_user}, partition locked at ${replicas}) — recovery_reset will revert this once the cycle completes"
   printf 'patched'
   return 0
 }
@@ -682,7 +725,7 @@ recovery_resolve_credentials() {
 }
 
 # ---------------------------------------------------------------------------
-# recovery_resolve_data_paths <target_pod> <user> <pass>
+# recovery_resolve_data_paths <target_pod> <user> <pass> [sts_name]
 # Upgrades the module-level _RECOVERY_DATA_PATH/_RECOVERY_MOUNT_PATH globals
 # via live detection — but only when neither was set by an explicit task
 # input nor an internal-config default (tracked via the *_EXPLICIT sentinels
@@ -692,13 +735,50 @@ recovery_resolve_credentials() {
 # it's a subdirectory of the actual mountpoint, so the same detected path
 # is reused for both data_path (G5 `du`) and mount_path (G6 `df`) — no
 # separate mount-point lookup needed.
+#
+# target_pod is frequently the very pod recovery exists to fix — its mongod
+# may not be reachable at all. When the direct query fails and sts_name is
+# given, falls back to asking any OTHER pod in the same StatefulSet: every
+# member shares the same pod template, so a healthy peer's dbPath is the
+# same value target_pod would report if it could answer. sts_name is
+# optional (omitted by callers/tests that don't need the fallback) — without
+# it, behavior is unchanged from a direct-only query.
 # ---------------------------------------------------------------------------
 recovery_resolve_data_paths() {
-  local target_pod="${1:?}" user="${2:?}" pass="${3:?}"
-  [[ -n "$_RECOVERY_DATA_PATH_EXPLICIT" && -n "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]] && return 0
+  local target_pod="${1:?}" user="${2:?}" pass="${3:?}" sts_name="${4:-}"
+  local _op="recovery_resolve_data_paths"
+  if [[ -n "$_RECOVERY_DATA_PATH_EXPLICIT" && -n "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]]; then
+    log_info "$_op" "Skipping detection: data_path/mount_path already explicit (data_path=${_RECOVERY_DATA_PATH_EXPLICIT}, mount_path=${_RECOVERY_MOUNT_PATH_EXPLICIT})"
+    return 0
+  fi
+
   local detected
-  detected=$(_recovery_detect_data_path "$target_pod" "$user" "$pass") || return 0
-  [[ -z "$detected" ]] && return 0
+  detected=$(_recovery_detect_data_path "$target_pod" "$user" "$pass") || detected=""
+  if [[ -n "$detected" ]]; then
+    log_info "$_op" "Detected dbPath '${detected}' directly from target pod ${target_pod}"
+  else
+    log_info "$_op" "Target pod ${target_pod} did not answer the dbPath probe (it may be the broken pod recovery exists to fix)"
+  fi
+
+  if [[ -z "$detected" && -n "$sts_name" ]]; then
+    local peer tried=0
+    while IFS= read -r peer; do
+      [[ -z "$peer" || "$peer" == "$target_pod" ]] && continue
+      tried=$((tried + 1))
+      detected=$(_recovery_detect_data_path "$peer" "$user" "$pass") && {
+        log_info "$_op" "Detected dbPath '${detected}' from peer pod ${peer} (StatefulSet ${sts_name}) since target pod ${target_pod} did not answer"
+        break
+      }
+    done < <(_recovery_list_pods "$sts_name" 2>/dev/null)
+    [[ -z "$detected" ]] && log_info "$_op" "No peer pod in StatefulSet ${sts_name} answered the dbPath probe either (tried ${tried})"
+  elif [[ -z "$detected" ]]; then
+    log_info "$_op" "No sts_name given — skipping peer-pod fallback"
+  fi
+
+  if [[ -z "$detected" ]]; then
+    log_info "$_op" "Detection failed entirely — data_path/mount_path stay at the hardcoded literal (data_path=${_RECOVERY_DATA_PATH}, mount_path=${_RECOVERY_MOUNT_PATH})"
+    return 0
+  fi
   [[ -z "$_RECOVERY_DATA_PATH_EXPLICIT" ]] && _RECOVERY_DATA_PATH="$detected"
   [[ -z "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]] && _RECOVERY_MOUNT_PATH="$detected"
   return 0
@@ -1081,7 +1161,13 @@ recovery_run_gates() {
   # below just fails exactly as it always has.
   if [[ "$mode" == "gate" ]]; then
     local auto_patch_out
-    auto_patch_out=$(_recovery_auto_patch_init_container "$sts_name" "$cm_name" 2>/dev/null) || auto_patch_out=""
+    # No stderr redirect here: command substitution only ever captures
+    # stdout into auto_patch_out, so this doesn't need `2>/dev/null` to stay
+    # clean — and suppressing stderr would silently swallow every log_info
+    # this function emits (both the failure-reason messages and the
+    # eventual success message), leaving an operator with no way to tell
+    # why self-heal didn't fire short of reading this source file.
+    auto_patch_out=$(_recovery_auto_patch_init_container "$sts_name" "$cm_name") || auto_patch_out=""
     [[ "$auto_patch_out" == "patched" ]] && auto_patched="true"
   fi
   _run_gate _recovery_gate_g1 true "$sts_name" || return 1

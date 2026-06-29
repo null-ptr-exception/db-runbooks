@@ -32,9 +32,11 @@ PEER_AQSH_URL="${PEER_AQSH_URL:-}"
 PEER_TOKEN="${PEER_TOKEN:-}"
 
 BACKUP_NAME="${BACKUP_NAME:-physicalbackup-blue}"
-BACKUP_BUCKET="${BACKUP_BUCKET:-}"
-BACKUP_PREFIX="${BACKUP_PREFIX:-}"
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-}"
+# S3 backup location (bucket / prefix / endpoint) is resolved from deploy-time
+# config + the per-namespace convention shared with restore — not passed by the
+# caller — so a blue-green backup is restore-discoverable by namespace alone.
+mdbt_load_config
+mdbt_resolve_backup_location "$BG_NAMESPACE"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
 BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
@@ -94,9 +96,6 @@ bg_required "green_name" "$GREEN_NAME" "$OP"
 bg_required "green_image" "$GREEN_IMAGE" "$OP"
 bg_required "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 bg_required "peer_token" "$PEER_TOKEN" "$OP"
-bg_required "backup_bucket" "$BACKUP_BUCKET" "$OP"
-bg_required "backup_prefix" "$BACKUP_PREFIX" "$OP"
-bg_required "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 
 BG_MDB="$BLUE_NAME"
 bg_init_target

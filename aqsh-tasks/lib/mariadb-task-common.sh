@@ -30,6 +30,38 @@ source "${LIB_DIR}/response.sh"
 # shellcheck source=aqsh-tasks/lib/k8s.sh
 source "${LIB_DIR}/k8s.sh"
 
+# Deploy-time config mounted by the aqsh ConfigMap (MINIO_ENDPOINT, MINIO_BUCKET,
+# ...). Overridable so tests / out-of-cluster callers can point elsewhere.
+MDBT_CONFIG_FILE="${MDBT_CONFIG_FILE:-/etc/aqsh/config/mariadb.env}"
+
+# mdbt_load_config
+# Source the deploy-time MariaDB config if present (no-op when absent, e.g. unit
+# tests), so MINIO_* settings become available to the resolvers below.
+mdbt_load_config() {
+  # shellcheck disable=SC1090
+  [[ -f "$MDBT_CONFIG_FILE" ]] && source "$MDBT_CONFIG_FILE"
+  return 0
+}
+
+# mdbt_resolve_backup_location <namespace>
+# Resolve the physical-backup S3 location for a namespace and export it as
+# BACKUP_BUCKET / BACKUP_PREFIX / BACKUP_ENDPOINT. This is the single source of
+# truth shared by the backup *write* side (blue-green PhysicalBackup) and the
+# *read* side (restore bootstrapFrom): both derive the same bucket, the same
+# per-namespace prefix, and the same endpoint, so a backup written for a
+# namespace is always discoverable by that namespace alone.
+#   bucket   → MINIO_BUCKET (deploy config), default db-backups
+#   prefix   → mariadb/<namespace> convention
+#   endpoint → MINIO_ENDPOINT (deploy config), default in-cluster MinIO
+# Each stays env-overridable (BACKUP_BUCKET / BACKUP_PREFIX / BACKUP_ENDPOINT)
+# for advanced operators; the convention is the default, not a hardcode.
+mdbt_resolve_backup_location() {
+  local namespace="$1"
+  BACKUP_BUCKET="${BACKUP_BUCKET:-${MINIO_BUCKET:-db-backups}}"
+  BACKUP_PREFIX="${BACKUP_PREFIX:-mariadb/${namespace}}"
+  BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-${MINIO_ENDPOINT:-http://minio.minio.svc.cluster.local:9000}}"
+}
+
 # Where a task writes its single-line JSON result. Empty → stdout.
 MDBT_RESULT_FILE="${AQSH_RESULT_FILE:-}"
 
@@ -106,8 +138,11 @@ mdbt_validate_s3_prefix() {
 
 mdbt_validate_endpoint() {
   local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._:-]+$ ]]; then
-    mdbt_fail "$op" "${name} must match ^[A-Za-z0-9._:-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  # Accept a bare host:port (operator-style) or a full URL with scheme/path
+  # (mc-style, as carried in MINIO_ENDPOINT), e.g. minio.svc:9000 or
+  # http://minio.kind-b.test:30080.
+  if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)?[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]]; then
+    mdbt_fail "$op" "${name} must be a host:port or URL endpoint" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
   fi
 }
 

@@ -115,6 +115,18 @@ case "$cmd" in
           else
             printf 'uid-old-%s' "$name"     # pre-wipe
           fi
+        elif [[ "$flags" == *"conditions"* ]]; then
+          # G4/G8/primary_host probe: return Ready=True for Running pods
+          _cpod_phase=""
+          if [[ -n "${MOCK_ALL_PODS_PHASE:-}" ]]; then
+            _cpod_phase="${MOCK_ALL_PODS_PHASE}"
+          else
+            case "$name" in
+              mongodb-0) _cpod_phase="${MOCK_POD0_PHASE:-Running}" ;;
+              *) _cpod_phase="Running" ;;
+            esac
+          fi
+          [[ "$_cpod_phase" == "Running" ]] && printf 'True'
         fi
         exit 0 ;;
       pvc) exit 1 ;;

@@ -918,14 +918,14 @@ _wait_for_rs_healthy() {
   [ "$HTTP_CODE" != "202" ]
 }
 
-@test "recovery/recover rejects request with missing target_pod" {
+@test "recovery/recover accepts request with missing target_pod (auto-detects broken pod)" {
   http_post "${AQSH_URL}/tasks/recovery%2Frecover" '{"namespace":"mongo-1"}'
-  [ "$HTTP_CODE" != "202" ]
+  [ "$HTTP_CODE" = "202" ]
 }
 
-@test "recovery/wipe rejects request with missing target_pod" {
+@test "recovery/wipe accepts request with missing target_pod (auto-detects broken pod)" {
   http_post "${AQSH_URL}/tasks/recovery%2Fwipe" '{"namespace":"mongo-1"}'
-  [ "$HTTP_CODE" != "202" ]
+  [ "$HTTP_CODE" = "202" ]
 }
 
 @test "recovery/fix-no-primary rejects request with missing level" {

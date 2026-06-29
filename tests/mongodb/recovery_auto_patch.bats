@@ -675,3 +675,90 @@ _sts_auto_patched_annotation() {
     wait pod "$target" --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
   _wait_for_rs_healthy "$ANS" "$target" "$CTX_A" 180
 }
+
+# ── Not-Ready target: STS rolling-update controller deadlock bypass ───────────
+#
+# When the target pod is not Ready the StatefulSet rolling-update controller
+# (OrderedReady policy) will NOT evict it — it waits for a healthy pod before
+# applying the new template, creating a deadlock where the pod can't become
+# healthy without the recovery init container, and the init container can't
+# run without the pod being evicted.  recovery_wipe_pod detects Ready=False
+# and force-deletes the pod directly so the STS controller recreates it with
+# the updated template.
+
+@test "recovery/recover force-deletes a not-Ready target pod instead of deadlocking on rolling-update" {
+  run _sts_has_init_container "$ANS" "$CTX_A"
+  [ "$status" -ne 0 ] || skip "StatefulSet unexpectedly still carries the init container before this test"
+
+  _wait_for_primary "$ANS" "$CTX_A" 120
+
+  local target others_uids
+  target=$(_wipe_target "$ANS" "$CTX_A")
+  _wait_for_rs_healthy "$ANS" "$target" "$CTX_A" 120
+  others_uids=$(_capture_uids "$ANS" $(_other_pods "$target"))
+
+  local target_uid_before
+  target_uid_before=$(kubectl --context "$CTX_A" -n "$ANS" \
+    get pod "$target" -o jsonpath='{.metadata.uid}')
+  echo "target=${target} uid_before=${target_uid_before}" >&2
+
+  # Break the target pod so it is not Ready: kill mongod and corrupt the
+  # WiredTiger metadata files so every restart attempt fails → CrashLoopBackOff.
+  # This simulates the real-world scenario: a pod that is Running but whose
+  # readiness probe fails (or is crashing), causing the STS controller deadlock
+  # described in the test block comment above.
+  kubectl --context "$CTX_A" -n "$ANS" exec "$target" -- \
+    bash -c "kill -9 \$(pidof mongod 2>/dev/null) 2>/dev/null; \
+             printf 'CORRUPTED' > /data/db/WiredTiger.wt; \
+             printf 'CORRUPTED' > /data/db/WiredTiger" 2>/dev/null || true
+
+  # Wait up to 90s for the pod to report Ready=False
+  local elapsed=0 pod_ready
+  while (( elapsed < 90 )); do
+    pod_ready=$(kubectl --context "$CTX_A" -n "$ANS" get pod "$target" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    [[ "$pod_ready" != "True" ]] && break
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  assert_equal "$pod_ready" "False"
+  echo "Confirmed ${target} is not-Ready before calling recovery/recover" >&2
+
+  http_post "${AQSH_URL}/tasks/recovery%2Frecover" \
+    "{\"namespace\":\"${ANS}\",\"target_pod\":\"${target}\",\"wait_timeout\":\"300\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id" 480
+
+  local result reached auto_patched
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  reached=$(echo "$result" | jq -r '.reached_running // empty')
+  auto_patched=$(echo "$result" | jq -r '.auto_patched // empty')
+  assert_equal "$reached" "true"
+  assert_equal "$auto_patched" "true"
+
+  local target_uid_after
+  target_uid_after=$(kubectl --context "$CTX_A" -n "$ANS" \
+    get pod "$target" -o jsonpath='{.metadata.uid}')
+  [ "$target_uid_after" != "$target_uid_before" ]
+
+  # Other pods must not have been restarted across the whole cycle.
+  _assert_uids_unchanged "$ANS" "$others_uids"
+
+  # recover's internal reset must have reverted the self-heal patch.
+  run _sts_has_init_container "$ANS" "$CTX_A"
+  [ "$status" -ne 0 ]
+  local annotation
+  annotation=$(_sts_auto_patched_annotation "$ANS" "$CTX_A")
+  [ -z "$annotation" ]
+
+  local wipe_targets
+  wipe_targets=$(kubectl --context "$CTX_A" -n "$ANS" \
+    get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
+  assert_equal "$wipe_targets" ""
+
+  kubectl --context "$CTX_A" -n "$ANS" \
+    wait pod "$target" --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
+  _wait_for_rs_healthy "$ANS" "$target" "$CTX_A" 180
+}

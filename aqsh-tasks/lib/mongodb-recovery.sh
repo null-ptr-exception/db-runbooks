@@ -137,12 +137,24 @@ _recovery_primary_host() {
   local sts_name="$1" user="$2" pass="$3"
   local pods_raw probe=""
   pods_raw=$(_recovery_list_pods "$sts_name") || return 1
+  # Prefer a Ready pod — a Running-but-not-Ready pod means mongod is sick
+  # and may fail to answer rs.status(), giving a wrong or empty result.
+  # Fall back to any Running pod only when no Ready pod exists.
   while IFS= read -r pod; do
     [[ -z "$pod" ]] && continue
-    local phase
-    phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$phase" == "Running" ]] && { probe="$pod"; break; }
+    local pod_ready
+    pod_ready=$(_kubectl get pod "$pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$pod_ready" == "True" ]] && { probe="$pod"; break; }
   done <<< "$pods_raw"
+  if [[ -z "$probe" ]]; then
+    while IFS= read -r pod; do
+      [[ -z "$pod" ]] && continue
+      local phase
+      phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+      [[ "$phase" == "Running" ]] && { probe="$pod"; break; }
+    done <<< "$pods_raw"
+  fi
   [[ -z "$probe" ]] && return 1
   local host
   host=$(_recovery_mongosh_pod "$probe" "$user" "$pass" \
@@ -784,6 +796,85 @@ recovery_resolve_data_paths() {
   return 0
 }
 
+# ---------------------------------------------------------------------------
+# recovery_detect_target_pod <sts_name> <user> <pass>
+# Auto-detect which pod needs recovery: the non-primary pod whose Ready
+# condition is False. Prints the pod name to stdout; returns 1 if no
+# candidate is found or the result is ambiguous.
+#
+# Primary detection is best-effort (uses rs.status() via credentials) —
+# G7 remains the authoritative safety gate that blocks wiping the primary.
+# When multiple unhealthy non-primary pods are found the highest-ordinal
+# one is returned (StatefulSet convention) with a warning logged.
+# ---------------------------------------------------------------------------
+recovery_detect_target_pod() {
+  local sts_name="${1:?}" user="${2:-}" pass="${3:-}"
+  local op="recovery_detect_target_pod"
+
+  local pods_raw
+  pods_raw=$(_recovery_list_pods "$sts_name") || {
+    log_info "$op" "Cannot list pods for StatefulSet ${sts_name}"
+    return 1
+  }
+
+  # Best-effort primary identification so we never auto-select it as target.
+  # Failure is non-fatal — G7 is the authoritative safety gate.
+  local primary_pod=""
+  if [[ -n "$user" && -n "$pass" ]]; then
+    local primary_host
+    primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || primary_host=""
+    if [[ -n "$primary_host" ]]; then
+      local primary_hostname="${primary_host%%.*}"
+      while IFS= read -r pod; do
+        [[ -z "$pod" ]] && continue
+        [[ "$primary_hostname" == "$pod" ]] && { primary_pod="$pod"; break; }
+      done <<< "$pods_raw"
+    fi
+  fi
+  log_debug "$op" "Primary pod: '${primary_pod:-<unknown>}'"
+
+  # Collect candidates: not-Ready and not the primary
+  local -a candidates=()
+  while IFS= read -r pod; do
+    [[ -z "$pod" ]] && continue
+    [[ -n "$primary_pod" && "$pod" == "$primary_pod" ]] && continue
+    local pod_ready
+    pod_ready=$(_kubectl get pod "$pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    log_debug "$op" "${pod} Ready=${pod_ready:-<unknown>}"
+    [[ "$pod_ready" != "True" ]] && candidates+=("$pod")
+  done <<< "$pods_raw"
+
+  local count="${#candidates[@]}"
+  if [[ "$count" -eq 0 ]]; then
+    log_info "$op" "No unhealthy non-primary pod found in StatefulSet ${sts_name} — specify target_pod explicitly to force-wipe a healthy pod"
+    return 1
+  fi
+
+  # Pick highest ordinal (safest partition target in a StatefulSet)
+  local best="" best_ordinal=-1
+  for pod in "${candidates[@]}"; do
+    local ordinal
+    ordinal=$(_recovery_pod_ordinal "$pod") || continue
+    if (( ordinal > best_ordinal )); then
+      best_ordinal="$ordinal"
+      best="$pod"
+    fi
+  done
+
+  if [[ -z "$best" ]]; then
+    log_info "$op" "Could not determine ordinal for candidates: ${candidates[*]}"
+    return 1
+  fi
+
+  if (( count > 1 )); then
+    log_info "$op" "Multiple unhealthy non-primary pods: ${candidates[*]} — auto-selected highest ordinal: ${best} (pass target_pod to override)"
+  else
+    log_info "$op" "Auto-detected recovery target: ${best}"
+  fi
+  printf '%s' "$best"
+}
+
 # ===========================================================================
 # Gate functions
 # Each gate prints a single-line JSON object to stdout:
@@ -921,7 +1012,7 @@ _recovery_gate_g5() {
 # allow_resize=false (report mode): never mutate the cluster — report
 # OPLOG_RESIZE_NEEDED as a warning instead of running replSetResizeOplog.
 _recovery_gate_g4() {
-  local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}"
+  local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}" target_pod="${6:-}"
   local primary_host probe_pod
   if ! primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass"); then
     printf '{"gate":"G4","pass":false,"code":"NO_PRIMARY_FOR_OPLOG","message":"Cannot find primary to query oplog — ensure primary is elected first","suggestion":"Run recovery/fix-no-primary level=diagnose"}'
@@ -932,8 +1023,11 @@ _recovery_gate_g4() {
   probe_pod=""
   while IFS= read -r g4_pod; do
     [[ -z "$g4_pod" ]] && continue
-    g4_phase=$(_kubectl get pod "$g4_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$g4_phase" == "Running" ]] && { probe_pod="$g4_pod"; break; }
+    [[ -n "$target_pod" && "$g4_pod" == "$target_pod" ]] && continue
+    local g4_ready
+    g4_ready=$(_kubectl get pod "$g4_pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$g4_ready" == "True" ]] && { probe_pod="$g4_pod"; break; }
   done <<< "$g4_pods_raw"
   if [[ -z "$probe_pod" ]]; then
     printf '{"gate":"G4","pass":false,"code":"NO_LOCAL_POD","message":"No local Running pod found to query oplog via primary %s","suggestion":"Check pod status in this cluster"}' \
@@ -1077,7 +1171,7 @@ _recovery_gate_g7() {
 }
 
 _recovery_gate_g8() {
-  local sts_name="$1" user="$2" pass="$3"
+  local sts_name="$1" user="$2" pass="$3" target_pod="${4:-}"
   local primary_host g8_pods_raw g8_pod g8_phase probe_pod
   primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || {
     printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no primary found in RS to query RECOVERING state"}'
@@ -1087,8 +1181,11 @@ _recovery_gate_g8() {
   probe_pod=""
   while IFS= read -r g8_pod; do
     [[ -z "$g8_pod" ]] && continue
-    g8_phase=$(_kubectl get pod "$g8_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$g8_phase" == "Running" ]] && { probe_pod="$g8_pod"; break; }
+    [[ -n "$target_pod" && "$g8_pod" == "$target_pod" ]] && continue
+    local g8_ready
+    g8_ready=$(_kubectl get pod "$g8_pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$g8_ready" == "True" ]] && { probe_pod="$g8_pod"; break; }
   done <<< "$g8_pods_raw"
   if [[ -z "$probe_pod" ]]; then
     printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no local Running pod to query RECOVERING state"}'
@@ -1192,7 +1289,7 @@ recovery_run_gates() {
   local g4_resize="false"
   [[ "$mode" == "gate" ]] && g4_resize="true"
   if [[ "$data_mb" -gt 0 ]]; then
-    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" "$g4_resize" || return 1
+    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" "$g4_resize" "$target_pod" || return 1
   else
     gate_results+=('{"gate":"G4","pass":true,"warn":true,"message":"Oplog check skipped: data size unknown"}')
     (( warn_count++ )) || true
@@ -1222,7 +1319,7 @@ recovery_run_gates() {
 
   # G8: warn if other pods RECOVERING (non-blocking)
   local g8_out
-  g8_out=$(_recovery_gate_g8 "$sts_name" "$user" "$pass") || true
+  g8_out=$(_recovery_gate_g8 "$sts_name" "$user" "$pass" "$target_pod") || true
   local g8_warn
   g8_warn=$(printf '%s' "$g8_out" | grep -o '"warn":[a-z]*' | head -1 | cut -d':' -f2)
   [[ "$g8_warn" == "true" ]] && (( warn_count++ )) || true
@@ -1280,6 +1377,25 @@ recovery_wipe_pod() {
     response_err "$op" "Failed to set partition=${ordinal} on StatefulSet ${sts_name} (CM rolled back)" \
       "{\"detail\":\"$(_escape_json_string "$sts_out")\",\"target_pod\":\"${target_pod}\"}" 1
     return 1
+  fi
+
+  # 3. If the pod is not Ready the StatefulSet controller (OrderedReady policy)
+  #    will not delete it for a rolling update — it waits for the pod to become
+  #    healthy first, which creates a deadlock when the pod is broken by design.
+  #    Detect this case and force-delete the pod so the controller recreates it
+  #    with the updated template (including the recovery init container).
+  local pod_ready
+  pod_ready=$(_kubectl get pod "$target_pod" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+  log_debug "$op" "Pod ${target_pod} Ready=${pod_ready:-<unknown>}"
+  if [[ "$pod_ready" != "True" ]]; then
+    log_info "$op" "Pod ${target_pod} is not Ready (Ready=${pod_ready:-<unknown>}) — STS rolling-update controller would deadlock; force-deleting pod to trigger recreation with updated template"
+    local del_out
+    if ! del_out=$(_kubectl delete pod "$target_pod" --grace-period=0 --force 2>&1); then
+      log_info "$op" "Warning: could not delete pod ${target_pod}: $(_escape_json_string "$del_out") — STS controller may not recreate it; monitor manually"
+    else
+      log_info "$op" "Deleted pod ${target_pod}; STS controller will recreate it with the updated template (partition=${ordinal})"
+    fi
   fi
 
   log_info "$op" "Wipe initiated — run recovery/reset once pod ${target_pod} enters Running to prevent re-wipe on restart"

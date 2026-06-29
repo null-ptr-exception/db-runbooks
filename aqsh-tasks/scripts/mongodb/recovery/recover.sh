@@ -32,7 +32,7 @@ source "${LIB_DIR}/mongodb.sh"
 source "${LIB_DIR}/mongodb-recovery.sh"
 
 export K8S_NAMESPACE="${DB_NAMESPACE}"
-_TARGET="${RECOVERY_TARGET_POD:?RECOVERY_TARGET_POD is required (e.g. mongodb-2)}"
+_TARGET="${RECOVERY_TARGET_POD:-}"
 _TIMEOUT="${RECOVERY_WAIT_TIMEOUT:-300}"
 export FORCE_WIPE="${FORCE_WIPE:-false}"
 
@@ -48,9 +48,19 @@ _CRED_ROW=$(recovery_resolve_credentials \
   "$_STS")
 IFS=$'\x1f' read -r _SECRET _DIRECT_USER _USER_KEY _PASS_KEY <<< "$_CRED_ROW"
 
+_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
+
+if [[ -z "$_TARGET" ]]; then
+  log_info "recovery-recover" "target_pod not specified — auto-detecting unhealthy pod in namespace ${DB_NAMESPACE}"
+  _TARGET=$(recovery_detect_target_pod "$_STS" "$_MONGO_USER" "$_MONGO_PASS") || {
+    response_err "recovery-recover" "No unhealthy non-primary pod detected — all pods are Ready or no non-primary candidate found" \
+      '{"suggestion":"Run recovery/status to inspect pod states, or specify target_pod explicitly"}' 1
+    exit 1
+  }
+fi
+
 log_info "recovery-recover" "Orchestrated recovery for pod ${_TARGET} in namespace ${DB_NAMESPACE}"
 
-_mongo_load_credentials "${DB_NAMESPACE}" "${_SECRET}" "${_USER_KEY}" "${_PASS_KEY}" "${_DIRECT_USER}"
 recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS" "$_STS"
 
 # Determine replica count for partition restore

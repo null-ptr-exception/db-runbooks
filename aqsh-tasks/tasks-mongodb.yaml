@@ -572,9 +572,10 @@ tasks:
         pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
-        required: true
+        required: false
         type: string
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: force_wipe
         env: FORCE_WIPE
         required: false
@@ -637,9 +638,10 @@ tasks:
         pattern: '^[a-z0-9][a-z0-9-]*$'
       - name: target_pod
         env: RECOVERY_TARGET_POD
-        required: true
+        required: false
         type: string
-        pattern: '^[a-z0-9][a-z0-9-]*$'
+        default: ""
+        pattern: '^([a-z0-9][a-z0-9-]*)?$'
       - name: force_wipe
         env: FORCE_WIPE
         required: false

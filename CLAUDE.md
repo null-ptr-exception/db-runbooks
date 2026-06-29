@@ -100,7 +100,11 @@ clobber an explicit caller override, because it writes to a different name.
 task inputs at all — these tasks operate on something close to a destructive
 action (wipe a pod's data), so the API surface is deliberately kept to just
 `namespace` + the genuinely per-call operational decisions (`target_pod`,
-`force_wipe`, `level`/`force_primary_pod`, `wait_timeout`). Resolution is a
+`force_wipe`, `level`/`force_primary_pod`, `wait_timeout`). `target_pod` is
+optional for `wipe` and `recover`: when omitted, the script calls
+`recovery_detect_target_pod` to find the first not-Ready non-primary pod
+(highest ordinal wins when multiple candidates exist); specify it explicitly
+to force-wipe a healthy pod or to override the auto-selected candidate. Resolution is a
 3-tier chain with no task-input override:
 
 1. Internal config — `*_DEFAULT`-suffixed env var, set once per deployment
@@ -158,11 +162,14 @@ recovery ConfigMap itself doesn't exist either (a deployment that has never
 had the One-Time Setup run on it at all), self-heal creates it too (`kubectl
 create --dry-run=client -o yaml | apply -f -`, so a concurrent create is a
 no-op, not a race) — a fully fresh StatefulSet self-heals end-to-end in one
-`wipe`/`recover` call, with no separate manual step. This needs one RBAC
-verb beyond the StatefulSet `patch` verb `recovery_wipe_pod`/`recovery_reset`
-already required: `create` on `configmaps`, namespace-wide rather than
-pinned by `resourceNames` — Kubernetes RBAC ignores `resourceNames` for
-`create` requests, since there's no existing object yet to match against
+`wipe`/`recover` call, with no separate manual step. This needs two RBAC
+verbs beyond the StatefulSet `patch` verb `recovery_wipe_pod`/`recovery_reset`
+already required: `create` on `configmaps` (namespace-wide — Kubernetes RBAC
+ignores `resourceNames` for `create` requests, since there's no existing
+object yet to match against), and `delete` on `pods` — `recovery_wipe_pod`
+force-deletes the target pod when it is not Ready, because the StatefulSet
+rolling-update controller (OrderedReady policy) will not evict an unhealthy
+pod on its own, creating a deadlock when the pod is broken by design
 (see `tests/chart/templates/mongodb-rbac.yaml`). The StatefulSet is
 annotated `recovery/auto-patched: "true"` so `recovery_reset` (called
 automatically at the end of `recover`'s cycle, or by a later standalone

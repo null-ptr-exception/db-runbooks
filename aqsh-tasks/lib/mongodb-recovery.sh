@@ -1018,7 +1018,7 @@ _recovery_gate_g4() {
     printf '{"gate":"G4","pass":false,"code":"NO_PRIMARY_FOR_OPLOG","message":"Cannot find primary to query oplog — ensure primary is elected first","suggestion":"Run recovery/fix-no-primary level=diagnose"}'
     return 1
   fi
-  local g4_pods_raw g4_pod g4_phase
+  local g4_pods_raw g4_pod
   g4_pods_raw=$(_recovery_list_pods "$sts_name") || g4_pods_raw=""
   probe_pod=""
   while IFS= read -r g4_pod; do
@@ -1172,7 +1172,7 @@ _recovery_gate_g7() {
 
 _recovery_gate_g8() {
   local sts_name="$1" user="$2" pass="$3" target_pod="${4:-}"
-  local primary_host g8_pods_raw g8_pod g8_phase probe_pod
+  local primary_host g8_pods_raw g8_pod probe_pod
   primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || {
     printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no primary found in RS to query RECOVERING state"}'
     return 0

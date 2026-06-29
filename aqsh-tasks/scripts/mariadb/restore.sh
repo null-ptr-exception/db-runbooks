@@ -3,14 +3,16 @@ set -euo pipefail
 
 # =============================================================================
 # mariadb/restore.sh
-# Restore a MariaDB instance from a physical (mariabackup) backup in S3/MinIO,
-# optionally to a point in time.
+# Recreate a namespace's MariaDB from its physical (mariabackup) backup in
+# S3/MinIO, optionally to a point in time.
 #
-# User-oriented surface: the caller says *what* to restore (namespace, optional
-# point-in-time), not *where/how* it is stored. Everything a managed database
-# controls — credentials, S3 endpoint/region/credentials, the backup location,
-# the engine version, and the storage size — is resolved internally from
-# platform conventions or from the source instance, never passed by the caller.
+# The NAMESPACE is the database identity. The caller says only *which* namespace
+# to restore (and optionally a point-in-time); everything that defines the
+# managed database — the engine version, storage size, the restored instance
+# name, which instance to derive the spec from, the S3 backup location, and the
+# credentials — is resolved internally from platform conventions / the
+# namespace's own state, never passed by the caller. (Some of these stay
+# env-readable as advanced operator overrides, but none is a task input.)
 #
 # AWS-style semantics: a restore always provisions a NEW MariaDB instance and
 # never overwrites in place (RestoreDBInstanceFromDBSnapshot /
@@ -20,11 +22,14 @@ set -euo pipefail
 # `bootstrapFrom.targetRecoveryTime` performs point-in-time recovery; without
 # it, the latest backup under the prefix is restored.
 #
-# NOTE: the per-namespace backup location (s3://db-backups/mariadb/<namespace>)
-# is a forward-looking convention resolved internally. Until the physical-backup
-# task writes to that layout, restore reads from a location nothing writes to yet
-# (tracked as a follow-up). The source must be a mariadb-operator PhysicalBackup
-# / mariabackup layout; the logical `backup` task is not a valid source.
+# NOTE: version + storage are derived from the namespace's still-present
+# instance. Reconstructing them when the namespace's instance is *entirely* gone
+# (true full-loss DR) needs a durable, in-cluster spec source (backup metadata /
+# per-namespace config) that does not exist yet — tracked together with the
+# physical-backup write side, which also does not yet write to
+# s3://db-backups/mariadb/<namespace>. The source must be a mariadb-operator
+# PhysicalBackup / mariabackup layout; the logical `backup` task is not a valid
+# source.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -41,23 +46,26 @@ source "${LIB_DIR}/mariadb.sh"              # for mariadb_resolve_name (source a
 OP="restore"
 
 # --- User-facing inputs ------------------------------------------------------
-NAMESPACE="${DB_NAMESPACE:-}"          # the only required input
+NAMESPACE="${DB_NAMESPACE:-}"          # the database identity — the only required input
 TARGET_TIME="${TARGET_TIME:-}"         # optional: omit → latest backup; set → PITR
-TARGET="${RESTORE_TARGET:-}"           # optional: auto-generated when empty
-SOURCE_NAME="${RESTORE_SOURCE:-}"      # optional: source instance for version/storage
-IMAGE="${RESTORE_IMAGE:-}"             # optional: derived from the source when empty
 CONFIRM="${CONFIRM:-false}"
 DRY_RUN="${DRY_RUN:-true}"
 # wait_timeout doubles as the wait switch: "0" → return without waiting; any
 # positive duration (e.g. 10m) → wait up to that long for Ready.
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
-K8S_CONTEXT="${K8S_CONTEXT:-}"
+K8S_CONTEXT="${K8S_CONTEXT:-}"         # reachability hook (empty → in-cluster)
 
-# --- Platform internals (NOT user-facing) ------------------------------------
-# The storage size is derived from the source instance, never defaulted: a
-# physical restore must match the source's PVC size or it risks truncating data
-# (see resolution below). STORAGE_SIZE stays env-readable as a last-resort
-# override but is not a task input.
+# --- Platform internals (NOT task inputs) ------------------------------------
+# These define the restored database and are resolved internally from the
+# namespace; they stay env-readable as advanced operator overrides only.
+#   TARGET / SOURCE: the restored instance name and which instance to copy the
+#     spec from — auto-resolved below.
+#   IMAGE / STORAGE_SIZE: the engine version and PVC size — derived from the
+#     namespace's instance, never defaulted (an undersized PVC would truncate
+#     the restored data; a mismatched version is unsafe for a physical restore).
+TARGET="${RESTORE_TARGET:-}"
+SOURCE_NAME="${RESTORE_SOURCE:-}"
+IMAGE="${RESTORE_IMAGE:-}"
 STORAGE_SIZE="${STORAGE_SIZE:-}"
 BACKUP_BUCKET="db-backups"
 BACKUP_PREFIX="mariadb/${NAMESPACE}"   # per-namespace backup location convention
@@ -97,11 +105,12 @@ if [[ -z "$TARGET" ]]; then
   TARGET="${NAMESPACE}-restore-$(date +%Y%m%d%H%M%S)"
 fi
 
-# Resolve the engine version and storage for the restored instance:
-#  - explicit `source`             → derive from that instance
-#  - exactly one MariaDB instance  → derive from it
-#  - several, all the same image   → use that version (restore's own clones, etc.)
-#  - mixed versions / none         → fail asking for `source`/`image` (never guess)
+# Resolve the engine version and storage for the restored instance from the
+# namespace's own state (the namespace is the database identity):
+#  - RESTORE_SOURCE override        → derive from that instance
+#  - exactly one MariaDB instance   → derive from it
+#  - several, all the same image    → use that version (restore's own clones, etc.)
+#  - mixed versions / none          → fail (never guess)
 # Both must match the source: a physical restore is version- and size-sensitive,
 # so neither the engine nor the PVC size is ever silently defaulted.
 if [[ -z "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
@@ -128,18 +137,18 @@ if [[ -z "$IMAGE" ]]; then
   if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
     IMAGE="$NS_IMAGES"
   elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
-    mdbt_fail "$OP" "multiple MariaDB versions in '${NAMESPACE}'; pass 'source' to pick the restore source, or 'image' explicitly" \
+    mdbt_fail "$OP" "'${NAMESPACE}' runs multiple MariaDB versions (e.g. mid blue-green upgrade); cannot pick the restore version automatically — operator: set the RESTORE_SOURCE or RESTORE_IMAGE override" \
       "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
   fi
   if [[ -z "$IMAGE" ]]; then
-    mdbt_fail "$OP" "could not determine the source MariaDB version (no MariaDB instance in '${NAMESPACE}'); pass 'image' explicitly" \
+    mdbt_fail "$OP" "could not determine the MariaDB version for '${NAMESPACE}' (no instance to derive it from); full-loss restore needs the backup to carry the spec (future) — operator: set the RESTORE_IMAGE override meanwhile" \
       "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
   fi
 fi
 
 # Storage is never guessed: an undersized PVC would truncate the restored data.
 if [[ -z "$STORAGE_SIZE" ]]; then
-  mdbt_fail "$OP" "could not determine the storage size from a source instance in '${NAMESPACE}'; a physical restore must match the source's PVC size, so pass 'source' (or 'storage_size') explicitly" \
+  mdbt_fail "$OP" "could not determine the storage size for '${NAMESPACE}' (no instance to derive it from); a physical restore must match the source PVC size — operator: set the RESTORE_SOURCE or STORAGE_SIZE override" \
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
 fi
 

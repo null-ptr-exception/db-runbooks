@@ -648,9 +648,13 @@ tasks:
         default: --all-databases
   restore:
     script: mariadb/restore.sh
-    description: "Restore a physical backup into a new MariaDB instance (optionally point-in-time); managed-DB internals (credentials, S3 location, version) are resolved automatically"
+    description: "Recreate a namespace's MariaDB from its physical backup (optionally point-in-time); the namespace is the database identity — version, storage, name, S3 location, and credentials are all resolved internally"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
+    # The namespace identifies the managed database; the engine version, storage
+    # size, restored instance name, source instance, backup location, and
+    # credentials are platform internals resolved automatically (some remain
+    # env-readable as advanced operator overrides, but are not task inputs).
     input:
       - name: namespace
         env: DB_NAMESPACE
@@ -664,21 +668,6 @@ tasks:
         default: ""
       - name: target_time
         env: TARGET_TIME
-        required: false
-        type: string
-      - name: source
-        env: RESTORE_SOURCE
-        required: false
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      # --- Optional overrides (resolved automatically when omitted) ---
-      - name: target
-        env: RESTORE_TARGET
-        required: false
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: image
-        env: RESTORE_IMAGE
         required: false
         type: string
       - name: dry_run

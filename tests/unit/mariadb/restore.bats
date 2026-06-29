@@ -5,10 +5,13 @@
 # These run the script directly against a mock `kubectl` — no cluster, no
 # MinIO, no operator. They lock down the user-oriented surface and the manifest
 # the task renders:
-#   - namespace is the only required input; credentials / S3 location / storage
-#     size are internal — not task inputs
-#   - the source instance (for version/storage) is auto-detected, overridable
-#     via `source`, and neither version nor storage is ever silently guessed
+#   - namespace is the only required input (the database identity); version,
+#     storage, restored name, source, credentials, and S3 location are all
+#     internal — NOT task inputs. RESTORE_SOURCE / RESTORE_TARGET / RESTORE_IMAGE
+#     / STORAGE_SIZE remain env-readable as advanced operator overrides and are
+#     used here to drive the resolution paths.
+#   - the source instance (for version/storage) is auto-detected from the
+#     namespace, and neither version nor storage is ever silently guessed
 #   - confirm=true is mandatory to apply; dry_run (default) only renders
 #   - an existing target is never overwritten in place
 #   - target_time is range-validated and, when given, injected as PITR
@@ -179,11 +182,11 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.data.manifest | fromjson | .spec.storage.size')" = "5Gi" ]
 }
 
-@test "restore fails when the source is gone and no image is given" {
+@test "restore fails when the source is gone and no version can be derived" {
   run_restore DRY_RUN=true   # MOCK_SOURCES empty → no source found
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"image"* ]]
+  [[ "$(result_field '.message')" == *"version"* ]]
 }
 
 @test "restore resolves the version when several instances share it (no source needed)" {

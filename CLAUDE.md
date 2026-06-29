@@ -68,15 +68,14 @@ When adding a new task parameter, decide which layer it belongs to:
 values for X, but one environment wants the *same* value of X on every call,
 X is internal config, not a task input. `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `sts_name`, `recovery_configmap`,
-`data_path`, `mount_path` (MongoDB account/sanity-check tasks) follow this
+`data_path`, `mount_path` (MongoDB account tasks) follow this
 pattern as optional task inputs with internal-config + hardcoded-literal
-fallback. MongoDB `recovery/*` tasks go a step further and don't expose these
-fields as task inputs *at all* — see "Auto-detect tier" below.
+fallback. MongoDB `recovery/*` and `sanity-check` tasks go a step further and
+don't expose these fields as task inputs *at all* — see "Auto-detect tier" below.
 
-**Resolution order** (3 tiers, implemented per-script — see
-`aqsh-tasks/scripts/mongodb/sanity-check.sh` for a worked example; MongoDB
-`recovery/*` tasks use a variant of this without the task-input tier — see
-"Auto-detect tier" below):
+**Resolution order for account tasks** (3 tiers — see MongoDB account scripts
+for a worked example; MongoDB `recovery/*` and `sanity-check` use a variant
+without the task-input tier — see "Auto-detect tier" below):
 
 1. Task input — only non-empty if the caller explicitly passed it (YAML
    `default: ""`, not a literal)

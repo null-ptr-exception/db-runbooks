@@ -41,27 +41,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9][a-z0-9-]*$'
-      - name: sts_name
-        env: MONGO_STS_NAME
-        required: false
-        type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
-        pattern: '^([a-z0-9][a-z0-9-]*)?$'
-      - name: credential_secret
-        env: MONGO_CRED_SECRET
-        required: false
-        type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
-      - name: credential_user_key
-        env: MONGO_CRED_USER_KEY
-        required: false
-        type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
-      - name: credential_pass_key
-        env: MONGO_CRED_PASS_KEY
-        required: false
-        type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
   backup:
     script: backup/backup-mongodb.sh
     description: "Backup MongoDB database to MinIO"

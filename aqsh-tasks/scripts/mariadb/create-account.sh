@@ -139,6 +139,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+# The account's password Secret is a managed-database internal: its name is
+# derived by convention (<prefix><username>, prefix default mariadb-account-)
+# rather than spelled out by the caller, who references it via the result's
+# password_secret.{name,key} instead. ACCOUNT_PASSWORD_SECRET_NAME / _PREFIX /
+# _KEY remain env/flag overrides for operators, but are not task inputs.
+# A MariaDB username may contain characters invalid in a Kubernetes Secret name
+# (e.g. underscores, uppercase), so the derived name is normalised to RFC1123
+# (lowercase alnum + dash). Operators with a clashing scheme can still pin the
+# name via the override.
+if [[ -z "$PASSWORD_SECRET_NAME" && -n "$USERNAME" ]]; then
+  PASSWORD_SECRET_NAME="$(printf '%s' "${PASSWORD_SECRET_PREFIX}${USERNAME}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9-]/-/g' -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+fi
+
 ERRORS=()
 PRIVILEGES=()
 PRIVILEGES_SQL=""

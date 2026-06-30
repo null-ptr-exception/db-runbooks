@@ -14,9 +14,12 @@ The task is conservative by default:
 - Existing accounts return an idempotent `UNCHANGED` result without changing
   grants or password Secrets.
 
-For new accounts, `password_secret_name` is conditionally required. For existing
-accounts, the task does not create or backfill a missing password Secret,
-because it cannot know the pre-existing account's password.
+The password Secret is a managed-database internal: for a new account its name
+is **derived by convention** (`mariadb-account-<username>`, normalised to a valid
+Secret name), not supplied by the caller. The result returns
+`password_secret.{name,key}` so the caller can find the credentials. For existing
+accounts, the task does not create or backfill a missing password Secret, because
+it cannot know the pre-existing account's password.
 
 When `generate_password=true`, the task creates the generated password Secret
 before running `CREATE USER`, so the password can be recovered if the task fails
@@ -26,9 +29,11 @@ it. If `CREATE USER` succeeds but a later step such as `GRANT` or `SHOW GRANTS`
 verification fails, the next run sees `ACCOUNT_EXISTS=true` and will not
 regenerate or overwrite the Secret.
 
-By default, `password_secret_name` must start with `mariadb-account-`. This keeps
-the task from reading unrelated Secrets even though Kubernetes RBAC
-grants namespace-scoped Secret access for account password management.
+The derived (or operator-overridden) Secret name must start with
+`mariadb-account-`. This keeps the task from reading unrelated Secrets even though
+Kubernetes RBAC grants namespace-scoped Secret access for account password
+management. Operators can still pin a name via the `ACCOUNT_PASSWORD_SECRET_NAME`
+/ `_PREFIX` / `_KEY` environment overrides, but they are no longer task inputs.
 
 ## Endpoint
 
@@ -72,9 +77,6 @@ Served by **aqsh-mariadb** on NodePort `30081`.
 | `username` | `ACCOUNT_USERNAME` | yes | - | User to create |
 | `host` | `ACCOUNT_HOST` | no | `%` | MariaDB account host |
 | `privileges` | `ACCOUNT_PRIVILEGES` | yes | - | Comma-separated privileges |
-| `password_secret_name` | `ACCOUNT_PASSWORD_SECRET_NAME` | required for new account | - | Secret that stores or provides the account password |
-| `password_secret_key` | `ACCOUNT_PASSWORD_SECRET_KEY` | no | `password` | Secret data key |
-| `password_secret_prefix` | `ACCOUNT_PASSWORD_SECRET_PREFIX` | no | `mariadb-account-` | Required prefix for managed password Secrets |
 | `generate_password` | `GENERATE_PASSWORD` | no | `true` | Generate and write password Secret |
 | `dry_run` | `DRY_RUN` | no | `true` | Return redacted SQL plan only |
 | `confirm` | `CONFIRM` | no | `false` | Required for real execution |
@@ -159,10 +161,13 @@ LIB_DIR="$PWD/aqsh-tasks/lib" \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \
-  --password-secret-name mariadb-account-app-user-password \
   --dry-run true \
   --json | jq .
 ```
+
+The password Secret name is derived automatically (here:
+`mariadb-account-app-user`); operators can still override it with
+`--password-secret-name` if needed.
 
 Real execution:
 
@@ -174,7 +179,6 @@ LIB_DIR="$PWD/aqsh-tasks/lib" \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \
-  --password-secret-name mariadb-account-app-user-password \
   --dry-run false \
   --confirm true \
   --json | jq .

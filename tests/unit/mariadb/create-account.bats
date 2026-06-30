@@ -336,23 +336,20 @@ assert_json() {
   ! printf '%s' "$output" | grep -q 'root-pass'
 }
 
-@test "new account without password Secret name is blocked" {
+@test "password Secret name is derived by convention when not provided" {
   run "${SCRIPT}" \
     --context kind-cluster-dbs \
     --namespace mariadb-2 \
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --dry-run false \
-    --confirm true \
+    --dry-run true \
     --json
 
   [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "BLOCKED" ]
-  [ "$reason_code" = "PASSWORD_SECRET_REQUIRED" ]
+  # underscores in the username are normalised into a valid Secret name
+  [ "$(printf '%s' "$output" | jq -r '.password_secret.name')" = "mariadb-account-app-user" ]
+  [ "$(printf '%s' "$output" | jq -r '.password_secret.key')" = "password" ]
 }
 
 @test "secret-provided password path blocks when Secret is unreadable" {

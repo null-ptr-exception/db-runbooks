@@ -350,22 +350,12 @@ tasks:
         required: false
         type: string
         default: physicalbackup-blue
-      # S3 backup location — resolved internally from deploy-time config + the
-      # per-namespace convention (db-backups, mariadb/<namespace>, MINIO_ENDPOINT)
-      # shared with restore. Not required from the caller; kept as optional
-      # inputs only for the internal blue→green transport and advanced overrides.
-      - name: backup_bucket
-        env: BACKUP_BUCKET
-        required: false
-        type: string
-      - name: backup_prefix
-        env: BACKUP_PREFIX
-        required: false
-        type: string
-      - name: backup_endpoint
-        env: BACKUP_ENDPOINT
-        required: false
-        type: string
+      # S3 backup location (bucket / prefix / endpoint) is NOT a task input: it is
+      # resolved internally from deploy-time config + the per-namespace convention
+      # (db-backups, mariadb/<namespace>, MINIO_ENDPOINT), the same one restore
+      # reads. Blue writes with its own config; green re-resolves with its own, so
+      # each cluster uses its own MinIO endpoint. BACKUP_BUCKET / BACKUP_PREFIX /
+      # BACKUP_ENDPOINT stay env-readable as advanced overrides only.
       - name: backup_region
         env: BACKUP_REGION
         required: false

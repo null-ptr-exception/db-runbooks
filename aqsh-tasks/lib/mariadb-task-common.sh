@@ -35,11 +35,20 @@ source "${LIB_DIR}/k8s.sh"
 MDBT_CONFIG_FILE="${MDBT_CONFIG_FILE:-/etc/aqsh/config/mariadb.env}"
 
 # mdbt_load_config
-# Source the deploy-time MariaDB config if present (no-op when absent, e.g. unit
-# tests), so MINIO_* settings become available to the resolvers below.
+# Load the deploy-time MariaDB config if present (no-op when absent, e.g. unit
+# tests) so MINIO_* settings become available to the resolvers below. Values are
+# applied as DEFAULTS: a variable already set in the environment (a caller
+# override) is kept, never clobbered by the file. The file is a simple KEY=value
+# env file (comments / blank lines ignored).
 mdbt_load_config() {
-  # shellcheck disable=SC1090
-  [[ -f "$MDBT_CONFIG_FILE" ]] && source "$MDBT_CONFIG_FILE"
+  [[ -f "$MDBT_CONFIG_FILE" ]] || return 0
+  local _key _val
+  while IFS='=' read -r _key _val; do
+    [[ "$_key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue   # skip comments / blanks
+    [[ -n "${!_key:-}" ]] && continue                       # keep a pre-set override
+    printf -v "$_key" '%s' "$_val"
+    export "${_key?}"
+  done < "$MDBT_CONFIG_FILE"
   return 0
 }
 
@@ -138,11 +147,11 @@ mdbt_validate_s3_prefix() {
 
 mdbt_validate_endpoint() {
   local name="$1" value="$2" op="$3"
-  # Accept a bare host:port (operator-style) or a full URL with scheme/path
-  # (mc-style, as carried in MINIO_ENDPOINT), e.g. minio.svc:9000 or
-  # http://minio.kind-b.test:30080.
-  if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://)?[A-Za-z0-9._:-]+(/[A-Za-z0-9._/-]*)?$ ]]; then
-    mdbt_fail "$op" "${name} must be a host:port or URL endpoint" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  # Accept either a scheme URL (mc-style, as carried in MINIO_ENDPOINT) e.g.
+  # http://minio.kind-b.test:30080, or a bare host:port (operator-style) e.g.
+  # minio.svc:9000. A bare host with no port (and no scheme) is rejected.
+  if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9._-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?|[A-Za-z0-9._-]+:[0-9]+)$ ]]; then
+    mdbt_fail "$op" "${name} must be a host:port or scheme URL endpoint" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
   fi
 }
 

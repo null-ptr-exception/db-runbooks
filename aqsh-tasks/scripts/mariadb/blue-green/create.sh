@@ -108,6 +108,15 @@ bg_validate_image "green_image" "$GREEN_IMAGE" "$OP"
 [[ -n "$TARGET_IMAGE" ]] && bg_validate_image "target_image" "$TARGET_IMAGE" "$OP"
 bg_validate_url "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 
+# The backup location is resolved per-namespace and Green re-resolves it from its
+# own namespace, so a cross-namespace Green would look under a different prefix
+# than the one Blue wrote and find no backup. Reject it up front rather than fail
+# obscurely at bootstrap time.
+if [[ "$GREEN_NAMESPACE" != "$BG_NAMESPACE" ]]; then
+  bg_fail "$OP" "green_namespace ('${GREEN_NAMESPACE}') must match the source namespace ('${BG_NAMESPACE}'): the backup location is resolved per-namespace, so a cross-namespace green cannot find blue's backup" \
+    "$(jq -n --arg s "$BG_NAMESPACE" --arg g "$GREEN_NAMESPACE" '{source_namespace: $s, green_namespace: $g}')" 2
+fi
+
 # Step 1: physical backup of Blue (local cluster). Sets BG_BACKUP_DATA.
 bg_create_physical_backup "$OP"
 backup="$BG_BACKUP_DATA"

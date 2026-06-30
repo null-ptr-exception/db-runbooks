@@ -32,9 +32,11 @@ PEER_AQSH_URL="${PEER_AQSH_URL:-}"
 PEER_TOKEN="${PEER_TOKEN:-}"
 
 BACKUP_NAME="${BACKUP_NAME:-physicalbackup-blue}"
-BACKUP_BUCKET="${BACKUP_BUCKET:-}"
-BACKUP_PREFIX="${BACKUP_PREFIX:-}"
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-}"
+# S3 backup location (bucket / prefix / endpoint) is resolved from deploy-time
+# config + the per-namespace convention shared with restore — not passed by the
+# caller — so a blue-green backup is restore-discoverable by namespace alone.
+mdbt_load_config
+mdbt_resolve_backup_location "$BG_NAMESPACE"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
 BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
@@ -94,9 +96,6 @@ bg_required "green_name" "$GREEN_NAME" "$OP"
 bg_required "green_image" "$GREEN_IMAGE" "$OP"
 bg_required "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 bg_required "peer_token" "$PEER_TOKEN" "$OP"
-bg_required "backup_bucket" "$BACKUP_BUCKET" "$OP"
-bg_required "backup_prefix" "$BACKUP_PREFIX" "$OP"
-bg_required "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 
 BG_MDB="$BLUE_NAME"
 bg_init_target
@@ -109,6 +108,15 @@ bg_validate_image "green_image" "$GREEN_IMAGE" "$OP"
 [[ -n "$TARGET_IMAGE" ]] && bg_validate_image "target_image" "$TARGET_IMAGE" "$OP"
 bg_validate_url "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 
+# The backup location is resolved per-namespace and Green re-resolves it from its
+# own namespace, so a cross-namespace Green would look under a different prefix
+# than the one Blue wrote and find no backup. Reject it up front rather than fail
+# obscurely at bootstrap time.
+if [[ "$GREEN_NAMESPACE" != "$BG_NAMESPACE" ]]; then
+  bg_fail "$OP" "green_namespace ('${GREEN_NAMESPACE}') must match the source namespace ('${BG_NAMESPACE}'): the backup location is resolved per-namespace, so a cross-namespace green cannot find blue's backup" \
+    "$(jq -n --arg s "$BG_NAMESPACE" --arg g "$GREEN_NAMESPACE" '{source_namespace: $s, green_namespace: $g}')" 2
+fi
+
 # Step 1: physical backup of Blue (local cluster). Sets BG_BACKUP_DATA.
 bg_create_physical_backup "$OP"
 backup="$BG_BACKUP_DATA"
@@ -119,7 +127,6 @@ bootstrap_payload="$(jq -n \
   --arg image "$GREEN_IMAGE" \
   --arg rootSecret "$ROOT_SECRET_NAME" --arg rootKey "$ROOT_SECRET_KEY" \
   --arg storage "$STORAGE_SIZE" --arg replicas "$REPLICAS" \
-  --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" \
   --arg region "$BACKUP_REGION" --arg accessSecret "$BACKUP_ACCESS_SECRET" \
   --arg accessKey "$BACKUP_ACCESS_KEY" --arg secretKey "$BACKUP_SECRET_KEY" \
   --arg gtid "$GTID_DOMAIN_ID" --arg serverIdx "$SERVER_ID_START_INDEX" \
@@ -128,7 +135,6 @@ bootstrap_payload="$(jq -n \
     namespace: $ns, green_name: $mdb, blue_name: $blue, green_image: $image,
     root_secret_name: $rootSecret, root_secret_key: $rootKey,
     storage_size: $storage, replicas: $replicas,
-    backup_bucket: $bucket, backup_prefix: $prefix, backup_endpoint: $endpoint,
     backup_region: $region, backup_access_secret: $accessSecret,
     backup_access_key: $accessKey, backup_secret_key: $secretKey,
     gtid_domain_id: $gtid, server_id_start_index: $serverIdx,
@@ -136,6 +142,12 @@ bootstrap_payload="$(jq -n \
     internal_step: "bootstrap",
     wait_ready: "true", wait_timeout: $timeout, confirm: "true"
   } | with_entries(select(.value != ""))')"
+  # The backup bucket/prefix/endpoint are NOT forwarded: green re-resolves them
+  # from its own deploy-time config + the per-namespace convention, so green uses
+  # its own (in-cluster) MinIO endpoint rather than blue's cross-cluster one. This
+  # relies on green keeping the namespace identity (green_namespace defaults to
+  # namespace) so green's resolved prefix (mariadb/<namespace>) matches where blue
+  # wrote the backup — the standard same-namespace, cross-cluster blue-green case.
 
 bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
   "$bootstrap_payload" "$PEER_TIMEOUT")" \
@@ -149,12 +161,10 @@ if [[ -n "$TARGET_IMAGE" && "$TARGET_IMAGE" != "$GREEN_IMAGE" ]]; then
     "$(jq -n \
       --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
       --arg greenImage "$GREEN_IMAGE" --arg image "$TARGET_IMAGE" \
-      --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" \
       --arg timeout "$WAIT_TIMEOUT" \
       '{
         namespace: $ns, green_name: $mdb, blue_name: $blue, green_image: $greenImage,
-        target_image: $image, backup_bucket: $bucket, backup_prefix: $prefix,
-        backup_endpoint: $endpoint, internal_step: "upgrade",
+        target_image: $image, internal_step: "upgrade",
         wait_ready: "true", wait_timeout: $timeout, confirm: "true"
       }')" \
     "$PEER_TIMEOUT")" \

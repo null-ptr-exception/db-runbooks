@@ -83,17 +83,21 @@ kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fcreate' \
     \"target_image\": \"mariadb:10.11\",
     \"peer_aqsh_url\": \"${AQSH_B_URL}\",
     \"peer_token\": \"${TOKEN}\",
-    \"backup_bucket\": \"db-backups\",
-    \"backup_prefix\": \"blue-green-demo\",
-    \"backup_endpoint\": \"http://minio.kind-b.test:30080\",
-    \"backup_region\": \"us-east-1\",
     \"confirm\": \"true\"
   }'"
 ```
 
-The `backup_*` fields describe the shared S3/MinIO location; the orchestrator
-forwards them (including `backup_region`, default `us-east-1`) to Green's
-bootstrap so both sides use the same backup descriptor.
+The S3/MinIO backup location is resolved internally by the shared
+`mdbt_resolve_backup_location` helper (bucket `db-backups`, prefix
+`mariadb/<namespace>`, endpoint from `MINIO_ENDPOINT` in
+`/etc/aqsh/config/mariadb.env`) — the same convention `restore` reads, so a
+blue-green backup is restore-discoverable by namespace alone. `backup_bucket` /
+`backup_prefix` / `backup_endpoint` are **not** task inputs: Blue writes with its
+own config, and Green **re-resolves** the location with its own config (so each
+cluster uses its own MinIO endpoint rather than the other's). This relies on
+Green keeping the namespace identity (`green_namespace` defaults to `namespace`),
+which is the standard same-namespace, cross-cluster blue-green case. The three
+values stay env-readable as advanced overrides only.
 
 `green_image` is the image Green is bootstrapped with (match Blue's version so
 restore is compatible). `target_image`, if set and different, triggers an

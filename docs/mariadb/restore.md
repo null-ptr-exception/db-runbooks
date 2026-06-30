@@ -77,14 +77,19 @@ resolved from the namespace — not a task input**:
   reuses the platform-managed root Secret (named `mariadb`, key `password`) —
   the same convention every managed MariaDB in a namespace follows — returned
   as `credentialsRef` in the result.
-- **Backup location** (`s3://db-backups/mariadb/<namespace>`, MinIO endpoint,
-  region) is resolved from platform convention — the caller never specifies
+- **Backup location** is resolved by the shared `mdbt_resolve_backup_location`
+  helper — the same one the physical-backup **write** side (blue-green) uses — so
+  a restore finds a namespace's backups by namespace alone and the two sides can
+  never drift. The bucket (`db-backups`) and endpoint come from deploy-time
+  config (`MINIO_BUCKET` / `MINIO_ENDPOINT` in `/etc/aqsh/config/mariadb.env`);
+  the prefix is the `mariadb/<namespace>` convention. The caller never specifies
   where backups live.
 
 > **Operator overrides.** `RESTORE_SOURCE`, `RESTORE_TARGET`, `RESTORE_IMAGE`,
-> and `STORAGE_SIZE` stay readable as environment overrides for operators /
-> automation, but they are deliberately **not** task inputs — a caller restores
-> by namespace, not by spelling out the spec.
+> `STORAGE_SIZE`, and `BACKUP_BUCKET` / `BACKUP_PREFIX` / `BACKUP_ENDPOINT` stay
+> readable as environment overrides for operators / automation, but they are
+> deliberately **not** task inputs — a caller restores by namespace, not by
+> spelling out the spec.
 
 ## Examples
 
@@ -124,7 +129,7 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
   "namespace": "mariadb-bg",
   "target": "mariadb-bg-restore-20260614031500",
   "image": "mariadb:11.4",
-  "backup": { "bucket": "db-backups", "prefix": "mariadb/mariadb-bg", "endpoint": "minio.db-ops.svc.cluster.local:9000", "contentType": "Physical" },
+  "backup": { "bucket": "db-backups", "prefix": "mariadb/mariadb-bg", "endpoint": "http://minio.minio.svc.cluster.local:9000", "contentType": "Physical" },
   "pointInTimeRecovery": { "enabled": false, "targetRecoveryTime": null },
   "connection": { "host": "mariadb-bg-restore-20260614031500-primary.mariadb-bg.svc.cluster.local", "port": 3306 },
   "credentialsRef": { "secretName": "mariadb", "secretKey": "password" },

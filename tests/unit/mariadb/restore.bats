@@ -155,6 +155,28 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(jq -r '.spec.bootstrapFrom | has("targetRecoveryTime")' "${CAPTURE}")" = "false" ]
 }
 
+@test "restore resolves the S3 endpoint and bucket from deploy-time config" {
+  cat > "${MOCK_DIR}/mariadb.env" <<EOF
+MINIO_ENDPOINT=http://minio.kind-b.test:30080
+EOF
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=0 \
+    MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
+  [ "$status" -eq 0 ]
+  # endpoint comes from config; bucket/prefix follow the shared convention.
+  [ "$(jq -r '.spec.bootstrapFrom.s3.endpoint' "${CAPTURE}")" = "http://minio.kind-b.test:30080" ]
+  [ "$(jq -r '.spec.bootstrapFrom.s3.bucket' "${CAPTURE}")" = "db-backups" ]
+  [ "$(jq -r '.spec.bootstrapFrom.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-bg" ]
+}
+
+@test "restore accepts a URL-form S3 endpoint (scheme allowed)" {
+  run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    BACKUP_ENDPOINT="http://minio.kind-b.test:30080"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" = "http://minio.kind-b.test:30080" ]
+}
+
 @test "restore with target_time injects point-in-time recovery" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi TARGET_TIME="2026-06-14T03:21:00Z" MOCK_TARGET_EXISTS=0

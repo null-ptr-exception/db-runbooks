@@ -25,11 +25,14 @@ set -euo pipefail
 # NOTE: version + storage are derived from the namespace's still-present
 # instance. Reconstructing them when the namespace's instance is *entirely* gone
 # (true full-loss DR) needs a durable, in-cluster spec source (backup metadata /
-# per-namespace config) that does not exist yet — tracked together with the
-# physical-backup write side, which also does not yet write to
-# s3://db-backups/mariadb/<namespace>. The source must be a mariadb-operator
-# PhysicalBackup / mariabackup layout; the logical `backup` task is not a valid
-# source.
+# per-namespace config) that does not exist yet. The source must be a
+# mariadb-operator PhysicalBackup / mariabackup layout; the logical `backup`
+# task is not a valid source.
+#
+# The S3 backup location (bucket / prefix / endpoint) is resolved by the shared
+# mdbt_resolve_backup_location helper from the same deploy-time config + naming
+# convention the physical-backup *write* side uses, so a restore finds a
+# namespace's backups by namespace alone — read and write can never drift.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -42,6 +45,9 @@ fi
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"              # for mariadb_resolve_name (source auto-detect)
+
+# Deploy-time S3/MinIO settings (MINIO_ENDPOINT, MINIO_BUCKET, ...).
+mdbt_load_config
 
 OP="restore"
 
@@ -67,9 +73,10 @@ TARGET="${RESTORE_TARGET:-}"
 SOURCE_NAME="${RESTORE_SOURCE:-}"
 IMAGE="${RESTORE_IMAGE:-}"
 STORAGE_SIZE="${STORAGE_SIZE:-}"
-BACKUP_BUCKET="db-backups"
-BACKUP_PREFIX="mariadb/${NAMESPACE}"   # per-namespace backup location convention
-BACKUP_ENDPOINT="minio.db-ops.svc.cluster.local:9000"
+# Backup location (bucket / prefix / endpoint) — resolved from deploy-time config
+# + the per-namespace naming convention, identically to the write side. Sets
+# BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT (each env-overridable).
+mdbt_resolve_backup_location "$NAMESPACE"
 ROOT_SECRET_NAME="mariadb"
 ROOT_SECRET_KEY="password"
 BACKUP_REGION="us-east-1"

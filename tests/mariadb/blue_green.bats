@@ -117,10 +117,7 @@ _task_result_data() {
       green_name: "mariadb-green",
       green_image: "mariadb:10.6",
       peer_aqsh_url: $peer_url,
-      peer_token: $peer_token,
-      backup_bucket: "db-backups",
-      backup_prefix: "blue-green-test",
-      backup_endpoint: "http://minio.kind-b.test:30080"
+      peer_token: $peer_token
     }')
 
   http_post "${AQSH_A_URL}/tasks/blue-green%2Fcreate" "$payload"

@@ -115,18 +115,23 @@ MariaDB tasks such as `status` and `sanity-check`.)
 
 ## API Example
 
+Run from the `test-client` pod (`*.kind-a.test` only resolves inside the
+clusters' own CoreDNS):
+
 ```bash
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=10m)
-MARIADB_AQSH_URL="http://<cluster-dbs-ip>:30081"
+TOKEN=$(kubectl --context kind-cluster-b -n db-ops create token test-client --duration=10m)
+AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
 
 # 1. Dry-run: see the operator-controlled restart plan (default; changes nothing)
-curl -s -X POST "$MARIADB_AQSH_URL/tasks/restart" \
+kubectl --context kind-cluster-b -n db-ops exec deploy/test-client -- \
+  curl -s -X POST "$AQSH_URL/tasks/restart" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"namespace": "mariadb-1"}'
 
 # 2. Execute: patch the MariaDB CR annotation and let mariadb-operator restart it
-curl -s -X POST "$MARIADB_AQSH_URL/tasks/restart" \
+kubectl --context kind-cluster-b -n db-ops exec deploy/test-client -- \
+  curl -s -X POST "$AQSH_URL/tasks/restart" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"namespace": "mariadb-1", "dry_run": "false", "confirm": "true"}'

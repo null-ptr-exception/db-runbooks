@@ -6,6 +6,14 @@ This document provides complete architecture, state machine, and API reference f
 
 **Key Constraint:** MongoDB Community Edition lacks native `EXPIRES` mechanism (unlike MariaDB). Account expiry must be tracked via application state and external reconciliation job.
 
+**Transport note:** every task below is a normal aqsh task — submitted with
+`POST /tasks/<name>` (params as top-level JSON fields, not a `{"task",
+"params"}` envelope) against `http://aqsh-mongodb.kind-a.test:30080` from the
+`test-client` pod, returning `{"id", "status":"pending"}`; the bodies shown
+in "API Reference" below are the eventual *task result* (after polling
+`GET /executions/<id>`), not the literal submit response. See the README
+"Task API Example" for the exact submit/poll call shape.
+
 ---
 
 ## Account Lifecycle State Machine
@@ -418,11 +426,15 @@ curl -X POST http://aqsh-mongodb:4180/api/task \
 
 ### READ Account Status
 
+There is no dedicated read-account task; query the policy collection directly:
+
 ```bash
-curl -X GET http://aqsh-mongodb:4180/api/accounts/admin/app_user
+kubectl --context kind-cluster-a -n mongo-1 exec mongodb-0 -- mongosh --quiet \
+  "mongodb://<user>:<pass>@localhost:27017/admin?authSource=admin" \
+  --eval 'db.run_account_policies.findOne({username:"app_user", auth_db:"admin"})'
 ```
 
-**Response:**
+**Result shape:**
 ```json
 {
   "username": "app_user",
@@ -440,16 +452,23 @@ curl -X GET http://aqsh-mongodb:4180/api/accounts/admin/app_user
 
 ## Reconciliation Job Operation
 
-### Manual Trigger via CronJob
+### Manual Trigger
+
+`reconcile-expiry` is a regular aqsh task, not a separate CronJob — trigger
+and follow it the same way as any other task (see the README "Task API
+Example"):
 
 ```bash
-# Manual trigger:
-kubectl --context kind-cluster-dbs -n mongo-1 create job \
-  --from=cronjob/mongo-account-reconciler \
-  mongo-account-reconciler-manual-$(date +%s)
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=10m)
+RESPONSE=$(kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
+  curl -s -X POST "http://aqsh-mongodb.kind-a.test:30080/tasks/reconcile-expiry" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"namespace": "mongo-1"}')
+TASK_ID=$(echo "$RESPONSE" | jq -r '.id')
 
-# Check logs:
-kubectl --context kind-cluster-dbs -n mongo-1 logs job/<job-name>
+kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
+  curl -s "http://aqsh-mongodb.kind-a.test:30080/executions/$TASK_ID" \
+  -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
 ### Reconciliation Response

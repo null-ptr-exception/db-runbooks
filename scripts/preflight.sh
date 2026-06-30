@@ -120,6 +120,13 @@ fi
 mise install "${RUNTIME_MISE_TOOLS[@]}"
 mise ls --current "${RUNTIME_MISE_TOOLS[@]}"
 
+# helmfile-infra.yaml relies on `helm diff` to compute upgrade plans.
+if ! helm plugin list 2>/dev/null | grep -q '^diff'; then
+  _fix "Installing helm-diff plugin..."
+  helm plugin install https://github.com/databus23/helm-diff
+fi
+_ok "helm-diff $(helm plugin list 2>/dev/null | awk '$1=="diff"{print $2}')"
+
 # 6. bats helpers (bats-support, bats-assert, bats-mock)
 echo ""
 echo "=== bats helpers ==="

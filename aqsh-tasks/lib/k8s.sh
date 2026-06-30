@@ -1042,8 +1042,8 @@ check_k8s_layer() {
       [[ -z "$node_j" ]] && continue
 
       local ready_status
-      ready_status=$(echo "$node_j" | grep -A2 '"type":"Ready"' | \
-        grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+      ready_status=$(echo "$node_j" | \
+        jq -r '.status.conditions[] | select(.type == "Ready") | .status' 2>/dev/null) || ready_status=""
       if [[ "$ready_status" != "True" ]]; then
         _sc_fail "Node '$n': Not Ready (status=${ready_status:-unknown})"
         node_not_ready=$(( node_not_ready + 1 ))
@@ -1053,8 +1053,8 @@ check_k8s_layer() {
       local pt
       for pt in "${pressure_types[@]}"; do
         local pt_status
-        pt_status=$(echo "$node_j" | grep -A2 "\"type\":\"${pt}\"" | \
-          grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+        pt_status=$(echo "$node_j" | \
+          jq -r ".status.conditions[] | select(.type == \"${pt}\") | .status" 2>/dev/null) || pt_status=""
         if [[ "$pt_status" == "True" ]]; then
           _sc_warn "Node '$n': $pt is active — resource pressure on node"
           node_pressure=$(( node_pressure + 1 ))
@@ -1117,10 +1117,10 @@ check_k8s_layer() {
       pod_detail=$(_kubectl get pod "$p" -o json 2>/dev/null) || pod_detail=""
       if [[ -n "$pod_detail" ]]; then
         local containers_ready scheduled
-        containers_ready=$(echo "$pod_detail" | grep -A2 '"type":"ContainersReady"' | \
-          grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-        scheduled=$(echo "$pod_detail" | grep -A2 '"type":"PodScheduled"' | \
-          grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
+        containers_ready=$(echo "$pod_detail" | \
+          jq -r '.status.conditions[] | select(.type == "ContainersReady") | .status' 2>/dev/null) || containers_ready=""
+        scheduled=$(echo "$pod_detail" | \
+          jq -r '.status.conditions[] | select(.type == "PodScheduled") | .status' 2>/dev/null) || scheduled=""
         if [[ "$scheduled" != "True" ]]; then
           _sc_fail "Pod '$p': not scheduled (PodScheduled=${scheduled:-unknown})" \
             "Check node resources, taints, or PVC binding"

@@ -73,6 +73,7 @@ releases:
           config:
             mongodb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              OPLOG_CRIT_DAYS=0
           authProxy:
             tokenReviewURL: "http://fedauth.kind-a.test:30080"
         mongodbRbac:

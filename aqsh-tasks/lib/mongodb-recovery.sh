@@ -26,38 +26,63 @@
 [[ -n "${_MONGODB_RECOVERY_LIB_LOADED:-}" ]] && return 0
 _MONGODB_RECOVERY_LIB_LOADED=1
 
-# Data paths vary by MongoDB deployment type; override via API params or env:
-#   Bitnami helm chart (default): /bitnami/mongodb/data/db  /bitnami/mongodb
-#   Standard mongo:N image:       /data/db                  /data
-_RECOVERY_DATA_PATH="${RECOVERY_DATA_PATH:-/bitnami/mongodb/data/db}"
-_RECOVERY_MOUNT_PATH="${RECOVERY_MOUNT_PATH:-/bitnami/mongodb}"
+# Data paths vary by MongoDB deployment type; resolved 3 tiers deep. Not a
+# task input (see CLAUDE.md "Configuration Layers" — recovery/* deliberately
+# doesn't expose deployment-naming-convention fields at the API layer; only
+# internal config remains as an explicit override):
+#   1. RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT (deploy-time internal
+#      config — /etc/aqsh/config/mongodb.env)
+#   2. Auto-detect (queries the live mongod for its real dbPath — see
+#      _recovery_detect_data_path below). Cannot run at module-load time (needs
+#      credentials + a target pod), so it only widens tier 1 here; callers
+#      apply it explicitly via recovery_resolve_data_paths after loading creds.
+#   3. Library fallback — Bitnami helm chart paths
+# Sourced here (not just by callers) because this assignment runs at module-load
+# time, before a calling script reaches its own internal-config sourcing line.
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+_RECOVERY_DATA_PATH_EXPLICIT="${RECOVERY_DATA_PATH_DEFAULT:-}"
+_RECOVERY_MOUNT_PATH_EXPLICIT="${RECOVERY_MOUNT_PATH_DEFAULT:-}"
+_RECOVERY_DATA_PATH="${_RECOVERY_DATA_PATH_EXPLICIT:-/bitnami/mongodb/data/db}"
+_RECOVERY_MOUNT_PATH="${_RECOVERY_MOUNT_PATH_EXPLICIT:-/bitnami/mongodb}"
 readonly _RECOVERY_INIT_CONTAINER_NAME="data-recovery"
 readonly _RECOVERY_DATA_SIZE_LIMIT_MB=102400   # 100 GB
 
 # ---------------------------------------------------------------------------
-# _mongo_load_credentials <namespace> <secret> <user_key> <pass_key>
-# Read MongoDB credentials from a Kubernetes Secret and export them as
-# _MONGO_USER / _MONGO_PASS in the calling script's scope.
+# _mongo_load_credentials <namespace> <secret> <user_key> <pass_key> [direct_user]
+# Read MongoDB credentials and export them as _MONGO_USER / _MONGO_PASS.
+#
+# direct_user (optional): if non-empty, use it as the username directly and
+# skip the user_key lookup — only the password is read from the secret.
+# This handles secrets that store only the password (no username key).
+#
 # Writes a JSON error to $AQSH_RESULT_FILE and calls exit 1 on any failure.
 # ---------------------------------------------------------------------------
 _mongo_load_credentials() {
   local namespace="$1" secret="$2" user_key="$3" pass_key="$4"
-  _MONGO_USER=$(kubectl -n "$namespace" get secret "$secret" \
-    -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
-    jq -n --arg ns "$namespace" --arg s "$secret" \
-      '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
-      > "$AQSH_RESULT_FILE"; exit 1
-  }
-  _MONGO_PASS=$(kubectl -n "$namespace" get secret "$secret" \
+  local direct_user="${5:-}"
+  direct_user="${direct_user//[[:space:]]/}"  # whitespace-only user must not bypass validation
+
+  if [[ -n "$direct_user" ]]; then
+    _MONGO_USER="$direct_user"
+  else
+    _MONGO_USER=$(_kubectl -n "$namespace" get secret "$secret" \
+      -o jsonpath="{.data.${user_key}}" 2>/dev/null | base64 -d) || {
+      jq -cn --arg ns "$namespace" --arg s "$secret" \
+        '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
+        > "$AQSH_RESULT_FILE"; exit 1
+    }
+  fi
+
+  _MONGO_PASS=$(_kubectl -n "$namespace" get secret "$secret" \
     -o jsonpath="{.data.${pass_key}}" 2>/dev/null | base64 -d) || {
-    jq -n --arg ns "$namespace" --arg s "$secret" \
+    jq -cn --arg ns "$namespace" --arg s "$secret" \
       '{"status":"error","message":"Cannot read credentials from secret","namespace":$ns,"secret":$s}' \
       > "$AQSH_RESULT_FILE"; exit 1
   }
   # A present-but-empty secret key decodes to "" with exit 0, so the traps above
   # do not fire — validate explicitly to avoid opaque downstream auth failures.
   if [[ -z "${_MONGO_USER}" || -z "${_MONGO_PASS}" ]]; then
-    jq -n --arg ns "$namespace" --arg s "$secret" --arg uk "$user_key" --arg pk "$pass_key" \
+    jq -cn --arg ns "$namespace" --arg s "$secret" --arg uk "$user_key" --arg pk "$pass_key" \
       '{"status":"error","message":"Credentials secret is missing required key(s) or values are empty","namespace":$ns,"secret":$s,"user_key":$uk,"pass_key":$pk}' \
       > "$AQSH_RESULT_FILE"; exit 1
   fi
@@ -112,12 +137,24 @@ _recovery_primary_host() {
   local sts_name="$1" user="$2" pass="$3"
   local pods_raw probe=""
   pods_raw=$(_recovery_list_pods "$sts_name") || return 1
+  # Prefer a Ready pod — a Running-but-not-Ready pod means mongod is sick
+  # and may fail to answer rs.status(), giving a wrong or empty result.
+  # Fall back to any Running pod only when no Ready pod exists.
   while IFS= read -r pod; do
     [[ -z "$pod" ]] && continue
-    local phase
-    phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$phase" == "Running" ]] && { probe="$pod"; break; }
+    local pod_ready
+    pod_ready=$(_kubectl get pod "$pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$pod_ready" == "True" ]] && { probe="$pod"; break; }
   done <<< "$pods_raw"
+  if [[ -z "$probe" ]]; then
+    while IFS= read -r pod; do
+      [[ -z "$pod" ]] && continue
+      local phase
+      phase=$(_kubectl get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
+      [[ "$phase" == "Running" ]] && { probe="$pod"; break; }
+    done <<< "$pods_raw"
+  fi
   [[ -z "$probe" ]] && return 1
   local host
   host=$(_recovery_mongosh_pod "$probe" "$user" "$pass" \
@@ -144,6 +181,701 @@ _recovery_mongosh_host() {
 }
 
 # ===========================================================================
+# Auto-detect functions
+#
+# Sit between "internal config" and "hardcoded literal" in the resolution
+# chain (CLAUDE.md "Configuration Layers"): sts_name/recovery_configmap/
+# credential secret-and-keys/data_path/mount_path are NOT task inputs — when
+# no /etc/aqsh/config/mongodb.env *_DEFAULT is set, these discover the real
+# naming convention from live cluster state instead of guessing a Bitnami-vs-
+# official-image profile. Every function fails soft (empty stdout, return 1)
+# when it can't find a confident signal — callers always fall through to the
+# next tier rather than risk a wrong guess succeeding silently.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# _recovery_get_sts_json <sts_name>
+# Fetches `kubectl get statefulset <sts_name> -o json`. Each call site (e.g.
+# detect_configmap, detect_credentials) is invoked via command substitution
+# by its caller, which forks a subshell — a same-process cache here would
+# only ever populate inside that subshell and vanish on return, never
+# reaching sibling calls. So this intentionally re-fetches every time rather
+# than carry a cache that can't actually work under that calling convention.
+# ---------------------------------------------------------------------------
+_recovery_get_sts_json() {
+  local sts_name="${1:?}"
+  _kubectl get statefulset "$sts_name" -o json 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_sts_name [target_pod]
+# With a target_pod: read its ownerReferences (authoritative — a pod's owning
+# StatefulSet is a Kubernetes-managed fact, not a convention to guess).
+# Without one (status/reset/fix-no-primary have no target_pod input): list
+# StatefulSets in the namespace; only resolve if exactly one exists, since
+# guessing among several would risk silently operating on the wrong one.
+# ---------------------------------------------------------------------------
+_recovery_detect_sts_name() {
+  local target_pod="${1:-}"
+  local name
+  if [[ -n "$target_pod" ]]; then
+    name=$(_kubectl get pod "$target_pod" \
+      -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null) || return 1
+    [[ -z "$name" ]] && return 1
+    printf '%s' "$name"
+    return 0
+  fi
+  local names
+  names=$(_kubectl get statefulsets -o jsonpath='{.items[*].metadata.name}' 2>/dev/null) || return 1
+  [[ -z "$names" ]] && return 1
+  [[ "$(wc -w <<< "$names")" -eq 1 ]] || return 1
+  printf '%s' "$names"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_configmap <sts_name>
+# The recovery ConfigMap's real name is already wired into the StatefulSet's
+# own pod template (setup-data-recovery.sh mounts it into the data-recovery
+# init container at /recovery-config) — read it back instead of assuming
+# "mongodb-recovery-config". Returns empty if the init container/volume
+# binding isn't there (G1 will report that clearly on its own).
+# ---------------------------------------------------------------------------
+_recovery_detect_configmap() {
+  local sts_name="${1:?}"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+  local cm_name
+  cm_name=$(printf '%s' "$sts_json" | jq -r --arg ic "$_RECOVERY_INIT_CONTAINER_NAME" '
+    (.spec.template.spec.initContainers[]? | select(.name==$ic)
+      | .volumeMounts[]? | select(.mountPath=="/recovery-config") | .name) as $volname
+    | (.spec.template.spec.volumes[]? | select(.name==$volname) | .configMap.name) // empty
+  ' 2>/dev/null | head -1) || return 1
+  [[ -z "$cm_name" ]] && return 1
+  printf '%s' "$cm_name"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_secret_ref_from_file <sts_json> <file_path>
+# Resolves a literal file path (from a *_FILE env var — see
+# _recovery_detect_credentials) back to the Secret object + key that backs
+# it: find the container's volumeMount whose mountPath prefixes file_path
+# (longest match wins, in case of nested mounts), then the volume of that
+# name, then its secret.secretName. Hardened/recent Bitnami images project
+# each credential as a file under a Secret-backed volume instead of
+# injecting it via secretKeyRef directly into env (avoids the password
+# showing up in `kubectl describe pod` / `/proc/<pid>/environ`) — the env
+# var only holds the path, e.g. MONGODB_ROOT_PASSWORD_FILE=/opt/bitnami/
+# mongodb/secrets/mongodb-root-password. Kubernetes projects each Secret
+# key as a same-named file directly under the mount (no subdirectories),
+# so the key is just the file's basename.
+# Prints "secret<US>key" on success.
+# ---------------------------------------------------------------------------
+_recovery_secret_ref_from_file() {
+  local sts_json="$1" file_path="${2:?}"
+  local secret_name
+  secret_name=$(printf '%s' "$sts_json" | jq -r --arg fp "$file_path" '
+    . as $root
+    | (($root.spec.template.spec.containers[0].volumeMounts // [])
+        | map(select(.mountPath as $mp | ($fp == $mp or ($fp | startswith($mp + "/")))))
+        | sort_by(.mountPath | length) | last) as $vm
+    | if $vm == null then empty else
+        ($vm.name) as $volname
+        | ($root.spec.template.spec.volumes[]? | select(.name==$volname) | .secret.secretName) // empty
+      end
+  ' 2>/dev/null) || return 1
+  [[ -z "$secret_name" ]] && return 1
+  local key="${file_path##*/}"
+  [[ -z "$key" ]] && return 1
+  printf '%s\x1f%s' "$secret_name" "$key"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_credentials <sts_name>
+# Root credentials are typically already wired into the mongod container's
+# own env for its bootstrap (official image: MONGO_INITDB_ROOT_USERNAME/
+# PASSWORD; Bitnami chart: MONGODB_ROOT_USER/PASSWORD) — read that binding
+# back rather than assuming "mongodb-credentials" / MONGO_ROOT_USER /
+# MONGO_ROOT_PASS. Username may be a literal env value instead of a secret
+# key (common when the username isn't treated as sensitive). If neither var
+# is wired via secretKeyRef, also checks the Bitnami file-mounted-secret
+# convention (a *_FILE-suffixed env var holding a literal path into a
+# Secret-backed volume — see _recovery_secret_ref_from_file) before giving up.
+#
+# On success, prints "secret<US>direct_user<US>user_key<US>pass_key" (US =
+# ASCII unit separator \x1f, NOT a tab — tab/space/newline are always
+# collapsed by bash's IFS word-splitting even when IFS is set to just one of
+# them, which silently drops empty fields like an unset direct_user) — this
+# is the shape _mongo_load_credentials expects (direct_user wins over
+# user_key when non-empty). Fails soft (empty + return 1) when the password
+# isn't sourced from a secretKeyRef or a *_FILE mount at all (e.g. mongod
+# started directly with credentials provisioned out-of-band — nothing live
+# to read), or when username/password resolve to two different secrets (an
+# unsupported split that would otherwise silently mix two conventions).
+# ---------------------------------------------------------------------------
+_recovery_detect_credentials() {
+  local sts_name="${1:?}"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+
+  local pass_secret pass_key
+  pass_secret=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_PASSWORD" or .name=="MONGODB_ROOT_PASSWORD")
+      | .valueFrom.secretKeyRef.name // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  pass_key=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_PASSWORD" or .name=="MONGODB_ROOT_PASSWORD")
+      | .valueFrom.secretKeyRef.key // empty][0] // empty
+  ' 2>/dev/null) || return 1
+
+  if [[ -z "$pass_secret" || -z "$pass_key" ]]; then
+    local pass_file_path pass_file_ref
+    pass_file_path=$(printf '%s' "$sts_json" | jq -r '
+      [.spec.template.spec.containers[0].env[]?
+        | select(.name=="MONGO_INITDB_ROOT_PASSWORD_FILE" or .name=="MONGODB_ROOT_PASSWORD_FILE")
+        | .value // empty][0] // empty
+    ' 2>/dev/null) || return 1
+    if [[ -n "$pass_file_path" ]]; then
+      pass_file_ref=$(_recovery_secret_ref_from_file "$sts_json" "$pass_file_path") || return 1
+      IFS=$'\x1f' read -r pass_secret pass_key <<< "$pass_file_ref"
+    fi
+  fi
+  [[ -z "$pass_secret" || -z "$pass_key" ]] && return 1
+
+  local user_secret user_key direct_user
+  user_secret=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | .valueFrom.secretKeyRef.name // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  user_key=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | .valueFrom.secretKeyRef.key // empty][0] // empty
+  ' 2>/dev/null) || return 1
+  direct_user=$(printf '%s' "$sts_json" | jq -r '
+    [.spec.template.spec.containers[0].env[]?
+      | select(.name=="MONGO_INITDB_ROOT_USERNAME" or .name=="MONGODB_ROOT_USER")
+      | select(.valueFrom.secretKeyRef == null) | .value // empty][0] // empty
+  ' 2>/dev/null) || return 1
+
+  if [[ -z "$user_secret$user_key$direct_user" ]]; then
+    local user_file_path user_file_ref
+    user_file_path=$(printf '%s' "$sts_json" | jq -r '
+      [.spec.template.spec.containers[0].env[]?
+        | select(.name=="MONGO_INITDB_ROOT_USERNAME_FILE" or .name=="MONGODB_ROOT_USER_FILE")
+        | .value // empty][0] // empty
+    ' 2>/dev/null) || return 1
+    if [[ -n "$user_file_path" ]]; then
+      user_file_ref=$(_recovery_secret_ref_from_file "$sts_json" "$user_file_path") || return 1
+      IFS=$'\x1f' read -r user_secret user_key <<< "$user_file_ref"
+    fi
+  fi
+  [[ -z "$user_secret$user_key$direct_user" ]] && return 1   # no username signal at all
+
+  # Username/password sourced from two different secrets is an unsupported,
+  # hand-rolled split — fall through rather than mix conventions.
+  [[ -n "$user_secret" && "$user_secret" != "$pass_secret" ]] && return 1
+
+  printf '%s\x1f%s\x1f%s\x1f%s' "$pass_secret" "$direct_user" "$user_key" "$pass_key"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_data_path <target_pod> <user> <pass>
+# Ask mongod itself where its dbPath is (db.serverCmdLineOpts().parsed.
+# storage.dbPath) instead of guessing a Bitnami-vs-official-image profile.
+# Correct for any image/layout since it's the live config mongod is actually
+# running with, not a convention. Requires credentials to already be
+# resolved, so this cannot run at module-load time — see
+# recovery_resolve_data_paths.
+#
+# serverCmdLineOpts().parsed only reflects an EXPLICIT --dbpath flag or
+# storage.dbPath config-file setting — it's empty when a deployment relies
+# on mongod's own compiled-in default instead of configuring one explicitly
+# (a real, common case, not just a hypothetical: any StatefulSet whose PVC
+# happens to be mounted at the default path needs no --dbpath flag at all).
+# Falling back to "/data/db" here is mongod's own well-documented, stable
+# default across all versions — not a Bitnami/official-image guess.
+# ---------------------------------------------------------------------------
+_recovery_detect_data_path() {
+  local target_pod="${1:?}" user="${2:?}" pass="${3:?}"
+  local out
+  # _recovery_mongosh_pod merges kubectl's own stderr into its stdout
+  # (2>&1), so a kubectl-layer failure (pod not found, container not ready,
+  # connection refused) before mongosh ever runs would otherwise show up as
+  # ordinary non-empty output here — indistinguishable from a real path.
+  # The DBPATH: sentinel is only ever printed by the JS's own print(), so
+  # any kubectl/mongosh error text (which won't carry the prefix) is
+  # correctly rejected as "no confident signal" rather than accepted as a
+  # detected path.
+  out=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
+    "try{var o=db.serverCmdLineOpts().parsed;var p=(o&&o.storage&&o.storage.dbPath)?o.storage.dbPath:'/data/db';print('DBPATH:'+p);}catch(e){print('');}" \
+    2>/dev/null | tail -1 | tr -d '\r') || return 1
+  [[ "$out" == DBPATH:* ]] || return 1
+  printf '%s' "${out#DBPATH:}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_data_mount <sts_json> <data_path>
+# Finds the main container's EXISTING volumeMount whose mountPath is a
+# prefix of the live-detected data_path (longest match wins, same technique
+# as _recovery_secret_ref_from_file) — the exact volume name + mount path an
+# auto-injected init container must reuse to see the same data directory the
+# main container already does. Reading this from the live spec replaces
+# guessing a Bitnami ("datadir","/bitnami/mongodb")-vs-official
+# ("data","/data/db") profile: it is correct for any convention because it's
+# the real binding already in place, not an assumption about which image
+# this is. Used only by _recovery_auto_patch_init_container.
+# Prints "volume_name<US>mount_path" on success.
+# ---------------------------------------------------------------------------
+_recovery_detect_data_mount() {
+  local sts_json="$1" data_path="${2:?}"
+  local row
+  row=$(printf '%s' "$sts_json" | jq -r --arg dp "$data_path" '
+    ((.spec.template.spec.containers[0].volumeMounts // [])
+      | map(select(.mountPath as $mp | ($dp == $mp or ($dp | startswith($mp + "/")))))
+      | sort_by(.mountPath | length) | last) as $vm
+    | if $vm == null then empty else ($vm.name + "\u001f" + $vm.mountPath) end
+  ' 2>/dev/null) || return 1
+  [[ -z "$row" ]] && return 1
+  printf '%s' "$row"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_run_as_user <sts_json>
+# Reuses the main container's own runAsUser (container-level, falling back
+# to pod-level securityContext) so an auto-injected init container's wipe
+# step has the same filesystem permissions the running mongod already has —
+# correct for any image, not just the two conventions this repo has
+# fixtures for. Only when neither is set does it fall back to a profile
+# guess from the image string (Bitnami images run as 1001 by convention);
+# this is the one place an actual Bitnami-vs-official guess remains,
+# because an image with no runAsUser set at all gives no live signal to
+# read instead. Always returns a value (never fails).
+# ---------------------------------------------------------------------------
+_recovery_detect_run_as_user() {
+  local sts_json="$1"
+  local uid
+  uid=$(printf '%s' "$sts_json" | jq -r '
+    .spec.template.spec.containers[0].securityContext.runAsUser
+    // .spec.template.spec.securityContext.runAsUser // empty
+  ' 2>/dev/null)
+  if [[ -n "$uid" && "$uid" != "null" ]]; then
+    printf '%s' "$uid"
+    return 0
+  fi
+  local image
+  image=$(printf '%s' "$sts_json" | jq -r '.spec.template.spec.containers[0].image // empty' 2>/dev/null)
+  if [[ "$image" == *bitnami* ]]; then
+    printf '1001'
+  else
+    printf '999'
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_auto_patch_init_container <sts_name> <cm_name>
+#
+# Self-heals G1 in gate mode only (see recovery_run_gates): when the
+# data-recovery init container is missing, patches it in live instead of
+# requiring an operator to run setup-data-recovery.sh first. Also creates
+# the recovery ConfigMap itself if that's missing too — a deployment that
+# has never had setup-data-recovery.sh run on it at all (neither the
+# ConfigMap nor the init container exist) self-heals fully in one call,
+# with no separate manual step. This needs one RBAC verb beyond what
+# recovery_wipe_pod/recovery_reset already require: `create` on configmaps
+# (unscoped — Kubernetes RBAC ignores resourceNames for create requests, so
+# it can't be pinned to just the recovery ConfigMap's name; see
+# tests/chart/templates/mongodb-rbac.yaml and CLAUDE.md "Auto-detect tier").
+# The ConfigMap is created via apply (not create), so a concurrent caller
+# creating the same one is a no-op, not a race.
+#
+# Shape mirrors setup-data-recovery.sh's wipe-script exactly, but every
+# value is read live instead of taken from an operator --profile flag:
+#   - volume name + mount path: _recovery_detect_data_mount against the
+#     already-resolved _RECOVERY_DATA_PATH
+#   - wipe target: _RECOVERY_DATA_PATH itself
+#   - runAsUser: _recovery_detect_run_as_user
+#   - image/replicas: read straight from the StatefulSet's own spec
+#
+# Partition is locked to the current replica count in the SAME patch that
+# adds the init container, so no pod (including the ones already Running)
+# restarts as a result — only a later, separate wipe lowers the partition
+# for one targeted pod. The StatefulSet is also annotated
+# `recovery/auto-patched: "true"` so recovery_reset (called at the end of
+# this same recovery cycle, or by a later standalone reset.sh call) knows
+# to revert exactly this temporary addition — see _recovery_revert_auto_patch.
+# Reverting only ever removes the init container/volume, never the
+# ConfigMap this function may have created — the ConfigMap is harmless,
+# reusable state (just an empty wipe-targets file), not something that
+# needs to track "do I own this" the way the init container patch does.
+#
+# Fails soft (return 1, no mutation) when:
+#   - the init container is already present (nothing to do — returns 0
+#     instead, since this is the common/expected case, not a failure)
+#   - the recovery ConfigMap can't be read AND can't be created either
+#     (e.g. RBAC denies `create` on configmaps)
+#   - image/replicas can't be read, or no confident volume-mount signal
+#     matches the live data path
+# In every failure case, G1 below just fails exactly as it always has, with
+# the same manual-setup suggestion.
+#
+# Prints "patched" on success; empty otherwise. Exit 0 covers both "already
+# present" (nothing to do) and "just patched"; exit 1 means "could not
+# self-heal, fall through to the normal G1 failure."
+# ---------------------------------------------------------------------------
+_recovery_auto_patch_init_container() {
+  local sts_name="${1:?}" cm_name="${2:?}"
+  local _op="_recovery_auto_patch_init_container"
+  local sts_json
+  sts_json=$(_recovery_get_sts_json "$sts_name") || {
+    log_info "$_op" "Self-heal skipped: could not read StatefulSet ${sts_name}"
+    return 1
+  }
+  if [[ -z "$sts_json" || "$sts_json" == "null" ]]; then
+    log_info "$_op" "Self-heal skipped: StatefulSet ${sts_name} returned empty/null spec"
+    return 1
+  fi
+
+  local has_ic
+  has_ic=$(printf '%s' "$sts_json" | jq -r --arg ic "$_RECOVERY_INIT_CONTAINER_NAME" '
+    [.spec.template.spec.initContainers[]? | select(.name==$ic)] | length' 2>/dev/null) || {
+    log_info "$_op" "Self-heal skipped: could not parse initContainers from StatefulSet ${sts_name}"
+    return 1
+  }
+  [[ "${has_ic:-0}" -gt 0 ]] && return 0
+
+  if ! _kubectl get configmap "$cm_name" &>/dev/null; then
+    if ! _kubectl create configmap "$cm_name" \
+        --from-literal=wipe-targets="" --from-literal=recovery-version="0" \
+        --dry-run=client -o yaml 2>/dev/null | _kubectl apply -f - >/dev/null 2>&1; then
+      log_info "$_op" "Self-heal skipped: recovery ConfigMap ${cm_name} does not exist and could not be created (check RBAC: configmaps create verb)"
+      return 1
+    fi
+    log_info "$_op" "Self-heal: created missing recovery ConfigMap ${cm_name}"
+  fi
+
+  local image replicas
+  image=$(printf '%s' "$sts_json" | jq -r '.spec.template.spec.containers[0].image // empty' 2>/dev/null)
+  replicas=$(printf '%s' "$sts_json" | jq -r '.spec.replicas // empty' 2>/dev/null)
+  if [[ -z "$image" ]]; then
+    log_info "$_op" "Self-heal skipped: could not read container image from StatefulSet ${sts_name}"
+    return 1
+  fi
+  if [[ ! "$replicas" =~ ^[0-9]+$ || "$replicas" -le 0 ]]; then
+    log_info "$_op" "Self-heal skipped: could not read a valid replica count from StatefulSet ${sts_name} (got '${replicas}')"
+    return 1
+  fi
+
+  local mount_row volume_name mount_path
+  mount_row=$(_recovery_detect_data_mount "$sts_json" "$_RECOVERY_DATA_PATH")
+  local mount_row_status=$?
+  IFS=$'\x1f' read -r volume_name mount_path <<< "$mount_row"
+  if [[ "$mount_row_status" -ne 0 || -z "$volume_name" || -z "$mount_path" ]]; then
+    local candidates
+    candidates=$(printf '%s' "$sts_json" | jq -rc \
+      '[.spec.template.spec.containers[0].volumeMounts[]? | "\(.name)=\(.mountPath)"]' 2>/dev/null)
+    log_info "$_op" "Self-heal skipped: no volumeMount on StatefulSet ${sts_name} matches data path '${_RECOVERY_DATA_PATH}' — containers[0].volumeMounts: ${candidates:-[]}"
+    return 1
+  fi
+
+  local run_as_user
+  run_as_user=$(_recovery_detect_run_as_user "$sts_json")
+
+  if ! _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
+{
+  "metadata": {"annotations": {"recovery/auto-patched": "true"}},
+  "spec": {
+    "updateStrategy": {"rollingUpdate": {"partition": ${replicas}}},
+    "template": {
+      "spec": {
+        "initContainers": [{
+          "name": "${_RECOVERY_INIT_CONTAINER_NAME}",
+          "image": "${image}",
+          "command": ["/bin/bash", "-c"],
+          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo \"[RECOVERY] Wiping data for \$MY_NAME\"; find ${_RECOVERY_DATA_PATH} -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo \"[RECOVERY] \$MY_NAME not in wipe targets, skip.\"; fi"],
+          "volumeMounts": [
+            {"name": "${volume_name}", "mountPath": "${mount_path}"},
+            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
+          ],
+          "securityContext": {"runAsUser": ${run_as_user}, "runAsNonRoot": true}
+        }],
+        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "${cm_name}"}}]
+      }
+    }
+  }
+}
+EOF
+)" >/dev/null 2>&1; then
+    log_info "$_op" "Self-heal skipped: kubectl patch failed for StatefulSet ${sts_name}"
+    return 1
+  fi
+
+  log_info "$_op" "Self-healed StatefulSet ${sts_name}: added ${_RECOVERY_INIT_CONTAINER_NAME} init container (volume=${volume_name}, mount=${mount_path}, runAsUser=${run_as_user}, partition locked at ${replicas}) — recovery_reset will revert this once the cycle completes"
+  printf 'patched'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_revert_auto_patch <sts_name>
+#
+# Surgically removes exactly the init container + volume that
+# _recovery_auto_patch_init_container added (matched by name via the
+# strategic-merge-patch "$patch":"delete" directive — never touches any
+# other initContainers/volumes that may coexist) and clears the tracking
+# annotation. Only acts when the `recovery/auto-patched` annotation is
+# present, so a permanent, operator-installed init container (via
+# setup-data-recovery.sh) is never touched — that path never sets the
+# annotation. Called from recovery_reset, which always restores the
+# partition to the (locked) replica count either immediately before or
+# after this call, so removing the init container/volume here can never
+# trigger a pod restart: every currently-Running pod's template already
+# differs from this "current" one only by the entry being deleted, and a
+# StatefulSet controller only acts on pods at ordinals >= partition.
+#
+# Safe to call unconditionally — checks its own precondition and no-ops
+# otherwise. Prints "reverted" on success; empty otherwise. Exit 0 covers
+# both "nothing to revert" and "reverted"; exit 1 means the revert patch
+# itself failed (the caller treats this as best-effort and retries on the
+# next reset call).
+# ---------------------------------------------------------------------------
+_recovery_revert_auto_patch() {
+  local sts_name="${1:?}"
+  local sts_json marked
+  sts_json=$(_recovery_get_sts_json "$sts_name") || return 1
+  [[ -z "$sts_json" || "$sts_json" == "null" ]] && return 1
+  marked=$(printf '%s' "$sts_json" | jq -r '.metadata.annotations["recovery/auto-patched"] // empty' 2>/dev/null)
+  [[ "$marked" != "true" ]] && return 0
+
+  _kubectl patch statefulset "$sts_name" --type=strategic -p "$(cat <<EOF
+{
+  "metadata": {"annotations": {"recovery/auto-patched": null}},
+  "spec": {
+    "template": {
+      "spec": {
+        "initContainers": [{"name": "${_RECOVERY_INIT_CONTAINER_NAME}", "\$patch": "delete"}],
+        "volumes": [{"name": "recovery-config-vol", "\$patch": "delete"}]
+      }
+    }
+  }
+}
+EOF
+)" >/dev/null 2>&1 || return 1
+
+  log_info "_recovery_revert_auto_patch" "Reverted the temporary self-heal patch on StatefulSet ${sts_name} — init container and volume removed, original StatefulSet shape restored"
+  printf 'reverted'
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_sts_name <explicit> [target_pod]
+# <explicit> is whatever the caller already resolved from the internal-config
+# tier (empty if unset — sts_name is not a task input; see CLAUDE.md
+# "Configuration Layers"). Centralizes the detect-then-fallback step so every
+# recovery/*.sh script doesn't reimplement it inline.
+# ---------------------------------------------------------------------------
+recovery_resolve_sts_name() {
+  local explicit="${1:-}" target_pod="${2:-}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  local detected
+  detected=$(_recovery_detect_sts_name "$target_pod") || detected=""
+  printf '%s' "${detected:-mongodb}"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_configmap <explicit> <sts_name>
+# ---------------------------------------------------------------------------
+recovery_resolve_configmap() {
+  local explicit="${1:-}" sts_name="${2:?}"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  local detected
+  detected=$(_recovery_detect_configmap "$sts_name") || detected=""
+  printf '%s' "${detected:-mongodb-recovery-config}"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_credentials <secret> <direct_user> <user_key> <pass_key> <sts_name>
+# All 4 args are whatever the caller already resolved from the internal-
+# config tier (credentials are not a task input; see CLAUDE.md "Configuration
+# Layers"). Detection only runs when ALL FOUR are empty — a deployment that
+# declared even one credential field via internal config has signaled it
+# already knows its convention, so partial detection (which could silently
+# mix a detected secret name with an unrelated fallback key) never kicks in.
+# Prints "secret<US>direct_user<US>user_key<US>pass_key" (US = \x1f — see
+# _recovery_detect_credentials for why not a tab) with the final
+# hardcoded-literal tier applied.
+# ---------------------------------------------------------------------------
+recovery_resolve_credentials() {
+  local secret="${1:-}" direct_user="${2:-}" user_key="${3:-}" pass_key="${4:-}" sts_name="${5:?}"
+  if [[ -z "$secret" && -z "$direct_user" && -z "$user_key" && -z "$pass_key" ]]; then
+    local detected
+    detected=$(_recovery_detect_credentials "$sts_name") || detected=""
+    if [[ -n "$detected" ]]; then
+      IFS=$'\x1f' read -r secret direct_user user_key pass_key <<< "$detected"
+    fi
+  fi
+  secret="${secret:-mongodb-credentials}"
+  user_key="${user_key:-MONGO_ROOT_USER}"
+  pass_key="${pass_key:-MONGO_ROOT_PASS}"
+  printf '%s\x1f%s\x1f%s\x1f%s' "$secret" "$direct_user" "$user_key" "$pass_key"
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_data_paths <target_pod> <user> <pass> [sts_name]
+# Upgrades the module-level _RECOVERY_DATA_PATH/_RECOVERY_MOUNT_PATH globals
+# via live detection — but only when neither was set by an explicit task
+# input nor an internal-config default (tracked via the *_EXPLICIT sentinels
+# set at module load). A caller/operator who already declared a value always
+# wins; detection only fills the gap when nobody declared anything.
+# `df` reports stats for whichever filesystem backs a given path even if
+# it's a subdirectory of the actual mountpoint, so the same detected path
+# is reused for both data_path (G5 `du`) and mount_path (G6 `df`) — no
+# separate mount-point lookup needed.
+#
+# target_pod is frequently the very pod recovery exists to fix — its mongod
+# may not be reachable at all. When the direct query fails and sts_name is
+# given, falls back to asking any OTHER pod in the same StatefulSet: every
+# member shares the same pod template, so a healthy peer's dbPath is the
+# same value target_pod would report if it could answer. sts_name is
+# optional (omitted by callers/tests that don't need the fallback) — without
+# it, behavior is unchanged from a direct-only query.
+# ---------------------------------------------------------------------------
+recovery_resolve_data_paths() {
+  local target_pod="${1:?}" user="${2:?}" pass="${3:?}" sts_name="${4:-}"
+  local _op="recovery_resolve_data_paths"
+  if [[ -n "$_RECOVERY_DATA_PATH_EXPLICIT" && -n "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]]; then
+    log_info "$_op" "Skipping detection: data_path/mount_path already explicit (data_path=${_RECOVERY_DATA_PATH_EXPLICIT}, mount_path=${_RECOVERY_MOUNT_PATH_EXPLICIT})"
+    return 0
+  fi
+
+  local detected
+  detected=$(_recovery_detect_data_path "$target_pod" "$user" "$pass") || detected=""
+  if [[ -n "$detected" ]]; then
+    log_info "$_op" "Detected dbPath '${detected}' directly from target pod ${target_pod}"
+  else
+    log_info "$_op" "Target pod ${target_pod} did not answer the dbPath probe (it may be the broken pod recovery exists to fix)"
+  fi
+
+  if [[ -z "$detected" && -n "$sts_name" ]]; then
+    local peer tried=0
+    while IFS= read -r peer; do
+      [[ -z "$peer" || "$peer" == "$target_pod" ]] && continue
+      tried=$((tried + 1))
+      detected=$(_recovery_detect_data_path "$peer" "$user" "$pass") && {
+        log_info "$_op" "Detected dbPath '${detected}' from peer pod ${peer} (StatefulSet ${sts_name}) since target pod ${target_pod} did not answer"
+        break
+      }
+    done < <(_recovery_list_pods "$sts_name" 2>/dev/null)
+    [[ -z "$detected" ]] && log_info "$_op" "No peer pod in StatefulSet ${sts_name} answered the dbPath probe either (tried ${tried})"
+  elif [[ -z "$detected" ]]; then
+    log_info "$_op" "No sts_name given — skipping peer-pod fallback"
+  fi
+
+  if [[ -z "$detected" ]]; then
+    log_info "$_op" "Detection failed entirely — data_path/mount_path stay at the hardcoded literal (data_path=${_RECOVERY_DATA_PATH}, mount_path=${_RECOVERY_MOUNT_PATH})"
+    return 0
+  fi
+  [[ -z "$_RECOVERY_DATA_PATH_EXPLICIT" ]] && _RECOVERY_DATA_PATH="$detected"
+  [[ -z "$_RECOVERY_MOUNT_PATH_EXPLICIT" ]] && _RECOVERY_MOUNT_PATH="$detected"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# recovery_detect_target_pod <sts_name> <user> <pass>
+# Auto-detect which pod needs recovery: the non-primary pod whose Ready
+# condition is False. Prints the pod name to stdout; returns 1 if no
+# candidate is found or the result is ambiguous.
+#
+# Primary detection is best-effort (uses rs.status() via credentials) —
+# G7 remains the authoritative safety gate that blocks wiping the primary.
+# When multiple unhealthy non-primary pods are found the highest-ordinal
+# one is returned (StatefulSet convention) with a warning logged.
+# ---------------------------------------------------------------------------
+recovery_detect_target_pod() {
+  local sts_name="${1:?}" user="${2:-}" pass="${3:-}"
+  local op="recovery_detect_target_pod"
+
+  local pods_raw
+  pods_raw=$(_recovery_list_pods "$sts_name") || {
+    log_info "$op" "Cannot list pods for StatefulSet ${sts_name}"
+    return 1
+  }
+
+  # Best-effort primary identification so we never auto-select it as target.
+  # Failure is non-fatal — G7 is the authoritative safety gate.
+  local primary_pod=""
+  if [[ -n "$user" && -n "$pass" ]]; then
+    local primary_host
+    primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || primary_host=""
+    if [[ -n "$primary_host" ]]; then
+      local primary_hostname="${primary_host%%.*}"
+      while IFS= read -r pod; do
+        [[ -z "$pod" ]] && continue
+        [[ "$primary_hostname" == "$pod" ]] && { primary_pod="$pod"; break; }
+      done <<< "$pods_raw"
+    fi
+  fi
+  log_debug "$op" "Primary pod: '${primary_pod:-<unknown>}'"
+
+  # Collect candidates: not-Ready and not the primary
+  local -a candidates=()
+  while IFS= read -r pod; do
+    [[ -z "$pod" ]] && continue
+    [[ -n "$primary_pod" && "$pod" == "$primary_pod" ]] && continue
+    local pod_ready
+    pod_ready=$(_kubectl get pod "$pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+    log_debug "$op" "${pod} Ready=${pod_ready:-<unknown>}"
+    [[ "$pod_ready" != "True" ]] && candidates+=("$pod")
+  done <<< "$pods_raw"
+
+  local count="${#candidates[@]}"
+  if [[ "$count" -eq 0 ]]; then
+    log_info "$op" "No unhealthy non-primary pod found in StatefulSet ${sts_name} — specify target_pod explicitly to force-wipe a healthy pod"
+    return 1
+  fi
+
+  # Pick highest ordinal (safest partition target in a StatefulSet)
+  local best="" best_ordinal=-1
+  for pod in "${candidates[@]}"; do
+    local ordinal
+    ordinal=$(_recovery_pod_ordinal "$pod") || continue
+    if (( ordinal > best_ordinal )); then
+      best_ordinal="$ordinal"
+      best="$pod"
+    fi
+  done
+
+  if [[ -z "$best" ]]; then
+    log_info "$op" "Could not determine ordinal for candidates: ${candidates[*]}"
+    return 1
+  fi
+
+  if (( count > 1 )); then
+    log_info "$op" "Multiple unhealthy non-primary pods: ${candidates[*]} — auto-selected highest ordinal: ${best} (pass target_pod to override)"
+  else
+    log_info "$op" "Auto-detected recovery target: ${best}"
+  fi
+  printf '%s' "$best"
+}
+
+# ===========================================================================
 # Gate functions
 # Each gate prints a single-line JSON object to stdout:
 #   {"gate":"Gn","pass":true|false,"warn":true|false,"message":"...","code":"...",...}
@@ -157,7 +889,7 @@ _recovery_gate_g1() {
   local ic_names
   ic_names=$(_kubectl get statefulset "$sts_name" \
     -o jsonpath='{.spec.template.spec.initContainers[*].name}' 2>/dev/null) || {
-    printf '{"gate":"G1","pass":false,"code":"STS_NOT_FOUND","message":"StatefulSet %s not found","suggestion":"Verify namespace and sts_name inputs"}' \
+    printf '{"gate":"G1","pass":false,"code":"STS_NOT_FOUND","message":"StatefulSet %s not found","suggestion":"Verify namespace; if sts_name auto-detection picked the wrong name, set MONGO_STS_NAME_DEFAULT in internal config"}' \
       "$sts_name"; return 1
   }
   if printf '%s' "$ic_names" | tr ' ' '\n' | grep -qx "$_RECOVERY_INIT_CONTAINER_NAME"; then
@@ -280,19 +1012,22 @@ _recovery_gate_g5() {
 # allow_resize=false (report mode): never mutate the cluster — report
 # OPLOG_RESIZE_NEEDED as a warning instead of running replSetResizeOplog.
 _recovery_gate_g4() {
-  local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}"
+  local sts_name="$1" user="$2" pass="$3" data_mb="$4" allow_resize="${5:-true}" target_pod="${6:-}"
   local primary_host probe_pod
   if ! primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass"); then
     printf '{"gate":"G4","pass":false,"code":"NO_PRIMARY_FOR_OPLOG","message":"Cannot find primary to query oplog — ensure primary is elected first","suggestion":"Run recovery/fix-no-primary level=diagnose"}'
     return 1
   fi
-  local g4_pods_raw g4_pod g4_phase
+  local g4_pods_raw g4_pod
   g4_pods_raw=$(_recovery_list_pods "$sts_name") || g4_pods_raw=""
   probe_pod=""
   while IFS= read -r g4_pod; do
     [[ -z "$g4_pod" ]] && continue
-    g4_phase=$(_kubectl get pod "$g4_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$g4_phase" == "Running" ]] && { probe_pod="$g4_pod"; break; }
+    [[ -n "$target_pod" && "$g4_pod" == "$target_pod" ]] && continue
+    local g4_ready
+    g4_ready=$(_kubectl get pod "$g4_pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$g4_ready" == "True" ]] && { probe_pod="$g4_pod"; break; }
   done <<< "$g4_pods_raw"
   if [[ -z "$probe_pod" ]]; then
     printf '{"gate":"G4","pass":false,"code":"NO_LOCAL_POD","message":"No local Running pod found to query oplog via primary %s","suggestion":"Check pod status in this cluster"}' \
@@ -424,7 +1159,7 @@ _recovery_gate_g7() {
   fi
   local is_primary
   is_primary=$(_recovery_mongosh_pod "$target_pod" "$user" "$pass" \
-    "try{var h=db.hello();print((h.isWritablePrimary||h.ismaster)?'1':'0');}catch(e){print('0');}" \
+    "try{var h=db.hello();var isPrimary=h.setName?Boolean(h.isWritablePrimary||h.ismaster):false;print(isPrimary?'1':'0');}catch(e){print('0');}" \
     2>/dev/null | tail -1 | tr -d '\r') || is_primary="0"
   if [[ "$is_primary" == "1" ]]; then
     printf '{"gate":"G7","pass":false,"code":"TARGET_IS_PRIMARY","message":"Target %s is currently PRIMARY — wiping will cause an election and brief write unavailability","suggestion":"Run rs.stepDown(60) inside the pod or wait for automatic step-down, then re-run wipe"}' \
@@ -436,8 +1171,8 @@ _recovery_gate_g7() {
 }
 
 _recovery_gate_g8() {
-  local sts_name="$1" user="$2" pass="$3"
-  local primary_host g8_pods_raw g8_pod g8_phase probe_pod
+  local sts_name="$1" user="$2" pass="$3" target_pod="${4:-}"
+  local primary_host g8_pods_raw g8_pod probe_pod
   primary_host=$(_recovery_primary_host "$sts_name" "$user" "$pass") || {
     printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no primary found in RS to query RECOVERING state"}'
     return 0
@@ -446,8 +1181,11 @@ _recovery_gate_g8() {
   probe_pod=""
   while IFS= read -r g8_pod; do
     [[ -z "$g8_pod" ]] && continue
-    g8_phase=$(_kubectl get pod "$g8_pod" -o jsonpath='{.status.phase}' 2>/dev/null) || continue
-    [[ "$g8_phase" == "Running" ]] && { probe_pod="$g8_pod"; break; }
+    [[ -n "$target_pod" && "$g8_pod" == "$target_pod" ]] && continue
+    local g8_ready
+    g8_ready=$(_kubectl get pod "$g8_pod" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || continue
+    [[ "$g8_ready" == "True" ]] && { probe_pod="$g8_pod"; break; }
   done <<< "$g8_pods_raw"
   if [[ -z "$probe_pod" ]]; then
     printf '{"gate":"G8","pass":true,"warn":true,"message":"G8 skipped: no local Running pod to query RECOVERING state"}'
@@ -486,6 +1224,7 @@ recovery_run_gates() {
 
   local -a gate_results=()
   local fail_count=0 warn_count=0 data_mb=0
+  local auto_patched="false"
 
   # Helper: run a gate, collect result, optionally exit in gate mode
   _run_gate() {
@@ -511,7 +1250,23 @@ recovery_run_gates() {
     return 0
   }
 
-  # G1: init container present
+  # G1: init container present. In gate mode (wipe/recover — pre-check's
+  # report mode must stay read-only) a missing container is self-healed once
+  # via _recovery_auto_patch_init_container before the recorded check below
+  # runs — see CLAUDE.md "Auto-detect tier". Fails soft: if it can't
+  # self-heal (ConfigMap missing too, or no confident mount signal), G1
+  # below just fails exactly as it always has.
+  if [[ "$mode" == "gate" ]]; then
+    local auto_patch_out
+    # No stderr redirect here: command substitution only ever captures
+    # stdout into auto_patch_out, so this doesn't need `2>/dev/null` to stay
+    # clean — and suppressing stderr would silently swallow every log_info
+    # this function emits (both the failure-reason messages and the
+    # eventual success message), leaving an operator with no way to tell
+    # why self-heal didn't fire short of reading this source file.
+    auto_patch_out=$(_recovery_auto_patch_init_container "$sts_name" "$cm_name") || auto_patch_out=""
+    [[ "$auto_patch_out" == "patched" ]] && auto_patched="true"
+  fi
   _run_gate _recovery_gate_g1 true "$sts_name" || return 1
 
   # G2: recovery ConfigMap exists
@@ -534,7 +1289,7 @@ recovery_run_gates() {
   local g4_resize="false"
   [[ "$mode" == "gate" ]] && g4_resize="true"
   if [[ "$data_mb" -gt 0 ]]; then
-    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" "$g4_resize" || return 1
+    _run_gate _recovery_gate_g4 true "$sts_name" "$user" "$pass" "$data_mb" "$g4_resize" "$target_pod" || return 1
   else
     gate_results+=('{"gate":"G4","pass":true,"warn":true,"message":"Oplog check skipped: data size unknown"}')
     (( warn_count++ )) || true
@@ -564,7 +1319,7 @@ recovery_run_gates() {
 
   # G8: warn if other pods RECOVERING (non-blocking)
   local g8_out
-  g8_out=$(_recovery_gate_g8 "$sts_name" "$user" "$pass") || true
+  g8_out=$(_recovery_gate_g8 "$sts_name" "$user" "$pass" "$target_pod") || true
   local g8_warn
   g8_warn=$(printf '%s' "$g8_out" | grep -o '"warn":[a-z]*' | head -1 | cut -d':' -f2)
   [[ "$g8_warn" == "true" ]] && (( warn_count++ )) || true
@@ -580,11 +1335,11 @@ recovery_run_gates() {
   local pass_count=$(( ${#gate_results[@]} - fail_count ))
   if [[ "$fail_count" -gt 0 ]]; then
     response_err "$op" "Pre-flight checks failed: ${fail_count} gate(s) blocked wipe" \
-      "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":${fail_count},\"warn\":${warn_count},\"target_pod\":\"${target_pod}\"}" 1
+      "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":${fail_count},\"warn\":${warn_count},\"target_pod\":\"${target_pod}\",\"auto_patched\":${auto_patched}}" 1
     return 1
   fi
   response_ok "$op" "All pre-flight gates passed (${warn_count} warning(s))" \
-    "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":0,\"warn\":${warn_count},\"target_pod\":\"${target_pod}\"}"
+    "{\"gates\":${gates_json},\"pass\":${pass_count},\"fail\":0,\"warn\":${warn_count},\"target_pod\":\"${target_pod}\",\"auto_patched\":${auto_patched}}"
   return 0
 }
 
@@ -624,6 +1379,25 @@ recovery_wipe_pod() {
     return 1
   fi
 
+  # 3. If the pod is not Ready the StatefulSet controller (OrderedReady policy)
+  #    will not delete it for a rolling update — it waits for the pod to become
+  #    healthy first, which creates a deadlock when the pod is broken by design.
+  #    Detect this case and force-delete the pod so the controller recreates it
+  #    with the updated template (including the recovery init container).
+  local pod_ready
+  pod_ready=$(_kubectl get pod "$target_pod" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
+  log_debug "$op" "Pod ${target_pod} Ready=${pod_ready:-<unknown>}"
+  if [[ "$pod_ready" != "True" ]]; then
+    log_info "$op" "Pod ${target_pod} is not Ready (Ready=${pod_ready:-<unknown>}) — STS rolling-update controller would deadlock; force-deleting pod to trigger recreation with updated template"
+    local del_out
+    if ! del_out=$(_kubectl delete pod "$target_pod" --grace-period=0 --force 2>&1); then
+      log_info "$op" "Warning: could not delete pod ${target_pod}: $(_escape_json_string "$del_out") — STS controller may not recreate it; monitor manually"
+    else
+      log_info "$op" "Deleted pod ${target_pod}; STS controller will recreate it with the updated template (partition=${ordinal})"
+    fi
+  fi
+
   log_info "$op" "Wipe initiated — run recovery/reset once pod ${target_pod} enters Running to prevent re-wipe on restart"
   response_ok "$op" "Wipe initiated for pod ${target_pod}" \
     "{\"target_pod\":\"${target_pod}\",\"ordinal\":${ordinal},\"partition_set\":${ordinal},\"configmap\":\"${cm_name}\",\"next_step\":\"Monitor pod restart; run recovery/reset once pod is Running and before sync completes\"}"
@@ -657,8 +1431,18 @@ recovery_reset() {
     return 1
   fi
 
+  # 3. Revert a temporary self-heal patch from _recovery_auto_patch_init_container,
+  #    if any — now that partition is locked again (step 2), removing the
+  #    init container/volume here cannot trigger any pod restart. Best-effort:
+  #    the safety-critical wipe-target clear + partition lock above already
+  #    succeeded either way; a failed revert just gets retried on the next
+  #    reset call (this function is always safe to call again).
+  local revert_out auto_patch_reverted="false"
+  revert_out=$(_recovery_revert_auto_patch "$sts_name" 2>/dev/null) || revert_out=""
+  [[ "$revert_out" == "reverted" ]] && auto_patch_reverted="true"
+
   response_ok "$op" "Recovery state cleared: wipe-targets empty, partition reset to ${replicas}" \
-    "{\"sts\":\"${sts_name}\",\"configmap\":\"${cm_name}\",\"partition\":${replicas}}"
+    "{\"sts\":\"${sts_name}\",\"configmap\":\"${cm_name}\",\"partition\":${replicas},\"auto_patch_reverted\":${auto_patch_reverted}}"
   return 0
 }
 
@@ -1064,7 +1848,9 @@ recovery_recover() {
   old_uid=$(_recovery_pod_uid "$target_pod")
   log_info "$op" "Pre-wipe UID of ${target_pod}: '${old_uid:-<none>}'"
 
-  # 2. Gates (gate mode)
+  # 2. Gates (gate mode) — captures whether G1's self-heal patched a missing
+  # init container in, so the final response can report it without the
+  # caller needing to separately inspect the StatefulSet.
   local gates_result
   if ! gates_result=$(recovery_run_gates "$sts" "$target_pod" "$cm" "$user" "$pass" "gate"); then
     local gdata
@@ -1073,6 +1859,9 @@ recovery_recover() {
       "{\"phase\":\"gates\",\"gates\":${gdata:-null},\"target_pod\":\"${target_pod}\"}" 1
     return 1
   fi
+  local auto_patched
+  auto_patched=$(printf '%s' "$gates_result" | grep -o '"auto_patched":[a-z]*' | head -1 | cut -d':' -f2)
+  auto_patched="${auto_patched:-false}"
 
   # 3. Wipe — discard the inner JSON response (we emit our own); keep exit status
   if ! recovery_wipe_pod "$sts" "$target_pod" "$cm" >/dev/null; then
@@ -1111,12 +1900,17 @@ recovery_recover() {
   fi
 
   # 5b. Reset immediately (closes the re-wipe race) — before anything else,
-  # including set-sync-source which may retry for ~30s. Discard the inner JSON.
-  if ! recovery_reset "$sts" "$cm" "$replicas" >/dev/null; then
+  # including set-sync-source which may retry for ~30s. Captures whether the
+  # G1 self-heal patch (if any) was reverted, for the final response.
+  local reset_result
+  if ! reset_result=$(recovery_reset "$sts" "$cm" "$replicas"); then
     response_err "$op" "Pod ${target_pod} is Running but recovery/reset failed — wipe-target may still be set" \
       "{\"phase\":\"reset\",\"target_pod\":\"${target_pod}\",\"action_required\":\"Run recovery/reset manually NOW to prevent re-wipe on next restart\"}" 1
     return 1
   fi
+  local auto_patch_reverted
+  auto_patch_reverted=$(printf '%s' "$reset_result" | grep -o '"auto_patch_reverted":[a-z]*' | head -1 | cut -d':' -f2)
+  auto_patch_reverted="${auto_patch_reverted:-false}"
 
   # 5c. Direct sync source: prefer secondary, fall back to primary (non-fatal)
   local sync_src_ok="false"
@@ -1128,6 +1922,6 @@ recovery_recover() {
 
   log_info "$op" "Recovery orchestration complete for ${target_pod}; initial sync now in progress"
   response_ok "$op" "Recovery complete for ${target_pod}: data wiped, pod restarted, recovery state cleared. Initial sync is now running." \
-    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"sync_source_set\":${sync_src_ok},\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
+    "{\"target_pod\":\"${target_pod}\",\"old_uid\":\"${old_uid}\",\"recreated\":true,\"reached_running\":true,\"sync_source_set\":${sync_src_ok},\"partition_restored\":${replicas},\"elapsed_seconds\":${elapsed},\"auto_patched\":${auto_patched},\"auto_patch_reverted\":${auto_patch_reverted},\"next_step\":\"Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)\"}"
   return 0
 }

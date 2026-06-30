@@ -1,10 +1,22 @@
 # MongoDB Data Recovery (aqsh-mongodb)
 
 Automated recovery workflow for corrupted or out-of-sync MongoDB StatefulSet
-replicas (Bitnami helm chart by default; standard `mongo:N` images via the
-`data_path` / `mount_path` inputs).  Works without `kubectl delete pod`,
-`kubectl delete pvc`, or node cordon — only ConfigMap and StatefulSet `patch`
-permissions are needed.
+replicas. Works against any image/layout (Bitnami helm chart, standard
+`mongo:N` images, hardened Bitnami images with file-mounted secrets) — the
+naming/credential/path convention is resolved automatically from live
+cluster state, not declared per call. Works without `kubectl delete pod`,
+`kubectl delete pvc`, or node cordon — only ConfigMap (`get`/`patch`/
+`create`) and StatefulSet `patch` permissions are needed.
+
+If the `data-recovery` init container and/or the recovery ConfigMap itself
+haven't been installed yet, `recovery/wipe` and `recovery/recover` self-heal
+both automatically (live volume/mount/`runAsUser` detection, partition
+locked so no other pod restarts) and `recovery/reset` reverts the
+StatefulSet's init container/volume back to its original shape once the
+cycle completes — see "Gate G1 Self-Heal" below. A completely untouched
+StatefulSet self-heals fully on the first `wipe`/`recover` call; the
+One-Time Setup script remains available for operators who prefer to install
+it permanently up front, or for the rare case self-heal can't resolve.
 
 ---
 
@@ -12,14 +24,15 @@ permissions are needed.
 
 1. [Architecture Overview](#architecture-overview)
 2. [How It Works](#how-it-works)
-3. [One-Time Setup](#one-time-setup)
-4. [API Reference](#api-reference)
-5. [Pre-Flight Gates G1–G8](#pre-flight-gates-g1g8)
-6. [Scenarios and Runbook](#scenarios-and-runbook)
-7. [Exception Scenarios](#exception-scenarios)
-8. [RBAC Requirements](#rbac-requirements)
-9. [API Examples](#api-examples)
-10. [Test Coverage Notes](#test-coverage-notes)
+3. [Prerequisites](#prerequisites)
+4. [One-Time Setup](#one-time-setup)
+5. [API Reference](#api-reference)
+6. [Pre-Flight Gates G1–G8](#pre-flight-gates-g1g8)
+7. [Scenarios and Runbook](#scenarios-and-runbook)
+8. [Exception Scenarios](#exception-scenarios)
+9. [RBAC Requirements](#rbac-requirements)
+10. [API Examples](#api-examples)
+11. [Test Coverage Notes](#test-coverage-notes)
 
 ---
 
@@ -57,7 +70,7 @@ permissions are needed.
 
 | Constraint | Solution |
 |---|---|
-| No `kubectl delete pvc` | Init container wipes `/bitnami/mongodb/data/db` from inside the pod |
+| No `kubectl delete pvc` | Init container wipes the data directory (`/data/db` for standard `mongo:N`) from inside the pod |
 | Pod in CrashLoopBackOff | Init containers run before the main container regardless of crash state |
 | No `kubectl delete pod` | StatefulSet `partition` + annotation bump triggers a targeted rolling restart |
 | No node cordon needed | All operations are K8s control-plane only (ConfigMap + StatefulSet patches) |
@@ -74,21 +87,121 @@ The `data-recovery` init container runs on every pod start.  It reads
 - **Hostname matches**: wipe the data directory → MongoDB starts empty → auto initial-sync
 - **Hostname not in list**: skip, proceed normally
 
-### Data Paths per Deployment Type
+### Data Paths and Credentials Are Auto-Detected, Not Task Inputs
 
 The gates (`du` for G5, `df` for G6) and the init container must agree on
-where the data lives.  The tasks default to Bitnami paths; override per call
-with the `data_path` / `mount_path` inputs:
+where the data lives, and the gates must authenticate as a real MongoDB
+user. None of `sts_name`, `recovery_configmap`, `credential_secret`,
+`credential_user`, `credential_user_key`, `credential_pass_key`,
+`data_path`, or `mount_path` are task inputs — there is no per-call way to
+pass any of them (see CLAUDE.md "Configuration Layers" for why: these
+tasks operate on something close to a destructive action, so the API
+surface is deliberately kept to `namespace` + the genuinely per-call
+operational decisions). Resolution is a 3-tier chain with no task-input
+override:
 
-| Deployment | `data_path` (du target) | `mount_path` (df target) |
+1. **Internal config** — set once per cluster in
+   `/etc/aqsh/config/mongodb.env`'s `*_DEFAULT` keys
+   (`RECOVERY_DATA_PATH_DEFAULT`, `MONGO_CRED_SECRET_DEFAULT`, etc.) when a
+   deployment's convention can't be (or shouldn't be) discovered live.
+2. **Live auto-detect** — query the StatefulSet/mongod directly instead of
+   guessing a Bitnami-vs-official-image profile:
+   - `sts_name` — from the target pod's `ownerReferences`
+   - `recovery_configmap` — from the `data-recovery` init container's own
+     volume binding
+   - `credential_secret`/`credential_user`/keys — from the StatefulSet's
+     container env: `secretKeyRef` for `MONGO_INITDB_ROOT_USERNAME/PASSWORD`
+     (official image) or `MONGODB_ROOT_USER/PASSWORD` (Bitnami), or the
+     hardened-Bitnami file-mounted-secret convention (a `*_FILE`-suffixed
+     env var holding a path into a Secret-backed volume mount)
+   - `data_path`/`mount_path` — by asking mongod itself for its real dbPath
+     (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
+     mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
+     setting was given), reusing the same value for both `du` and `df`.
+     Queries `target_pod` first, but `target_pod` is frequently the broken
+     pod recovery exists to fix — its mongod may not answer at all. When
+     the direct query fails, falls back to asking any OTHER pod in the same
+     StatefulSet: every member shares the same pod template, so a healthy
+     peer's dbPath is the value `target_pod` would report if it could
+     answer (`recovery_resolve_data_paths` in `aqsh-tasks/lib/
+     mongodb-recovery.sh`).
+3. **Library hardcoded fallback** — Bitnami helm chart paths
+   (`/bitnami/mongodb/data/db` / `/bitnami/mongodb`), `mongodb-credentials`
+   secret with keys `MONGO_ROOT_USER`/`MONGO_ROOT_PASS`, StatefulSet name
+   `mongodb`, ConfigMap `mongodb-recovery-config`
+
+Detection always fails *soft*: if it can't find a confident signal (no
+env-based credential wiring at all, more than one StatefulSet in the
+namespace with no target pod to disambiguate), it falls through to tier 3
+exactly as before — it never guesses. If a deployment's convention is so
+unusual that neither detection nor the hardcoded fallback can resolve it,
+internal config remains the only override.
+
+| Deployment | Real `data_path`/`mount_path` | Resolved via |
 |---|---|---|
-| Bitnami helm chart (default) | `/bitnami/mongodb/data/db` | `/bitnami/mongodb` |
-| Standard `mongo:N` image | `/data/db` | `/data` |
+| Bitnami helm chart | `/bitnami/mongodb/data/db` / `/bitnami/mongodb` | live detect (explicit `--dbpath`) or hardcoded fallback |
+| Standard `mongo:N` image (this repo's test fixture) | `/data/db` / `/data/db` | live detect (mongod's compiled-in default) |
 
-> If `data_path` points at the wrong location, `du` returns nothing and the
-> size gates **silently degrade**: G5 passes with a warn ("size unknown") and
-> G4/G6 are skipped.  A pre-check that passes with `warn > 0` may not have
-> actually verified oplog or disk space — read the per-gate messages.
+> If detection or internal config ever resolves the wrong path, `du` returns
+> nothing and the size gates **silently degrade**: G5 passes with a warn
+> ("size unknown") and G4/G6 are skipped.  A pre-check that passes with
+> `warn > 0` may not have actually verified oplog or disk space — read the
+> per-gate messages.
+
+### Gate G1 Self-Heal: Missing Init Container Is Patched In Live
+
+`recovery/wipe` and `recovery/recover` (gate mode — **not** `pre-check`,
+which always stays read-only) no longer require the One-Time Setup script to
+have run first. If G1 finds the `data-recovery` init container missing, it
+self-heals once before reporting the gate:
+
+1. If the recovery ConfigMap (`mongodb-recovery-config`) doesn't exist
+   either — a StatefulSet that's never had the One-Time Setup run on it at
+   all — creates it first (`kubectl create --dry-run=client -o yaml | apply
+   -f -`, so a concurrent create from another in-flight call is a no-op,
+   not a race), with the same empty `wipe-targets`/`recovery-version: "0"`
+   content the One-Time Setup script writes
+2. Reads the main container's own existing `volumeMounts` to find which
+   volume/mount path already backs the live-detected `data_path` (the exact
+   binding in place today — not a Bitnami-vs-official profile guess) and the
+   container/pod `securityContext.runAsUser` (falling back to an image-name
+   guess — 1001 for `bitnami` images, 999 otherwise — only when neither is set)
+3. Patches the init container + its ConfigMap volume into the StatefulSet in
+   the **same** `kubectl patch` call that locks
+   `updateStrategy.rollingUpdate.partition` at the current replica count —
+   so no pod, including ones already `Running`, restarts as a side effect
+4. Annotates the StatefulSet `recovery/auto-patched: "true"` to mark the
+   init-container/volume addition as *temporary* (as opposed to a permanent
+   install via the One-Time Setup script below, which never sets this
+   annotation) — the ConfigMap step 1 may have created is **not** tracked by
+   this annotation and is never reverted; it's harmless, reusable state
+5. `recovery_reset` — called automatically at the end of `recover`'s cycle,
+   or by any later standalone `reset` call — checks for that annotation and,
+   if present, removes exactly that init container + volume (by name, via a
+   strategic-merge `$patch: delete`) and clears the annotation, restoring
+   the StatefulSet to its original shape. This happens while the partition
+   is locked, so the revert itself never restarts anything either.
+
+This needs one RBAC verb beyond the StatefulSet `patch` verb already
+required for the partition-lock/unlock cycle below: `create` on
+`configmaps`, namespace-wide rather than pinned by `resourceNames` (K8s RBAC
+ignores `resourceNames` for `create` — see "RBAC Requirements"). It fails
+*soft* exactly like the detection tier above: if the ConfigMap can't be read
+or created (e.g. RBAC denies `create`), or no confident volume-mount signal
+is found, G1 just fails exactly as it always has, with the same
+`INIT_CONTAINER_MISSING` code and manual-setup suggestion — the One-Time
+Setup script remains available, but is no longer a required first step.
+`wipe`'s and `recover`'s gate-mode JSON includes `"auto_patched": true` when
+the init-container patch ran; `reset`'s response includes
+`"auto_patch_reverted": true` when it found and removed one.
+
+> **Interaction with the quorum warning below**: self-heal's *first* use
+> against a given StatefulSet is exactly the moment every pod is equally
+> stale relative to the brand-new template (none has individually rolled
+> onto it yet) — so the "Quorum warning for lower-ordinal targets" a few
+> paragraphs down applies in full on that first call. Target the highest
+> ordinal first (as the integration tests do) to avoid restarting more than
+> the one pod being recovered.
 
 ### StatefulSet Partition for Targeted Restart
 
@@ -121,71 +234,85 @@ state** — before the initial sync finishes.
 
 ---
 
+## Prerequisites
+
+The recovery system **requires MongoDB to run in Replica Set mode with at least
+2 members**.  Standalone deployments are not supported:
+
+| Gate | Standalone behaviour | RS behaviour |
+|---|---|---|
+| G3 `NO_HEALTHY_SOURCE` | Always fails — the target IS the only pod, so no sync source exists | Passes when at least one other member is healthy |
+| G7 `TARGET_IS_PRIMARY` | Always blocks — `db.hello().ismaster` is `true` on standalone; `rs.stepDown()` is not valid | Correctly checks RS role; standalone sets `h.setName=undefined` so the gate skips |
+
+This repo's `mongo-1` test namespace deploys as a single-replica standalone by
+default (see `tests/chart/templates/mongodb.yaml`); the `recovery.bats`
+integration suite upgrades it to a 3-replica RS (`--replSet rs0`) in its
+`setup_file`, initialises the replica set, and creates the root user — see
+that file for a working reference of every step below.
+
+**Minimum conditions before calling any recovery task:**
+
+1. StatefulSet has `replicas ≥ 2` and pods are running with `--replSet <name>`
+2. Replica set is initiated (`rs.initiate()` has been called and a primary has been elected)
+3. `mongodb-recovery-config` ConfigMap exists in the namespace (G2) and
+   `data-recovery` init container is present in the STS spec (G1) — **or**
+   let `wipe`/`recover` self-heal both on first use; see "Gate G1 Self-Heal"
+   above
+
+---
+
 ## One-Time Setup
 
-Apply two Kubernetes resources to the target namespace:
+> **Optional as of the G1 self-heal mechanism** (see "Gate G1 Self-Heal"
+> above): `recovery/wipe` and `recovery/recover` create the ConfigMap below
+> and patch the init container in automatically the first time G1 finds
+> either missing — a completely untouched StatefulSet self-heals fully on
+> the first call. Run this script up front only when you want the init
+> container installed permanently, or when self-heal can't resolve an
+> unusual layout (no volumeMount backs the live data path).
+>
+> **This repo's MongoDB test fixture uses the standard `mongo:N` image.**
+> `tests/mongodb/recovery.bats`'s `setup_file` runs the same script below
+> (`--profile standard`) against the `mongo-1` namespace before any recovery
+> test runs — proving the *permanent* install path stays exercised even
+> though `tests/mongodb/recovery_auto_patch.bats` now also proves the
+> self-heal path against a StatefulSet that deliberately skips this script.
 
-```yaml
-# 01-recovery-configmap.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: mongodb-recovery-config
-  namespace: <YOUR_NAMESPACE>
-data:
-  wipe-targets: ""
-  recovery-version: "0"
-```
+Apply the recovery ConfigMap (satisfies G2) and patch the StatefulSet to add
+the `data-recovery` init container (satisfies G1) using the canonical setup
+script — this is the single source of truth for the init-container/wipe
+logic; it's not duplicated between this doc and the test fixture.
 
 ```bash
-# Patch the StatefulSet to add the init container and set partition=3 (locked)
-CONTEXT=kind-cluster-dbs          # always target an explicit cluster
+CONTEXT=kind-cluster-a          # always target an explicit cluster
 NAMESPACE=<YOUR_NAMESPACE>
 STS=mongodb
-IMAGE=$(kubectl --context $CONTEXT -n $NAMESPACE get sts $STS -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-kubectl --context $CONTEXT -n $NAMESPACE apply -f 01-recovery-configmap.yaml
+# Standard `mongo:N` image:
+aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
+  --context "$CONTEXT" --namespace "$NAMESPACE" --sts "$STS" --profile standard
 
-kubectl --context $CONTEXT -n $NAMESPACE patch statefulset $STS --type=strategic -p "$(cat <<EOF
-{
-  "spec": {
-    "updateStrategy": {"rollingUpdate": {"partition": 3}},
-    "template": {
-      "spec": {
-        "initContainers": [{
-          "name": "data-recovery",
-          "image": "${IMAGE}",
-          "command": ["/bin/bash", "-c"],
-          "args": ["WIPE_TARGETS=\$(cat /recovery-config/wipe-targets 2>/dev/null || echo ''); MY_NAME=\$(hostname); if [ -n \"\$WIPE_TARGETS\" ] && echo \"\$WIPE_TARGETS\" | grep -qw \"\$MY_NAME\"; then echo '[RECOVERY] Wiping data for '\$MY_NAME; find /bitnami/mongodb/data/db -mindepth 1 -delete 2>/dev/null || true; echo '[RECOVERY] Wipe complete.'; else echo '[RECOVERY] '\$MY_NAME' not in wipe targets, skip.'; fi"],
-          "volumeMounts": [
-            {"name": "datadir", "mountPath": "/bitnami/mongodb"},
-            {"name": "recovery-config-vol", "mountPath": "/recovery-config", "readOnly": true}
-          ],
-          "securityContext": {"runAsUser": 1001, "runAsNonRoot": true}
-        }],
-        "volumes": [{"name": "recovery-config-vol", "configMap": {"name": "mongodb-recovery-config"}}]
-      }
-    }
-  }
-}
-EOF
-)"
+# Bitnami helm chart:
+aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
+  --context "$CONTEXT" --namespace "$NAMESPACE" --sts "$STS" --profile bitnami
 ```
 
-> **Note**: The StatefulSet patch triggers a rolling update.  With `partition=3`
-> (for a 3-replica cluster) no pods restart automatically — the partition is
-> the lock.  The running pods therefore do **not** have the init container yet;
-> it materialises on the target pod the first time a wipe lowers the partition.
+| Profile | volume name | mount path | `runAsUser` |
+|---|---|---|---|
+| `standard` (this repo's test fixture) | `data` | `/data/db` | 999 |
+| `bitnami` | `datadir` | `/bitnami/mongodb` | 1001 |
 
-> **Non-Bitnami (standard `mongo:N` image) adaptation** — three things change
-> in the patch above (see `tests/mongodb/recovery.bats` setup for a working
-> example): the wipe path becomes `/data/db` and the init container must mount
-> the data volume at that **same** path the main container uses (`/data/db`) —
-> mounting it elsewhere makes `find /data/db` hit an empty subdir and silently
-> skip the wipe; the data volume is usually named `data` instead of `datadir`;
-> and the container user is `999` instead of `1001`.  Then pass
-> `"data_path":"/data/db","mount_path":"/data/db"` on every pre-check / wipe /
-> recover call.
+> **Note**: The StatefulSet patch triggers a rolling update.  With `partition`
+> set to the replica count (e.g. `3`) no pods restart automatically — the
+> partition is the lock.  The running pods therefore do **not** have the init
+> container yet; it materialises on the target pod the first time a wipe lowers
+> the partition.
+
+> `data_path`/`mount_path` are not task inputs — recovery tasks detect the
+> real path live from mongod (see "Data Paths and Credentials Are
+> Auto-Detected" above). Internal config (`RECOVERY_DATA_PATH_DEFAULT`/
+> `RECOVERY_MOUNT_PATH_DEFAULT`) remains available only for deployments
+> where detection can't resolve it. See CLAUDE.md "Configuration Layers".
 
 ---
 
@@ -195,6 +322,19 @@ All tasks are available via `POST /tasks/<name>` on the aqsh-mongodb endpoint.
 
 Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
 `fix-no-primary` 8m, `pre-check` 5m, `reset` 3m, `status` 2m.
+
+> **`sts_name`, `credential_secret`, `credential_user`, `credential_user_key`,
+> `credential_pass_key`, `recovery_configmap`, `data_path`, `mount_path`** are
+> **not task inputs** — every call below needs only `namespace` plus the
+> genuinely per-call fields shown in each task's Input table (`target_pod`,
+> `force_wipe`, `level`, etc.). These naming/credential/path values resolve
+> automatically: internal config (`/etc/aqsh/config/mongodb.env`'s
+> `*_DEFAULT` keys) → live cluster auto-detect → hardcoded library fallback.
+> There is no per-call override; if a deployment's convention is too unusual
+> for detection to resolve, internal config is the only escape hatch. See
+> CLAUDE.md "Configuration Layers" for the full precedence rule and the
+> "Data Paths and Credentials Are Auto-Detected" section above for how
+> detection works.
 
 There are two ways to drive recovery:
 
@@ -241,16 +381,13 @@ response tells you to monitor it with `recovery/status`.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
 | `wait_timeout` | `RECOVERY_WAIT_TIMEOUT` | no | `"300"` (seconds) |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
+
+`sts_name`/`recovery_configmap`/credential secret-and-keys/`data_path`/
+`mount_path` are not task inputs — see "Data Paths and Credentials Are
+Auto-Detected" above.
 
 > `wait_timeout` only covers the restart-and-reach-Running poll. Keep it well
 > under the aqsh task timeout (12m for `recovery/recover`) so the gates and
@@ -268,9 +405,18 @@ response tells you to monitor it with `recovery/status`.
   "sync_source_set": false,
   "partition_restored": 3,
   "elapsed_seconds": 47,
+  "auto_patched": false,
+  "auto_patch_reverted": false,
   "next_step": "Monitor initial sync with recovery/status and rs.status() until the pod catches up to the primary (SECONDARY, optime in sync)"
 }
 ```
+
+> `auto_patched: true` means G1 found the `data-recovery` init container
+> missing and self-healed it live (see "Gate G1 Self-Heal"); `false` means
+> it was already there. `auto_patch_reverted: true` means this same call's
+> internal `reset` step found and removed that temporary patch, restoring
+> the StatefulSet's original shape — it is only ever `true` when
+> `auto_patched` was also `true` earlier in the same call.
 
 **Output (gate abort)** — nothing was changed:
 
@@ -308,8 +454,9 @@ partition, and pod phases.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
+
+`sts_name`/`recovery_configmap` are not task inputs — see "Data Paths and
+Credentials Are Auto-Detected" above.
 
 **Output**
 
@@ -341,20 +488,18 @@ full report without making any changes.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
 | `target_pod` | `RECOVERY_TARGET_POD` | **yes** | — |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `force_wipe` | `FORCE_WIPE` | no | `"false"` |
-| `data_path` | `RECOVERY_DATA_PATH` | no | `/bitnami/mongodb/data/db` |
-| `mount_path` | `RECOVERY_MOUNT_PATH` | no | `/bitnami/mongodb` |
 
-> The credentials in `credential_secret` must be a **real MongoDB user**
-> (root role) present in `admin.system.users` — the gates authenticate via
-> mongosh even when the deployment runs without `--auth`, and MongoDB rejects
-> authentication for nonexistent users regardless of the authorization mode.
+`sts_name`/`recovery_configmap`/credential secret-and-keys/`data_path`/
+`mount_path` are not task inputs — see "Data Paths and Credentials Are
+Auto-Detected" above.
+
+> The detected/configured credentials must resolve to a **real MongoDB
+> user** (root role) present in `admin.system.users` — the gates
+> authenticate via mongosh even when the deployment runs without `--auth`,
+> and MongoDB rejects authentication for nonexistent users regardless of
+> the authorization mode.
 
 **Output**
 
@@ -414,8 +559,8 @@ the data directory.
 If the StatefulSet patch fails after the ConfigMap was already updated, the
 ConfigMap is rolled back automatically so no stale wipe-target is left behind.
 
-**Input**: same as `recovery/pre-check` (including `force_wipe`,
-`data_path`, `mount_path`).
+**Input**: same as `recovery/pre-check` (`namespace`, `target_pod`,
+`force_wipe`).
 
 **Output**
 
@@ -425,9 +570,15 @@ ConfigMap is rolled back automatically so no stale wipe-target is left behind.
   "ordinal": 2,
   "partition_set": 2,
   "configmap": "mongodb-recovery-config",
+  "auto_patched": false,
   "next_step": "Monitor pod restart; run recovery/reset once pod is Running and before sync completes"
 }
 ```
+
+> `auto_patched: true` means G1 found the init container missing and
+> self-healed it during this call's gates (see "Gate G1 Self-Heal") — the
+> wipe that follows still applies normally either way. `wipe` does not
+> revert the patch itself; the eventual `recovery/reset` call does.
 
 **Post-wipe workflow**:
 
@@ -458,8 +609,9 @@ partial failure cannot leave a wipe armed.
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `recovery_configmap` | `RECOVERY_CONFIGMAP` | no | `mongodb-recovery-config` |
+
+`sts_name`/`recovery_configmap` are not task inputs — see "Data Paths and
+Credentials Are Auto-Detected" above.
 
 **Output**
 
@@ -467,9 +619,18 @@ partial failure cannot leave a wipe armed.
 {
   "sts": "mongodb",
   "configmap": "mongodb-recovery-config",
-  "partition": 3
+  "partition": 3,
+  "auto_patch_reverted": false
 }
 ```
+
+> `auto_patch_reverted: true` means this call found the
+> `recovery/auto-patched` annotation (left by a prior G1 self-heal) and
+> removed the temporary init container/volume, restoring the StatefulSet to
+> its original shape — see "Gate G1 Self-Heal". `false` covers both "nothing
+> to revert" and a best-effort revert failure (safe to call `reset` again;
+> the safety-critical wipe-target clear + partition lock above always
+> succeed independently of this step).
 
 ---
 
@@ -488,12 +649,13 @@ with per-pod `results`).
 | Name | Env | Required | Default |
 |---|---|---|---|
 | `namespace` | `DB_NAMESPACE` | yes | — |
-| `sts_name` | `MONGO_STS_NAME` | no | `mongodb` |
-| `credential_secret` | `MONGO_CRED_SECRET` | no | `mongodb-credentials` |
-| `credential_user_key` | `MONGO_CRED_USER_KEY` | no | `MONGO_ROOT_USER` |
-| `credential_pass_key` | `MONGO_CRED_PASS_KEY` | no | `MONGO_ROOT_PASS` |
 | `level` | `RECOVERY_LEVEL` | **yes** | — |
 | `force_primary_pod` | `RECOVERY_FORCE_POD` | no (required if level=force-primary) | `""` |
+
+`sts_name`/credential secret-and-keys are not task inputs — see "Data Paths
+and Credentials Are Auto-Detected" above. Without a `target_pod` input,
+`sts_name` detection falls back to namespace-listing (only resolves when
+exactly one StatefulSet exists in the namespace).
 
 Valid `level` values: `diagnose` | `unfreeze` | `reconfig` | `force-primary`
 
@@ -545,8 +707,8 @@ first blocking failure).
 
 | Gate | Check | Failure behavior | Suggestion |
 |---|---|---|---|
-| **G1** | Init container `data-recovery` is in the STS spec | BLOCK | Apply `02-sts-patch.yaml` |
-| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK | Apply `01-recovery-configmap.yaml` |
+| **G1** | Init container `data-recovery` is in the STS spec | BLOCK (self-healed automatically by `wipe`/`recover`, including creating G2's ConfigMap first if needed — see "Gate G1 Self-Heal"; `pre-check` stays read-only) | Apply the One-Time Setup patch above (fallback for deployments self-heal can't resolve) |
+| **G2** | ConfigMap `mongodb-recovery-config` exists | BLOCK (created automatically by `wipe`/`recover` as part of G1 self-heal; `pre-check` stays read-only) | Apply the One-Time Setup ConfigMap above |
 | **G3** | ≥1 healthy sync source (health=1) and a PRIMARY is elected | BLOCK | Run `recovery/fix-no-primary level=diagnose` |
 | **G4** | Oplog window ≥ estimated sync time (auto-resize in gate mode only; pre-check stays read-only) | BLOCK if resize fails | `db.adminCommand({replSetResizeOplog:1,size:N})` |
 | **G5** | Data size < 100 GB (overridable with `force_wipe=true`) | BLOCK | Use VolumeSnapshot or mongodump for large datasets |
@@ -586,8 +748,8 @@ Required oplog: 2730 MB  →  PASS (4096 >= 2730)
 ### Phase 0: Always run pre-check first
 
 ```bash
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
-URL="http://<cluster-dbs-ip>:30082"
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=30m)
+URL="http://aqsh-mongodb.kind-a.test:30080"
 
 curl -s -X POST "$URL/tasks/recovery/pre-check" \
   -H "Authorization: Bearer $TOKEN" \
@@ -611,7 +773,7 @@ POST /tasks/recovery/recover  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Then monitor initial sync until the pod catches up:
 POST /tasks/recovery/status   {"namespace":"mongo-1"}
-# or: kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
+# or: kubectl --context kind-cluster-a -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()"
 ```
 
 **Manual step-by-step (for special cases or debugging):**
@@ -624,22 +786,23 @@ POST /tasks/recovery/pre-check  {"namespace":"mongo-1","target_pod":"mongodb-2"}
 POST /tasks/recovery/wipe       {"namespace":"mongo-1","target_pod":"mongodb-2"}
 
 # Step 3: monitor pod restart
-kubectl --context kind-cluster-dbs -n mongo-1 get pods -w
+kubectl --context kind-cluster-a -n mongo-1 get pods -w
 # When mongodb-2 shows Running (not Terminating/Init):
 
 # Step 4: clear recovery state IMMEDIATELY
 POST /tasks/recovery/reset      {"namespace":"mongo-1"}
 
 # Step 5: verify sync (run repeatedly until optimeDate matches primary)
-kubectl --context kind-cluster-dbs -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
+kubectl --context kind-cluster-a -n mongo-1 exec mongodb-0 -- mongosh ... --eval "rs.status()" | grep -E 'name|stateStr|optimeDate'
 ```
 
 ---
 
 ### Scenario B: Corrupted Primary (pod-0 or whichever pod holds PRIMARY)
 
-Pod-0 is the Bitnami default primary, but after `recovery_fix_reconfig` resets
-member priorities all pods become equal candidates.  G7 checks `db.hello()`
+Pod-0 starts with `priority=2` (set during RS init) so it becomes primary by
+default, but after `recovery_fix_reconfig` resets member priorities all pods
+become equal candidates.  G7 checks `db.hello()`
 on the target pod regardless of its ordinal and blocks if it is currently
 PRIMARY.  Wait for automatic election after a crash, or trigger stepDown.
 
@@ -710,7 +873,7 @@ with corrupted data.
 ## RBAC Requirements
 
 The `aqsh-mongo-manager` ClusterRole must include (mirrors
-`k8s/cluster-dbs/mongodb/rbac.yaml`):
+`tests/chart/templates/mongodb-rbac.yaml`):
 
 ```yaml
 rules:
@@ -734,7 +897,10 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["mongodb-recovery-config"]
-    verbs: ["get", "patch"]      # only get/patch — see note below
+    verbs: ["get", "patch"]      # named get/patch — see note below
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]            # namespace-wide — resourceNames can't scope create; see note below
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list"]       # for G6 PVC space check
@@ -742,24 +908,47 @@ rules:
 
 > **`resourceNames` caveat**: an RBAC `resourceNames` restriction only applies
 > to verbs that act on an existing named object (`get`, `patch`, `update`,
-> `delete`). It is **ignored by `list`, `watch`, and `create`**. The recovery
-> tasks never create the ConfigMap (it is applied once during setup by an
-> admin) and never list it by name, so `get`/`patch` is the exact set needed.
-> Because the name is pinned here, a task invoked with a non-default
-> `recovery_configmap` or `sts_name` is denied by RBAC — these inputs exist for
-> future per-namespace customization where this ClusterRole is also widened.
+> `delete`). It is **ignored by `list`, `watch`, and `create`** — there's no
+> object yet for `resourceNames` to match against. G1 self-heal (below)
+> creates the recovery ConfigMap when it's missing, so `configmaps` `create`
+> is granted as its own, separate, namespace-wide rule — it cannot be pinned
+> to just `mongodb-recovery-config`'s name, so in practice this SA can
+> create a ConfigMap with *any* name in this namespace. `get`/`patch` stay
+> scoped to the one recovery ConfigMap by `resourceNames` as before.
+
+> **`resourceNames` are templated from chart values**
+> (`tests/chart/templates/mongodb-rbac.yaml`, driven by `.Values.mongodb.stsName`
+> / `credentialSecret` / `recoveryConfigmap`), defaulting to today's literals
+> (`mongodb`, `mongodb-credentials`, `mongodb-recovery-config`). Set those
+> values to match this cluster's *real* naming convention so RBAC permits
+> the actual objects detection will discover and operate on — this is a
+> deploy-time concern independent of whether the script learns the name via
+> internal config or by detecting it live; `sts_name`/`credential_secret`/
+> `recovery_configmap` are not task inputs, so there is no caller-supplied
+> name that needs separate RBAC consideration. See CLAUDE.md "Configuration
+> Layers".
 
 **Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
-`configmaps` create/update/list.
+`configmaps` update/list/delete.
+
+> **G1 self-heal's one additional RBAC need**: patching in the missing init
+> container/volume uses the *same* `statefulsets` `patch` verb already
+> required for the partition-lock/unlock cycle (RBAC's `patch` verb is not
+> field-scoped — anything `recovery_wipe_pod`/`recovery_reset` could already
+> patch, self-heal can too). Creating the recovery ConfigMap when it's also
+> missing is the one capability beyond what `recovery_wipe_pod`/
+> `recovery_reset` needed before — hence the separate, namespace-wide
+> `configmaps` `create` rule above. If that's denied (or no confident
+> volume-mount signal is found), self-heal fails soft and G1/G2 report
+> exactly as before. See "Gate G1 Self-Heal" above.
 
 ---
 
 ## API Examples
 
 ```bash
-TOKEN=$(kubectl --context kind-cluster-apps -n app-a create token test-client --duration=30m)
-URL="http://$(kubectl --context kind-cluster-dbs -n db-ops get svc aqsh-mongodb -o jsonpath='{.spec.clusterIP}'):4180"
-# or via NodePort: http://<cluster-dbs-ip>:30082
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=30m)
+URL="http://aqsh-mongodb.kind-a.test:30080"
 
 # 1. Status
 curl -s -X POST "$URL/tasks/recovery/status" \
@@ -796,12 +985,56 @@ curl -s -X POST "$URL/tasks/recovery/fix-no-primary" \
 ## Test Coverage Notes
 
 Integration tests (`tests/mongodb/recovery.bats`) exercise the full
-`recovery/recover` path twice against a real 3-member RS, always targeting
-the **highest ordinal** (mongodb-2). The following paths are deliberately
-**not** covered by integration tests and rely on unit tests + this runbook:
+`recovery/recover` path against a real 3-member RS — including both
+mongodb-1 and mongodb-2 as targets, and the `recovery/wipe` + manual
+`recovery/reset` split flow. They also pin down that `setup_file`'s own
+RS bootstrap is idempotent — re-running `rs.initiate()` against an
+already-initialised set and `createUser` against an existing root user must
+not crash.
 
-- `recovery/wipe` followed by a manual `recovery/reset` (the split flow)
-- Wiping a lower-ordinal pod (see the quorum warning above)
+`tests/mongodb/recovery_autodetect.bats`, `recovery_autodetect_file_mount.bats`,
+and `recovery_autodetect_bitnami_secret.bats` prove live auto-detection
+end-to-end against fixtures deliberately shaped to differ from the
+hardcoded-literal fallback: non-default credential key names, a real dbPath
+that mismatches the Bitnami-literal default, and three distinct ways a
+deployment can wire up root credentials — a literal username alongside a
+secretKeyRef password (`recovery_autodetect.bats`), the hardened-Bitnami
+`*_PASSWORD_FILE` convention (`recovery_autodetect_file_mount.bats`), and
+*both* username and password as Bitnami-named (`MONGODB_ROOT_USER`/
+`MONGODB_ROOT_PASSWORD`) secretKeyRefs (`recovery_autodetect_bitnami_secret.bats`
+— the only one of the three where `_recovery_detect_credentials`'s
+`user_secret`/`user_key` resolution branch runs against a real Secret rather
+than a mock). In every case, `recovery/pre-check` is called with only
+`namespace`+`target_pod` and must still resolve credentials/data_path
+correctly purely via detection. `recovery_bitnami_profile.bats` and
+`recovery_custom_naming.bats` cover the internal-config override tier the
+same way. `tests/unit/mongodb/recovery-detect.bats` covers the
+`_recovery_detect_*`/`recovery_resolve_*` functions directly (mocked
+kubectl), including every fail-soft path (ambiguous StatefulSet count, no
+env-based credential wiring, mismatched username/password secrets).
+
+`tests/mongodb/recovery_auto_patch.bats` proves the G1 self-heal mechanism
+end-to-end against a StatefulSet that deliberately never runs
+setup-data-recovery.sh: `recovery/pre-check` stays read-only (asserts the
+StatefulSet's `resourceVersion` is unchanged) while `recovery/wipe` and
+`recovery/recover` self-heal the missing init container, wipe the target,
+and (via `recovery/reset`, manually or as part of `recover`'s own cycle)
+revert the StatefulSet back to having no init container/annotation — all
+while asserting the *other* replica's pod UID never changes, proving no
+collateral restart. It also covers the fully-fresh case — neither the
+ConfigMap nor the init container has ever existed — proving `recovery/recover`
+creates the ConfigMap and patches the init container in the same call, with
+no separate setup-data-recovery.sh step. `tests/unit/mongodb/
+recovery-auto-patch.bats` covers `_recovery_detect_data_mount`/
+`_recovery_detect_run_as_user`/`_recovery_auto_patch_init_container`/
+`_recovery_revert_auto_patch` directly (mocked kubectl), including every
+fail-soft path (ConfigMap missing and creating it also fails, no matching
+volumeMount, zero replicas, patch failure) and the ConfigMap-auto-create
+success path.
+
+The following paths are deliberately **not** covered by integration tests
+and rely on unit tests + this runbook:
+
 - `fix-no-primary` levels `unfreeze` / `reconfig` / `force-primary`
   (require deliberately breaking the cluster)
 - The recover timeout path where `wipe-targets` is intentionally left in

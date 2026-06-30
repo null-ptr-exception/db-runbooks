@@ -79,9 +79,48 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id"
 
   local result_status
-  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.status // "unknown"')
+  result_status=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.status // "unknown"')
   echo "sanity result: status=${result_status}"
   assert [ "$result_status" != "critical" ]
+}
+
+@test "sanity-check result has expected JSON shape and auto-detects infra" {
+  http_post "${AQSH_URL}/tasks/sanity-check" '{"namespace": "mongo-1"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local result
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+
+  # required scalar fields
+  echo "$result" | jq -e '.status | test("^(ok|warning|critical)$")' >/dev/null
+  echo "$result" | jq -e '.namespace == "mongo-1"'                    >/dev/null
+  echo "$result" | jq -e '.pass   | type == "number"'                 >/dev/null
+  echo "$result" | jq -e '.warn   | type == "number"'                 >/dev/null
+  echo "$result" | jq -e '.fail   | type == "number"'                 >/dev/null
+  echo "$result" | jq -e '.total  | type == "number"'                 >/dev/null
+  echo "$result" | jq -e '.total  == (.pass + .warn + .fail)'         >/dev/null
+
+  # pass > 0 proves connectivity checks ran (not a no-op empty run)
+  local pass_count
+  pass_count=$(echo "$result" | jq -r '.pass')
+  assert [ "$pass_count" -gt 0 ]
+}
+
+@test "sanity-check fails task for unknown namespace" {
+  http_post "${AQSH_URL}/tasks/sanity-check" '{"namespace": "no-such-ns-xyz"}'
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id" 60 || true
+
+  local exec_status
+  exec_status=$(echo "$TASK_RESPONSE" | jq -r '.status // "unknown"')
+  assert_equal "$exec_status" "failed"
 }
 
 @test "restart completes and all pods ready" {

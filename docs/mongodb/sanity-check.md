@@ -47,6 +47,14 @@ Served by **aqsh-mongodb** on NodePort `30082`.
 | `credential_user_key` | `MONGO_CRED_USER_KEY` | string | no | `MONGO_ROOT_USER` | Key in Secret for username |
 | `credential_pass_key` | `MONGO_CRED_PASS_KEY` | string | no | `MONGO_ROOT_PASS` | Key in Secret for password |
 
+> `sts_name`/`credential_secret`/`credential_user_key`/`credential_pass_key` are
+> deployment conventions sourced from internal config
+> (`/etc/aqsh/config/mongodb.env`'s `*_DEFAULT` keys) by default — the
+> "Default" column above is the library's last-resort fallback, used only
+> when neither the caller nor internal config sets a value. See
+> `docs/mongodb/recovery.md` "API Reference" and CLAUDE.md "Configuration
+> Layers".
+
 ## Response
 
 ### 202 Accepted
@@ -128,21 +136,27 @@ See [examples/mongodb/sanity-check.sh](../../examples/mongodb/sanity-check.sh) f
 
 For run account lifecycle, expiry reconciliation, and account mutation operations, see [docs/mongodb/create-account.md](create-account.md).
 
+Run from the `test-client` pod (`*.kind-a.test` only resolves inside the
+clusters' own CoreDNS):
+
 ```bash
-MONGODB_AQSH_URL="http://<cluster-dbs-ip>:30082"
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=10m)
+AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
 
 # Minimal — check mongo-1 with all defaults
-curl -s -X POST "$MONGODB_AQSH_URL/tasks/sanity-check" \
+kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
+  curl -s -X POST "$AQSH_URL/tasks/sanity-check" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"namespace": "mongo-1"}'
 
 # Override StatefulSet name and credential secret
-curl -s -X POST "$MONGODB_AQSH_URL/tasks/sanity-check" \
+kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
+  curl -s -X POST "$AQSH_URL/tasks/sanity-check" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "namespace":         "mongo-2",
+    "namespace":         "mongo-1",
     "sts_name":          "mongodb",
     "credential_secret": "my-custom-secret"
   }'

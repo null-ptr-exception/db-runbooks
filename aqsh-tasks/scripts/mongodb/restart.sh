@@ -15,7 +15,8 @@ source "${LIB_DIR}/logging.sh"
 source "${LIB_DIR}/response.sh"
 source "${LIB_DIR}/k8s.sh"
 
-STS_NAME="${MONGO_STS_NAME:-mongodb}"
+[[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
+STS_NAME="${MONGO_STS_NAME:-${MONGO_STS_NAME_DEFAULT:-mongodb}}"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 
 log_info "mongo-restart" "Restarting StatefulSet '${STS_NAME}' in namespace '${DB_NAMESPACE}'"

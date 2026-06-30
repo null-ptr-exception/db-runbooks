@@ -1,6 +1,6 @@
 # MongoDB Account Lifecycle Tasks
 
-This document describes run account lifecycle management for single-cluster MongoDB (`kind-cluster-dbs`, namespace `mongo-1`).
+This document describes run account lifecycle management for single-cluster MongoDB (`kind-cluster-a`, namespace `mongo-1`).
 
 ## Core Rules
 
@@ -61,7 +61,10 @@ Request fields:
 
 - `namespace` (default `mongo-1`)
 - `sts_name` (default `mongodb`)
-- `credential_secret`, `credential_user_key`, `credential_pass_key`
+- `credential_secret`, `credential_user_key`, `credential_pass_key` — deployment
+  conventions sourced from internal config (`/etc/aqsh/config/mongodb.env`) by
+  default; rarely need to be passed explicitly. See `docs/mongodb/recovery.md`
+  "API Reference" and CLAUDE.md "Configuration Layers".
 - `auth_db` (default `admin`)
 - `username`
 - `roles_json` (`[{"role":"readWrite","db":"mydb"}]`)
@@ -160,28 +163,22 @@ Cron-friendly reconciliation:
 3. If fingerprint changed: mark `CHANGED`.
 4. If unchanged: drop user and mark `EXPIRED_DELETED`.
 
-## CronJob Patch and Operations
+## Scheduling Reconciliation
 
-Use a Kubernetes CronJob in `mongo-1` to invoke reconcile task periodically.
-
-Example patch workflow:
-
-1. Ensure service account can call aqsh-mongodb endpoint.
-2. Configure schedule (recommended every 30-60 min).
-3. Keep `concurrencyPolicy: Forbid`.
-4. Keep CronJob always deployed; no-op is expected when nothing to process.
-
-Manual trigger example:
+`reconcile-expiry` is a regular aqsh task (no separate CronJob exists in this
+repo) — call it like any other task, see the README "Task API Example":
 
 ```bash
-kubectl --context kind-cluster-dbs -n mongo-1 create job --from=cronjob/mongo-account-reconciler mongo-account-reconciler-manual-$(date +%s)
+TOKEN=$(kubectl --context kind-cluster-b -n mongo-core create token test-client --duration=10m)
+kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
+  curl -s -X POST "http://aqsh-mongodb.kind-a.test:30080/tasks/reconcile-expiry" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"namespace": "mongo-1"}'
 ```
 
-Inspect logs:
-
-```bash
-kubectl --context kind-cluster-dbs -n mongo-1 logs job/<job-name>
-```
+A production deployment would drive this on a schedule (e.g. a Kubernetes
+CronJob hitting the same endpoint every 30-60 min with `concurrencyPolicy:
+Forbid`) — this sandbox only exercises it via direct/manual calls.
 
 Verification checks:
 

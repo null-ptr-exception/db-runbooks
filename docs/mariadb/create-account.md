@@ -154,8 +154,8 @@ namespaced Secret access in the target database namespace:
 ```bash
 LIB_DIR="$PWD/aqsh-tasks/lib" \
   aqsh-tasks/scripts/mariadb/create-account.sh \
-  --context kind-cluster-dbs \
-  --namespace mariadb-2 \
+  --context kind-cluster-a \
+  --namespace mariadb-1 \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \
@@ -169,8 +169,8 @@ Real execution:
 ```bash
 LIB_DIR="$PWD/aqsh-tasks/lib" \
   aqsh-tasks/scripts/mariadb/create-account.sh \
-  --context kind-cluster-dbs \
-  --namespace mariadb-2 \
+  --context kind-cluster-a \
+  --namespace mariadb-1 \
   --database app_db \
   --username app_user \
   --privileges SELECT,INSERT \

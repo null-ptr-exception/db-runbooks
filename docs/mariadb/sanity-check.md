@@ -212,7 +212,7 @@ Local JSON-only:
 ```bash
 LIB_DIR="$PWD/aqsh-tasks/lib" \
   aqsh-tasks/scripts/mariadb/sanity-check.sh \
-  --context kind-cluster-dbs \
+  --context kind-cluster-a \
   --namespace mariadb-1 \
   --resource mariadb \
   --mdb mariadb \
@@ -223,7 +223,7 @@ Rundeck-style strict exit with result file:
 
 ```bash
 aqsh-tasks/scripts/mariadb/sanity-check.sh \
-  --context kind-cluster-dbs \
+  --context kind-cluster-a \
   --namespace mariadb-1 \
   --resource mariadb \
   --mdb mariadb \
@@ -231,10 +231,14 @@ aqsh-tasks/scripts/mariadb/sanity-check.sh \
   --strict-exit
 ```
 
-AQSH:
+AQSH (run from the `test-client` pod — `*.kind-a.test` only resolves inside
+the clusters' own CoreDNS):
 
 ```bash
-curl -s -X POST "$MARIADB_AQSH_URL/tasks/sanity-check" \
+TOKEN=$(kubectl --context kind-cluster-b -n db-ops create token test-client --duration=10m)
+
+kubectl --context kind-cluster-b -n db-ops exec deploy/test-client -- \
+  curl -s -X POST "http://aqsh-mariadb.kind-a.test:30080/tasks/sanity-check" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{

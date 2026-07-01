@@ -30,8 +30,8 @@ to complete. Behavior automatically adapts to the StatefulSet's
 
 | Name | Env Var | Type | Required | Validation | Default |
 |------|---------|------|----------|-----------|---------|
-| `namespace` | `DB_NAMESPACE` | string | yes | `^[a-z0-9][a-z0-9-]*$` | — |
-| `sts_name` | `MONGO_STS_NAME` | string | no | `^([a-z0-9][a-z0-9-]*)?$` | `""` (falls through to deployment convention) |
+| `namespace` | `DB_NAMESPACE` | string | yes | `^[a-z0-9]([-a-z0-9]*[a-z0-9])?$` | — |
+| `sts_name` | `MONGO_STS_NAME` | string | no | `^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$` | `""` (falls through to deployment convention) |
 
 Valid namespace in this sandbox: `mongo-1`.
 

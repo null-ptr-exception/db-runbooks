@@ -148,9 +148,20 @@ wait_for_task() {
   # Simulate the operator/human action OnDelete strategy requires: the
   # StatefulSet controller will not evict/recreate this pod on its own after
   # `kubectl rollout restart` bumps the template annotation — something else
-  # has to delete it. A short sleep lets the queued task's own
-  # `kubectl rollout restart statefulset` call land first.
-  sleep 5
+  # has to delete it. Poll for that annotation to actually change (proof the
+  # queued task's own `kubectl rollout restart statefulset` call has landed)
+  # instead of guessing a fixed sleep, which can race a slow/backlogged task
+  # queue and let the pod get recreated from the OLD template.
+  local before_restarted_at cur_restarted_at elapsed=0
+  before_restarted_at=$(kubectl --context "$CTX_A" -n "$ONS" get statefulset mongodb \
+    -o jsonpath='{.spec.template.metadata.annotations.kubectl\.kubernetes\.io/restartedAt}' 2>/dev/null || true)
+  while (( elapsed < 30 )); do
+    cur_restarted_at=$(kubectl --context "$CTX_A" -n "$ONS" get statefulset mongodb \
+      -o jsonpath='{.spec.template.metadata.annotations.kubectl\.kubernetes\.io/restartedAt}' 2>/dev/null || true)
+    [[ -n "$cur_restarted_at" && "$cur_restarted_at" != "$before_restarted_at" ]] && break
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
   kubectl --context "$CTX_A" -n "$ONS" delete pod "$pod" --wait=false
 
   wait_for_task "$AQSH_URL" "$task_id" 180

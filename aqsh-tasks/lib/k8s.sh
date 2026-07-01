@@ -951,10 +951,15 @@ k8s_sts_restart() {
     return 1
   fi
 
-  # Detect update strategy
-  local strategy
-  strategy=$(_kubectl get statefulset "$sts_name" \
-    -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || echo "RollingUpdate")
+  # Single snapshot read of strategy/replicas/partition — avoids the TOCTOU
+  # risk of separate sequential `kubectl get` calls, each of which could
+  # observe a different point in time if another actor (e.g. mongodb
+  # recovery's own partition patches) mutates the StatefulSet in between.
+  local sts_json strategy replicas_spec partition
+  sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>/dev/null) || sts_json="{}"
+  strategy=$(echo "$sts_json" | jq -r '.spec.updateStrategy.type // "RollingUpdate"')
+  replicas_spec=$(echo "$sts_json" | jq -r '.spec.replicas // empty')
+  partition=$(echo "$sts_json" | jq -r '.spec.updateStrategy.rollingUpdate.partition // empty')
   log_debug "$op" "Detected updateStrategy for '$sts_name': ${strategy:-<empty, defaulting RollingUpdate>}"
   log_info "$op" "Update strategy: $strategy"
 
@@ -990,11 +995,6 @@ k8s_sts_restart() {
     # (updatedReplicas >= replicas-partition is already true) without any
     # pod ever rolling. Detect and unlock it so restart actually restarts.
     local partition_reset="false"
-    local replicas_spec partition
-    replicas_spec=$(_kubectl get statefulset "$sts_name" \
-      -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
-    partition=$(_kubectl get statefulset "$sts_name" \
-      -o jsonpath='{.spec.updateStrategy.rollingUpdate.partition}' 2>/dev/null || echo "")
     log_debug "$op" "rollingUpdate.partition for '$sts_name': ${partition:-<unset>} (spec.replicas: ${replicas_spec:-<unset>})"
 
     if [[ -n "$partition" && -n "$replicas_spec" && "$partition" -ge "$replicas_spec" ]]; then

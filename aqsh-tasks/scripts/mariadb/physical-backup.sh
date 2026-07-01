@@ -147,10 +147,16 @@ fi
 
 # The operator only backs up a Ready source — fail clearly rather than create a
 # PhysicalBackup that can never complete.
-SOURCE_JSON="$(_kubectl get mariadb "$MARIADB_NAME" -o json 2>/dev/null || true)"
-if [[ -z "$SOURCE_JSON" ]]; then
-  mdbt_fail "$OP" "source MariaDB '${MARIADB_NAME}' not found in '${NAMESPACE}'" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace: $ns, mariadb: $mdb}')" 2
+# Fetch the source spec. Merge stderr into the capture so a real failure
+# (permission/connectivity) is distinguished from a genuine NotFound instead of
+# both looking like "not found".
+if ! SOURCE_JSON="$(_kubectl get mariadb "$MARIADB_NAME" -o json 2>&1)"; then
+  if [[ "$SOURCE_JSON" == *NotFound* || "$SOURCE_JSON" == *"not found"* ]]; then
+    mdbt_fail "$OP" "source MariaDB '${MARIADB_NAME}' not found in '${NAMESPACE}'" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace: $ns, mariadb: $mdb}')" 2
+  fi
+  mdbt_fail "$OP" "failed to query source MariaDB '${MARIADB_NAME}': ${SOURCE_JSON}" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace: $ns, mariadb: $mdb}')" 1
 fi
 READY="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' <<<"$SOURCE_JSON" | tail -1)"
 if [[ "$READY" != "True" ]]; then

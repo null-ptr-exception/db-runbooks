@@ -42,7 +42,10 @@ case "$verb" in
     case "$args" in
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;   # resolve-name list
       *"-o json"*)
-        [[ "${MOCK_FOUND:-1}" == "1" ]] || exit 1                          # source missing
+        # MOCK_GET_ERR=1 → simulate a real kubectl failure (perms/connectivity);
+        # MOCK_FOUND=0 → simulate a genuine NotFound.
+        [[ "${MOCK_GET_ERR:-0}" == "1" ]] && { echo "Unable to connect to the server: dial tcp: timeout" >&2; exit 1; }
+        [[ "${MOCK_FOUND:-1}" == "1" ]] || { echo "Error from server (NotFound): mariadbs.k8s.mariadb.com not found" >&2; exit 1; }
         jq -n --arg r "${MOCK_READY:-True}" \
           '{status: {conditions: [{type: "Ready", status: $r}]}}';   exit 0 ;;
       *) echo "mock kubectl: unhandled get: $args" >&2;       exit 1 ;;
@@ -134,6 +137,14 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
   [[ "$(result_field '.message')" == *"not found"* ]]
+}
+
+@test "physical-backup surfaces a real kubectl error instead of reporting not-found" {
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_GET_ERR=1
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"failed to query source MariaDB"* ]]
+  [[ "$(result_field '.message')" != *"not found"* ]]
 }
 
 @test "physical-backup rejects an invalid target" {

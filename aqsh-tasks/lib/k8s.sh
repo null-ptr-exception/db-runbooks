@@ -958,9 +958,10 @@ k8s_sts_restart() {
   local sts_json strategy replicas_spec partition
   sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>/dev/null) || sts_json="{}"
   strategy=$(echo "$sts_json" | jq -r '.spec.updateStrategy.type // "RollingUpdate"')
+  strategy="${strategy:-RollingUpdate}"
   replicas_spec=$(echo "$sts_json" | jq -r '.spec.replicas // empty')
   partition=$(echo "$sts_json" | jq -r '.spec.updateStrategy.rollingUpdate.partition // empty')
-  log_debug "$op" "Detected updateStrategy for '$sts_name': ${strategy:-<empty, defaulting RollingUpdate>}"
+  log_debug "$op" "Detected updateStrategy for '$sts_name': $strategy"
   log_info "$op" "Update strategy: $strategy"
 
   if [[ "$strategy" == "OnDelete" ]]; then

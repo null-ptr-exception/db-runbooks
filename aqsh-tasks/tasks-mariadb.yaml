@@ -233,7 +233,7 @@ tasks:
         type: string
       # The password Secret is a managed-database internal: its name is derived by
       # convention (mariadb-account-<username>), its key defaults to "password",
-      # and the result returns a credentialsRef. Not task inputs;
+      # and the result returns it as password_secret.{name,key}. Not task inputs;
       # ACCOUNT_PASSWORD_SECRET_NAME / _KEY / _PREFIX stay as env overrides only.
       - name: generate_password
         env: GENERATE_PASSWORD

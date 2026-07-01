@@ -54,6 +54,11 @@ if [[ "$cmd" == "create" && "${args[1]:-}" == "secret" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "annotate" ]]; then
+  printf '%s\n' "${args[*]}" > "${TEST_TMPDIR}/annotate-secret.args"
+  exit 0
+fi
+
 if [[ "$cmd" == "get" ]]; then
   resource="${args[1]:-}"
   name="${args[2]:-}"
@@ -81,6 +86,11 @@ if [[ "$cmd" == "get" ]]; then
 
   if [[ "$resource" == "pods" ]]; then
     printf ''
+    exit 0
+  fi
+
+  if [[ "$resource" == "secret" && "$output" == *annotations* ]]; then
+    printf '%s' "${MOCK_SECRET_OWNER:-}"
     exit 0
   fi
 
@@ -518,6 +528,17 @@ assert_json() {
   assert_json '.status' 'CREATED'
   assert_json '.reason_code' 'ACCOUNT_CREATED'
   assert_json '.password_secret.managed' 'false'
+}
+
+@test "PASSWORD_SECRET_CONFLICT when the derived Secret belongs to a different account" {
+  export KUBECTL_CREATE_FAIL=1        # Secret already exists
+  export SECRET_ALREADY_EXISTS=1
+  export MOCK_SECRET_OWNER=other_user # owned by a different account
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_json '.status' 'BLOCKED'
+  assert_json '.reason_code' 'PASSWORD_SECRET_CONFLICT'
 }
 
 @test "existing account is idempotent and does not rewrite password Secret" {

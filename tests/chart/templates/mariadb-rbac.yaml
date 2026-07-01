@@ -22,7 +22,9 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "create"]
+    # patch: tag the managed account password Secret with an owner annotation
+    # (create-account collision guard).
+    verbs: ["get", "create", "patch"]
   - apiGroups: ["k8s.mariadb.com", "mariadb.mmontes.io"]
     resources: ["mariadbs"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]

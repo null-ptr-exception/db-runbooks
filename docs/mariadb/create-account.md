@@ -21,6 +21,13 @@ Secret name), not supplied by the caller. The result returns
 accounts, the task does not create or backfill a missing password Secret, because
 it cannot know the pre-existing account's password.
 
+Because usernames are normalised, two distinct usernames could map to the same
+Secret name (e.g. `App_User` and `app-user`). To prevent one account reusing
+another's password, the managed Secret is tagged with an owner annotation; a run
+whose derived Secret already belongs to a different account is blocked
+(`PASSWORD_SECRET_CONFLICT`) — pass `password_secret_name` explicitly to
+disambiguate.
+
 When `generate_password=true`, the task creates the generated password Secret
 before running `CREATE USER`, so the password can be recovered if the task fails
 before the account is created. Secret creation is create-only: if the Secret
@@ -132,6 +139,7 @@ Real execution returns one of:
 | `BLOCKED` | `PASSWORD_SECRET_REQUIRED` | New account requested without a password Secret |
 | `BLOCKED` | `PASSWORD_SECRET_UNAVAILABLE` | Requested new account but password Secret is missing or unreadable |
 | `BLOCKED` | `PASSWORD_SECRET_INVALID` | Password Secret value contains unsupported characters |
+| `BLOCKED` | `PASSWORD_SECRET_CONFLICT` | The derived Secret already belongs to a different account (name collision) — pass `password_secret_name` explicitly |
 | `ERROR` | `INVALID_INPUT` | Validation failed |
 | `ERROR` | `KUBECTL_UNAVAILABLE` | `kubectl` or the target cluster API is unavailable |
 | `ERROR` | `CURRENT_PRIMARY_EMPTY` | No primary MariaDB pod was found during operation |
@@ -149,7 +157,7 @@ namespaced Secret access in the target database namespace:
 |----------|-------|---------|
 | `pods`, `pods/exec` | `get`, `list`, `watch`, `create` | Resolve primary and execute SQL |
 | `statefulsets`, `mariadbs.k8s.mariadb.com` | `get`, `list`, `watch` | Resolve target topology |
-| `secrets` | `get`, `create` | Read or create namespace-scoped account password Secrets whose names pass the configured prefix check |
+| `secrets` | `get`, `create`, `patch` | Read/create namespace-scoped account password Secrets (names must pass the prefix check); `patch` tags the owner annotation for the collision guard |
 
 ## CLI Example
 

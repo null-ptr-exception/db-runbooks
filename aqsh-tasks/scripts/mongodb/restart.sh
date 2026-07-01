@@ -30,10 +30,10 @@ export K8S_NAMESPACE="${DB_NAMESPACE}"
 log_info "mongo-restart" "Restarting StatefulSet '${STS_NAME}' in namespace '${DB_NAMESPACE}'"
 
 result=$(k8s_sts_restart "$STS_NAME")
-strategy=$(echo "$result" | grep -o '"strategy":"[^"]*"' | cut -d'"' -f4)
-partition_reset=$(echo "$result" | grep -o '"partition_reset":[a-z]*' | cut -d':' -f2)
-ready=$(echo "$result"    | grep -o '"ready":[0-9]*'    | grep -o '[0-9]*$')
-replicas=$(echo "$result" | grep -o '"replicas":[0-9]*' | grep -o '[0-9]*$')
+strategy=$(echo "$result" | jq -r '.data.strategy // "RollingUpdate"')
+partition_reset=$(echo "$result" | jq -r '.data.partition_reset // false')
+ready=$(echo "$result" | jq -r '.data.ready // 0')
+replicas=$(echo "$result" | jq -r '.data.replicas // 0')
 
 log_info "mongo-restart" "Done: ${ready:-0}/${replicas:-0} ready"
 

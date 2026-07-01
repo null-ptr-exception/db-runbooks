@@ -4,34 +4,92 @@ Rolling restart of a MongoDB StatefulSet.
 
 ## Description
 
-Triggers `kubectl rollout restart statefulset/mongodb` in the target namespace, then waits up to 5 minutes for the rollout to complete.
+Triggers `kubectl rollout restart statefulset` in the target namespace against
+the resolved StatefulSet name (see "Input" below), then waits for the rollout
+to complete. Behavior automatically adapts to the StatefulSet's
+`updateStrategy`, detected live from the cluster — no caller input needed:
+
+- `RollingUpdate` (default): waits via `kubectl rollout status`. If
+  `spec.updateStrategy.rollingUpdate.partition` is already at or above the
+  replica count — the resting state MongoDB recovery/wipe leaves a
+  StatefulSet in between wipes (see `mongodb-recovery.sh`'s `recovery_reset`)
+  — no pod would ever roll and `kubectl rollout status` would report success
+  immediately without restarting anything. The task detects this and resets
+  the partition to 0 before waiting, so `restart` always actually restarts
+  every pod (see `partition_reset` in the output below). This intentionally
+  bypasses whatever safety ordering MongoDB recovery's own tooling (primary
+  step-down, oplog/PVC checks) would otherwise apply to a partitioned
+  StatefulSet — `restart` does not check who the current primary is before
+  unlocking and rolling.
+- `OnDelete`: an operator or human is expected to delete pods to pick up the
+  new template; the task instead waits for pods matching a label selector
+  (`app.kubernetes.io/name=<sts_name>` by default) to cycle through
+  NotReady → Ready.
 
 ## Input
 
-| Name | Env Var | Type | Required | Validation |
-|------|---------|------|----------|-----------|
-| `namespace` | `DB_NAMESPACE` | string | yes | `^mongo-[0-9]+$` |
+| Name | Env Var | Type | Required | Validation | Default |
+|------|---------|------|----------|-----------|---------|
+| `namespace` | `DB_NAMESPACE` | string | yes | `^[a-z0-9][a-z0-9-]*$` | — |
+| `sts_name` | `MONGO_STS_NAME` | string | no | `^([a-z0-9][a-z0-9-]*)?$` | `""` (falls through to deployment convention) |
 
 Valid namespace in this sandbox: `mongo-1`.
+
+`sts_name` is an escape hatch for a caller who genuinely needs a different
+StatefulSet name on a single call. When omitted (the normal case), the
+StatefulSet name is resolved via the deployment's configuration layers (see
+CLAUDE.md "Configuration Layers"):
+
+1. Task input `sts_name`, if the caller explicitly passed one.
+2. Internal config `MONGO_STS_NAME_DEFAULT` (`aqsh-tasks/config/mongodb.env`,
+   commented out by default) — set once per deployment when its naming
+   convention differs from the hardcoded fallback.
+3. Hardcoded literal `mongodb`.
 
 ## Output (written to `$AQSH_RESULT_FILE`)
 
 ```json
 {
-  "namespace":   "mongo-1",
-  "statefulset": "mongodb",
-  "replicas":    1
+  "namespace":       "mongo-1",
+  "statefulset":     "mongodb",
+  "strategy":        "RollingUpdate",
+  "partition_reset": false,
+  "ready":           1,
+  "replicas":        1
 }
 ```
+
+`strategy` reflects the `updateStrategy` actually detected on the live
+StatefulSet (`RollingUpdate` or `OnDelete`), not a caller input.
+`partition_reset` is `true` only when the task found `rollingUpdate.partition`
+at/above the replica count and reset it to 0 to unblock the restart (always
+`false` for `OnDelete`, since partition doesn't apply there).
 
 ## Permissions
 
 | Field | Value |
 |-------|-------|
 | `allowed_groups` | `system:serviceaccounts` |
-| Timeout | 5 minutes |
+| Task timeout | 8 minutes (`tasks-mongodb.yaml`) |
+| Internal rollout-wait timeout | 300 seconds (5 minutes) — a separate, inner timeout inside `k8s_sts_restart`'s `kubectl rollout status` / `kubectl wait` calls; not currently configurable from this task |
 
-RBAC: `aqsh-mongo-manager` ClusterRole grants `get` and `patch` on `statefulsets/mongodb` in `mongo-1`.
+RBAC: `aqsh-mongo-manager` ClusterRole (`tests/chart/templates/mongodb-rbac.yaml`)
+grants, scoped to `mongo-1`/the target namespace:
+
+- `statefulsets`: `get`, `patch` (resourceName pinned to the deployment's
+  configured StatefulSet name) — drives `kubectl rollout restart`.
+- `statefulsets`: `list`, `watch` (namespace-wide) — strategy/status detection.
+- `pods`: `get`, `list`, `delete` — `restart` uses `get`/`list` to poll
+  readiness; `delete` is used by other MongoDB tasks sharing this ClusterRole,
+  not by `restart`.
+- `pods/exec`: `create` — used by other MongoDB tasks sharing this
+  ClusterRole, not by `restart`.
+- `secrets`: `get` (pinned to the credential secret) — used by other MongoDB
+  tasks, not by `restart`.
+- `configmaps`: `get`, `patch` (pinned) and `create` (namespace-wide) — used
+  by recovery tasks, not by `restart`.
+- `persistentvolumeclaims`: `get` — used by sanity-check, not by `restart`.
+- `events`: `get`, `list` — used by sanity-check, not by `restart`.
 
 ## API Example
 

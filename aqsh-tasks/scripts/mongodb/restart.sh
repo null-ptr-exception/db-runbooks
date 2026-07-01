@@ -31,16 +31,18 @@ log_info "mongo-restart" "Restarting StatefulSet '${STS_NAME}' in namespace '${D
 
 result=$(k8s_sts_restart "$STS_NAME")
 strategy=$(echo "$result" | grep -o '"strategy":"[^"]*"' | cut -d'"' -f4)
+partition_reset=$(echo "$result" | grep -o '"partition_reset":[a-z]*' | cut -d':' -f2)
 ready=$(echo "$result"    | grep -o '"ready":[0-9]*'    | grep -o '[0-9]*$')
 replicas=$(echo "$result" | grep -o '"replicas":[0-9]*' | grep -o '[0-9]*$')
 
 log_info "mongo-restart" "Done: ${ready:-0}/${replicas:-0} ready"
 
 jq -n \
-  --arg  namespace   "$DB_NAMESPACE" \
-  --arg  statefulset "$STS_NAME" \
-  --arg  strategy    "${strategy:-RollingUpdate}" \
-  --argjson ready    "${ready:-0}" \
-  --argjson replicas "${replicas:-0}" \
-  '{namespace: $namespace, statefulset: $statefulset, strategy: $strategy, ready: $ready, replicas: $replicas}' \
+  --arg  namespace       "$DB_NAMESPACE" \
+  --arg  statefulset     "$STS_NAME" \
+  --arg  strategy        "${strategy:-RollingUpdate}" \
+  --argjson partition_reset "${partition_reset:-false}" \
+  --argjson ready        "${ready:-0}" \
+  --argjson replicas     "${replicas:-0}" \
+  '{namespace: $namespace, statefulset: $statefulset, strategy: $strategy, partition_reset: $partition_reset, ready: $ready, replicas: $replicas}' \
   > "$AQSH_RESULT_FILE"

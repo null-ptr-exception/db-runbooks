@@ -982,6 +982,33 @@ k8s_sts_restart() {
       return 1
     fi
   else
+    # RollingUpdate: a rollingUpdate.partition left at/above the replica
+    # count (e.g. the locked resting state MongoDB recovery/wipe leaves a
+    # StatefulSet in between wipes — see mongodb-recovery.sh's
+    # recovery_reset, which deliberately restores partition to the replica
+    # count) makes `kubectl rollout status` report success immediately
+    # (updatedReplicas >= replicas-partition is already true) without any
+    # pod ever rolling. Detect and unlock it so restart actually restarts.
+    local partition_reset="false"
+    local replicas_spec partition
+    replicas_spec=$(_kubectl get statefulset "$sts_name" \
+      -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "")
+    partition=$(_kubectl get statefulset "$sts_name" \
+      -o jsonpath='{.spec.updateStrategy.rollingUpdate.partition}' 2>/dev/null || echo "")
+    log_debug "$op" "rollingUpdate.partition for '$sts_name': ${partition:-<unset>} (spec.replicas: ${replicas_spec:-<unset>})"
+
+    if [[ -n "$partition" && -n "$replicas_spec" && "$partition" -ge "$replicas_spec" ]]; then
+      log_info "$op" "rollingUpdate.partition ($partition) >= replicas ($replicas_spec) — would block every pod from rolling; resetting partition to 0"
+      if ! out=$(_kubectl patch statefulset "$sts_name" --type=merge \
+          -p '{"spec":{"updateStrategy":{"rollingUpdate":{"partition":0}}}}' 2>&1); then
+        log_error "$op" "Failed to reset stuck partition on '$sts_name': $out"
+        response_err "$op" "Failed to reset stuck rollingUpdate.partition" \
+          "{\"sts\":\"$sts_name\",\"partition\":${partition},\"replicas\":${replicas_spec},\"detail\":\"$(echo "$out" | head -1)\"}" 1
+        return 1
+      fi
+      partition_reset="true"
+    fi
+
     # RollingUpdate: standard rollout status
     if ! out=$(_kubectl rollout status statefulset "$sts_name" --timeout="${timeout}s" 2>&1); then
       log_error "$op" "Rollout did not complete within ${timeout}s: $out"
@@ -1000,7 +1027,7 @@ k8s_sts_restart() {
 
   log_info "$op" "StatefulSet '$sts_name' restarted: ${ready}/${replicas} ready"
   response_ok "$op" "StatefulSet restarted" \
-    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"strategy\":\"$strategy\",\"ready\":${ready},\"replicas\":${replicas}}"
+    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"strategy\":\"$strategy\",\"partition_reset\":${partition_reset:-false},\"ready\":${ready},\"replicas\":${replicas}}"
 }
 
 # ---------------------------------------------------------------------------

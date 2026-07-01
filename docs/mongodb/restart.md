@@ -9,7 +9,18 @@ the resolved StatefulSet name (see "Input" below), then waits for the rollout
 to complete. Behavior automatically adapts to the StatefulSet's
 `updateStrategy`, detected live from the cluster — no caller input needed:
 
-- `RollingUpdate` (default): waits via `kubectl rollout status`.
+- `RollingUpdate` (default): waits via `kubectl rollout status`. If
+  `spec.updateStrategy.rollingUpdate.partition` is already at or above the
+  replica count — the resting state MongoDB recovery/wipe leaves a
+  StatefulSet in between wipes (see `mongodb-recovery.sh`'s `recovery_reset`)
+  — no pod would ever roll and `kubectl rollout status` would report success
+  immediately without restarting anything. The task detects this and resets
+  the partition to 0 before waiting, so `restart` always actually restarts
+  every pod (see `partition_reset` in the output below). This intentionally
+  bypasses whatever safety ordering MongoDB recovery's own tooling (primary
+  step-down, oplog/PVC checks) would otherwise apply to a partitioned
+  StatefulSet — `restart` does not check who the current primary is before
+  unlocking and rolling.
 - `OnDelete`: an operator or human is expected to delete pods to pick up the
   new template; the task instead waits for pods matching a label selector
   (`app.kubernetes.io/name=<sts_name>` by default) to cycle through
@@ -39,16 +50,20 @@ CLAUDE.md "Configuration Layers"):
 
 ```json
 {
-  "namespace":   "mongo-1",
-  "statefulset": "mongodb",
-  "strategy":    "RollingUpdate",
-  "ready":       1,
-  "replicas":    1
+  "namespace":       "mongo-1",
+  "statefulset":     "mongodb",
+  "strategy":        "RollingUpdate",
+  "partition_reset": false,
+  "ready":           1,
+  "replicas":        1
 }
 ```
 
 `strategy` reflects the `updateStrategy` actually detected on the live
 StatefulSet (`RollingUpdate` or `OnDelete`), not a caller input.
+`partition_reset` is `true` only when the task found `rollingUpdate.partition`
+at/above the replica count and reset it to 0 to unblock the restart (always
+`false` for `OnDelete`, since partition doesn't apply there).
 
 ## Permissions
 

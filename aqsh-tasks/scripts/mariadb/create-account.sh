@@ -103,6 +103,11 @@ PRIVILEGES_RAW="${ACCOUNT_PRIVILEGES:-}"
 PASSWORD_SECRET_NAME="${ACCOUNT_PASSWORD_SECRET_NAME:-}"
 PASSWORD_SECRET_KEY="${ACCOUNT_PASSWORD_SECRET_KEY:-password}"
 PASSWORD_SECRET_PREFIX="${ACCOUNT_PASSWORD_SECRET_PREFIX:-mariadb-account-}"
+# Ownership marker written on the password Secret so a later run can detect a
+# derived-name collision between distinct usernames (e.g. App_User vs app-user
+# both normalise to mariadb-account-app-user) and refuse to reuse another
+# account's Secret / password.
+ACCOUNT_OWNER_ANNOTATION="aqsh.null-ptr-exception.dev/account-username"
 GENERATE_PASSWORD="${GENERATE_PASSWORD:-true}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
@@ -138,6 +143,21 @@ while [[ $# -gt 0 ]]; do
     *) echo "error: unknown option: $1" >&2; usage; exit 2 ;;
   esac
 done
+
+# The account's password Secret is a managed-database internal: its name is
+# derived by convention (<prefix><username>, prefix default mariadb-account-)
+# rather than spelled out by the caller, who references it via the result's
+# password_secret.{name,key} instead. ACCOUNT_PASSWORD_SECRET_NAME / _PREFIX /
+# _KEY remain env/flag overrides for operators, but are not task inputs.
+# A MariaDB username may contain characters invalid in a Kubernetes Secret name
+# (e.g. underscores, uppercase), so the derived name is normalised to RFC1123
+# (lowercase alnum + dash). Operators with a clashing scheme can still pin the
+# name via the override.
+if [[ -z "$PASSWORD_SECRET_NAME" && -n "$USERNAME" ]]; then
+  PASSWORD_SECRET_NAME="$(printf '%s' "${PASSWORD_SECRET_PREFIX}${USERNAME}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -e 's/[^a-z0-9-]/-/g' -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')"
+fi
 
 ERRORS=()
 PRIVILEGES=()
@@ -361,7 +381,26 @@ PY
 create_password_secret() {
   local password="$1"
   _kubectl create secret generic "$PASSWORD_SECRET_NAME" \
-    "--from-literal=${PASSWORD_SECRET_KEY}=${password}" >/dev/null
+    "--from-literal=${PASSWORD_SECRET_KEY}=${password}" >/dev/null || return 1
+  # Tag ownership so a later run for a different username that normalises to the
+  # same Secret name is detected as a collision instead of silently reusing it.
+  _kubectl annotate secret "$PASSWORD_SECRET_NAME" \
+    "${ACCOUNT_OWNER_ANNOTATION}=${USERNAME}" --overwrite >/dev/null 2>&1 || true
+}
+
+# assert_secret_owner — refuse to use an existing password Secret that belongs to
+# a different account (derived-name collision). A Secret with no owner annotation
+# (e.g. created before this marker existed) is treated as unowned and allowed, for
+# backward compatibility.
+assert_secret_owner() {
+  local owner
+  owner="$(_kubectl get secret "$PASSWORD_SECRET_NAME" \
+    -o "jsonpath={.metadata.annotations['${ACCOUNT_OWNER_ANNOTATION}']}" 2>/dev/null || true)"
+  if [[ -n "$owner" && "$owner" != "$USERNAME" ]]; then
+    SUMMARY="password Secret '${PASSWORD_SECRET_NAME}' already belongs to account '${owner}', not '${USERNAME}' (derived-name collision); pass password_secret_name explicitly to disambiguate"
+    RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_CONFLICT "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"
+    emit_result "$RESULT_JSON" BLOCKED "$SUMMARY"
+  fi
 }
 
 validate_inputs
@@ -472,6 +511,10 @@ if bool_enabled "$GENERATE_PASSWORD"; then
   if create_password_secret "$PASSWORD_VALUE" 2>/dev/null; then
     SECRET_MANAGED=true
   else
+    # The Secret already exists. Reuse it only if it belongs to this same
+    # account — otherwise a normalised-name collision would hand one user
+    # another user's password.
+    assert_secret_owner
     # A concurrent run may have created the Secret first; reuse it instead of overwriting it.
     if ! PASSWORD_VALUE="$(read_secret_password)"; then
       SUMMARY="Failed to create password Secret"
@@ -482,6 +525,9 @@ if bool_enabled "$GENERATE_PASSWORD"; then
   fi
 fi
 if ! bool_enabled "$GENERATE_PASSWORD"; then
+  # Reading a caller-supplied Secret: guard against a collision handing this
+  # account a Secret that belongs to a different one.
+  assert_secret_owner
   if ! PASSWORD_VALUE="$(read_secret_password)"; then
     SUMMARY="Failed to read password Secret"
     RESULT_JSON="$(result_json BLOCKED PASSWORD_SECRET_UNAVAILABLE "$SUMMARY" "$CURRENT_PRIMARY" false "$SQL_PLAN_JSON" "[]" false)"

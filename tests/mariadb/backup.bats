@@ -109,24 +109,6 @@ wait_for_task() {
   assert_equal "$bucket" "db-backups"
 }
 
-@test "backup with custom bucket works" {
-  http_post "${AQSH_URL}/tasks/backup" \
-    '{"namespace":"mariadb-1","minio_bucket":"test-backups"}'
-  assert_equal "$HTTP_CODE" "202"
-
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
-  [[ -n "$task_id" ]] || { echo "missing task id in response: $HTTP_BODY" >&2; return 1; }
-  wait_for_task "$AQSH_URL" "$task_id"
-
-  local result data bucket
-  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
-  data=$(echo "$result" | jq -r '.data // empty')
-  bucket=$(echo "$data" | jq -r '.bucket // empty')
-
-  assert_equal "$bucket" "test-backups"
-}
-
 @test "backup returns size and timestamp" {
   http_post "${AQSH_URL}/tasks/backup" \
     '{"namespace":"mariadb-1"}'

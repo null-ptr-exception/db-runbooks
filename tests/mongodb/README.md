@@ -6,6 +6,10 @@ Validates MongoDB aqsh tasks: sanity-check and restart.
 
 - Sanity-check task completes without critical issues
 - Restart task advances StatefulSet generation and pods come back Ready
+  (RollingUpdate strategy, `mongodb.bats`)
+- Restart task correctly detects `updateStrategy: OnDelete` and waits for an
+  operator-driven pod cycle rather than a false-positive no-op pass
+  (`restart_ondelete.bats`, separate `mongo-ondelete` namespace)
 
 ## Topology
 

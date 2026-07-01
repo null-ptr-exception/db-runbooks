@@ -21,6 +21,8 @@ spec:
       app: mongodb
   serviceName: mongodb
   replicas: 1
+  updateStrategy:
+    type: {{ .Values.mongodb.updateStrategy | default "RollingUpdate" }}
   template:
     metadata:
       labels:

@@ -49,6 +49,14 @@ mongodb:
   namespace: mongo-1
   image: mongo:7.0.21
   storage: 1Gi
+  # updateStrategy for the StatefulSet. Default RollingUpdate matches the
+  # official mongo image's normal deployment convention (aqsh drives the
+  # rollout directly). Set to OnDelete to model Bitnami-operator-style
+  # deployments, where an external actor (operator or human) is expected to
+  # delete pods to pick up the new template — see tests/mongodb/
+  # restart_ondelete.bats for how k8s_sts_restart's OnDelete branch is
+  # exercised against this.
+  updateStrategy: RollingUpdate
   # Naming convention this deployment's recovery/account/sanity-check tasks
   # use by default (see aqsh-tasks/config/mongodb.env's *_DEFAULT keys and
   # CLAUDE.md "Configuration Layers"). The RBAC ClusterRole below is scoped

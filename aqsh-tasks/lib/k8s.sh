@@ -955,19 +955,23 @@ k8s_sts_restart() {
   local strategy
   strategy=$(_kubectl get statefulset "$sts_name" \
     -o jsonpath='{.spec.updateStrategy.type}' 2>/dev/null || echo "RollingUpdate")
+  log_debug "$op" "Detected updateStrategy for '$sts_name': ${strategy:-<empty, defaulting RollingUpdate>}"
   log_info "$op" "Update strategy: $strategy"
 
   if [[ "$strategy" == "OnDelete" ]]; then
     # OnDelete: rollout status is unsupported — operator deletes/recreates pods
     local selector="${pod_selector:-app.kubernetes.io/name=${sts_name}}"
+    log_debug "$op" "OnDelete pod_selector resolution: ${pod_selector:+explicit=\"${pod_selector}\"}${pod_selector:-default=\"app.kubernetes.io/name=${sts_name}\"} -> using \"${selector}\""
     log_info "$op" "OnDelete: waiting for pods to cycle (selector: $selector)"
     sleep 5
     # Wait for at least one pod to go NotReady (operator has deleted the old pod)
+    log_debug "$op" "Waiting up to 60s for a pod matching '$selector' to go NotReady (operator/manual pod cycle)"
     _kubectl wait pod \
       --for=condition=Ready=False \
       --selector="$selector" \
       --timeout=60s 2>/dev/null || true
     # Wait for all pods to be Ready again
+    log_debug "$op" "Waiting up to ${timeout}s for all pods matching '$selector' to be Ready again"
     if ! _kubectl wait pod \
         --for=condition=Ready \
         --selector="$selector" \

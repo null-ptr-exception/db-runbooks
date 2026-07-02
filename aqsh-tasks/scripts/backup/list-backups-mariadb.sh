@@ -42,15 +42,24 @@ if ! setup_minio_client >/dev/null 2>&1; then
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
 fi
 
-# `mc ls --json` emits one JSON object per entry; slurp them into an array of
-# {name, size, lastModified}. An empty/absent prefix yields an empty list, not
-# an error (a namespace may simply have no backups yet).
-LISTING="$(mc ls --json "minio/${BACKUP_BUCKET}/${BACKUP_PREFIX}/" 2>/dev/null || true)"
-BACKUPS="$(printf '%s' "$LISTING" | jq -sc '[.[] | select(.key != null) | {
-  name: (.key | sub("/$"; "")),
-  size: (.size // 0),
-  lastModified: (.lastModified // null)
-}]')"
+# `mc ls --json` emits one JSON object per entry. A real failure (auth / network
+# / missing bucket) must NOT be collapsed into an empty list: mc signals it either
+# by a non-zero exit or by an in-band {"status":"error",...} line. Only a truly
+# empty successful listing means "no backups yet".
+if ! LISTING="$(mc ls --json "minio/${BACKUP_BUCKET}/${BACKUP_PREFIX}/" 2>&1)"; then
+  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}': ${LISTING}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+fi
+if ! BACKUPS="$(printf '%s' "$LISTING" | jq -sc '
+    if any(.[]?; .status? == "error") then error("mc reported an error")
+    else [ .[] | select(.key != null) | {
+      name: (.key | sub("/$"; "")),
+      size: (.size // 0),
+      lastModified: (.lastModified // null)
+    } ] end' 2>/dev/null)"; then
+  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}' (mc reported an error)" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+fi
 COUNT="$(jq -n --argjson b "$BACKUPS" '$b | length')"
 
 mdbt_write_result "$(response_ok "$OP" "found ${COUNT} backup(s) for ${NAMESPACE}" "$(jq -n \

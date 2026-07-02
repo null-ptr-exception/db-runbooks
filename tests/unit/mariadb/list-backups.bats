@@ -16,7 +16,8 @@ setup() {
 #!/usr/bin/env bash
 case "$1" in
   alias) exit 0 ;;
-  ls)    printf '%s' "${MOCK_MC_LS:-}"; exit 0 ;;
+  ls)    [[ "${MOCK_MC_LS_FAIL:-0}" == "1" ]] && { echo "mc: <ERROR> Unable to list folder: AccessDenied." >&2; exit 1; }
+         printf '%s' "${MOCK_MC_LS:-}"; exit 0 ;;
   *)     exit 0 ;;
 esac
 MOCK
@@ -53,6 +54,20 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.count')" = "0" ]
   [ "$(field '.data.backups')" = "[]" ]
+}
+
+@test "list-backups surfaces an mc failure instead of reporting zero backups" {
+  run_list MOCK_MC_LS_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(field '.status')" = "error" ]
+  [[ "$(field '.message')" == *"failed to list backups"* ]]
+}
+
+@test "list-backups treats an in-band mc error line as a failure" {
+  run_list MOCK_MC_LS='{"status":"error","error":{"message":"AccessDenied"}}'
+  [ "$status" -ne 0 ]
+  [ "$(field '.status')" = "error" ]
+  [[ "$(field '.message')" == *"failed to list backups"* ]]
 }
 
 @test "list-backups rejects a malformed namespace" {

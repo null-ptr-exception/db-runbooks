@@ -345,26 +345,10 @@ tasks:
       # reads. Blue writes with its own config; green re-resolves with its own, so
       # each cluster uses its own MinIO endpoint. BACKUP_BUCKET / BACKUP_PREFIX /
       # BACKUP_ENDPOINT stay env-readable as advanced overrides only.
-      - name: backup_region
-        env: BACKUP_REGION
-        required: false
-        type: string
-        default: us-east-1
-      - name: backup_access_secret
-        env: BACKUP_ACCESS_SECRET
-        required: false
-        type: string
-        default: minio
-      - name: backup_access_key
-        env: BACKUP_ACCESS_KEY
-        required: false
-        type: string
-        default: access-key-id
-      - name: backup_secret_key
-        env: BACKUP_SECRET_KEY
-        required: false
-        type: string
-        default: secret-access-key
+      # S3 region + access credentials (region / access Secret / key names) are
+      # managed-DB internals resolved from platform convention, not task inputs.
+      # BACKUP_REGION / BACKUP_ACCESS_SECRET / BACKUP_ACCESS_KEY / BACKUP_SECRET_KEY
+      # stay env-overridable only.
       - name: backup_target
         env: BACKUP_TARGET
         required: false
@@ -375,16 +359,9 @@ tasks:
         required: false
         type: string
         default: bzip2
-      - name: root_secret_name
-        env: ROOT_SECRET_NAME
-        required: false
-        type: string
-        default: mariadb
-      - name: root_secret_key
-        env: ROOT_SECRET_KEY
-        required: false
-        type: string
-        default: password
+      # The MariaDB root Secret (name / key) is a managed-DB internal following the
+      # platform convention (mariadb / password), not a task input. ROOT_SECRET_NAME
+      # / ROOT_SECRET_KEY stay env-overridable only.
       - name: storage_size
         env: STORAGE_SIZE
         required: false

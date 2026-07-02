@@ -972,19 +972,25 @@ k8s_sts_restart() {
     sleep 5
     # Wait for at least one pod to go NotReady (operator has deleted the old pod)
     log_debug "$op" "Waiting up to 60s for a pod matching '$selector' to go NotReady (operator/manual pod cycle)"
-    _kubectl wait pod \
+    # Both waits below capture combined stdout+stderr into a variable rather
+    # than letting kubectl print directly — this function's stdout is
+    # captured wholesale by callers via `result=$(k8s_sts_restart ...)`
+    # (see mongodb/restart.sh), so an uncaptured "pod/x condition met" line
+    # from kubectl would get prepended to the JSON response and break the
+    # caller's `jq` parse (jq exit 4 on invalid JSON, fatal under set -e).
+    out=$(_kubectl wait pod \
       --for=condition=Ready=False \
       --selector="$selector" \
-      --timeout=60s 2>/dev/null || true
+      --timeout=60s 2>&1) || true
     # Wait for all pods to be Ready again
     log_debug "$op" "Waiting up to ${timeout}s for all pods matching '$selector' to be Ready again"
-    if ! _kubectl wait pod \
+    if ! out=$(_kubectl wait pod \
         --for=condition=Ready \
         --selector="$selector" \
-        --timeout="${timeout}s"; then
-      log_error "$op" "Pods did not become Ready within ${timeout}s"
+        --timeout="${timeout}s" 2>&1); then
+      log_error "$op" "Pods did not become Ready within ${timeout}s: $out"
       response_err "$op" "Pods did not become Ready" \
-        "{\"sts\":\"$sts_name\",\"timeout\":${timeout}}" 1
+        "{\"sts\":\"$sts_name\",\"timeout\":${timeout},\"detail\":\"$(echo "$out" | head -1)\"}" 1
       return 1
     fi
   else

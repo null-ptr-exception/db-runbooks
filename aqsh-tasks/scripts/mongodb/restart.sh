@@ -29,7 +29,10 @@ export K8S_NAMESPACE="${DB_NAMESPACE}"
 
 log_info "mongo-restart" "Restarting StatefulSet '${STS_NAME}' in namespace '${DB_NAMESPACE}'"
 
-result=$(k8s_sts_restart "$STS_NAME")
+if ! result=$(k8s_sts_restart "$STS_NAME"); then
+  echo "$result" > "$AQSH_RESULT_FILE"
+  exit 1
+fi
 strategy=$(echo "$result" | jq -r '.data.strategy // "RollingUpdate"')
 partition_reset=$(echo "$result" | jq -r '.data.partition_reset // false')
 ready=$(echo "$result" | jq -r '.data.ready // 0')

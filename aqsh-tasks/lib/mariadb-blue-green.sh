@@ -360,32 +360,9 @@ bg_create_physical_backup() {
     bg_fail "$op" "source MariaDB must be Ready before creating a PhysicalBackup" "$source_status"
   fi
 
-  _kubectl apply -f - <<EOF
-apiVersion: k8s.mariadb.com/v1alpha1
-kind: PhysicalBackup
-metadata:
-  name: ${BACKUP_NAME}
-  namespace: ${BG_NAMESPACE}
-spec:
-  mariaDbRef:
-    name: ${BG_MDB}
-  # No schedule: a PhysicalBackup without one runs exactly once, immediately.
-  # A recurring cron here would keep firing for as long as the CR exists.
-  target: ${BACKUP_TARGET}
-  compression: ${BACKUP_COMPRESSION}
-  storage:
-    s3:
-      bucket: ${BACKUP_BUCKET}
-      prefix: ${BACKUP_PREFIX}
-      endpoint: ${BACKUP_ENDPOINT}
-      region: ${BACKUP_REGION}
-      accessKeyIdSecretKeyRef:
-        name: ${BACKUP_ACCESS_SECRET}
-        key: ${BACKUP_ACCESS_KEY}
-      secretAccessKeySecretKeyRef:
-        name: ${BACKUP_ACCESS_SECRET}
-        key: ${BACKUP_SECRET_KEY}
-EOF
+  # Shared PhysicalBackup builder (JSON) — same CR shape the physical-backup task
+  # uses, so the two write paths can't drift. Reads the BACKUP_* env set above.
+  mdbt_physical_backup_manifest "$BACKUP_NAME" "$BG_NAMESPACE" "$BG_MDB" | _kubectl apply -f -
 
   _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" --timeout="$WAIT_TIMEOUT" >/dev/null
 

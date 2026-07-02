@@ -222,3 +222,50 @@ mdbt_wait_mariadb_ready() {
   local name="$1" timeout="${2:-10m}" resource="${3:-${MARIADB_RESOURCE:-mariadb}}"
   _kubectl wait --for=condition=Ready "${resource}/${name}" --timeout="$timeout"
 }
+
+# mdbt_physical_backup_manifest <name> <namespace> <mariadb_ref>
+# Emit a mariadb-operator PhysicalBackup CR as JSON (kubectl apply accepts JSON,
+# so there is no YAML-interpolation surface). The single source of truth for the
+# PhysicalBackup shape, shared by blue-green and the physical-backup task so they
+# can never diverge. The S3 location and credentials are read from the BACKUP_*
+# environment (populated by mdbt_resolve_backup_location + task defaults):
+#   BACKUP_TARGET (Primary|Replica|PreferReplica), BACKUP_COMPRESSION,
+#   BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT, BACKUP_REGION,
+#   BACKUP_ACCESS_SECRET, BACKUP_ACCESS_KEY, BACKUP_SECRET_KEY.
+# A PhysicalBackup with no schedule runs exactly once, immediately.
+mdbt_physical_backup_manifest() {
+  local name="$1" namespace="$2" mariadb="$3"
+  jq -n \
+    --arg name "$name" \
+    --arg namespace "$namespace" \
+    --arg mariadb "$mariadb" \
+    --arg target "${BACKUP_TARGET}" \
+    --arg compression "${BACKUP_COMPRESSION}" \
+    --arg bucket "$BACKUP_BUCKET" \
+    --arg prefix "$BACKUP_PREFIX" \
+    --arg endpoint "$BACKUP_ENDPOINT" \
+    --arg region "$BACKUP_REGION" \
+    --arg accessSecret "$BACKUP_ACCESS_SECRET" \
+    --arg accessKey "$BACKUP_ACCESS_KEY" \
+    --arg secretKey "$BACKUP_SECRET_KEY" \
+    '{
+      apiVersion: "k8s.mariadb.com/v1alpha1",
+      kind: "PhysicalBackup",
+      metadata: {name: $name, namespace: $namespace},
+      spec: {
+        mariaDbRef: {name: $mariadb},
+        target: $target,
+        compression: $compression,
+        storage: {
+          s3: {
+            bucket: $bucket,
+            prefix: $prefix,
+            endpoint: $endpoint,
+            region: $region,
+            accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
+            secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+          }
+        }
+      }
+    }'
+}

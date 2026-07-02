@@ -136,13 +136,13 @@ _submit() {
   assert_output "3"
 
   # 2. Take a physical backup (writes to s3://db-backups/mariadb/mariadb-1).
-  _submit "physical-backup" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"600"}'
+  _submit "physical-backup" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   local backup; backup="$(_task_result_data)"
   assert_equal "$(echo "$backup" | jq -r '.created')" "true"
   assert_equal "$(echo "$backup" | jq -r '.backup.contentType')" "Physical"
 
   # 3. Restore into a NEW instance from that backup.
-  _submit "restore" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"600"}'
+  _submit "restore" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   local restore; restore="$(_task_result_data)"
   assert_equal "$(echo "$restore" | jq -r '.restored')" "true"
   RESTORE_TARGET="$(echo "$restore" | jq -r '.target')"

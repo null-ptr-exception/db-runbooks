@@ -7,6 +7,19 @@ metadata:
 stringData:
   password: {{ .Values.mariadb.rootPassword | quote }}
 ---
+# S3 credentials the mariadb-operator uses for PhysicalBackup / bootstrapFrom
+# (physical-backup + restore tasks reference secret "minio", keys access-key-id /
+# secret-access-key). It must live in the MariaDB instance's own namespace, and
+# its values must match the deployed MinIO (chart-default minio creds).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio
+  namespace: {{ .Values.mariadb.namespace }}
+stringData:
+  access-key-id: {{ .Values.minio.rootUser | quote }}
+  secret-access-key: {{ .Values.minio.rootPassword | quote }}
+---
 apiVersion: k8s.mariadb.com/v1alpha1
 kind: MariaDB
 metadata:

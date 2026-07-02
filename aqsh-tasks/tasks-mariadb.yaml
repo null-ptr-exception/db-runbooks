@@ -676,6 +676,42 @@ tasks:
         required: false
         type: string
         default: "false"
+  list-backups:
+    script: backup/list-backups-mariadb.sh
+    description: "List the backups stored for a namespace (AWS RDS DescribeDBSnapshots); read-only. Location is resolved internally from the platform convention"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+  delete-backup:
+    script: backup/delete-backup-mariadb.sh
+    description: "Delete a named backup for a namespace (AWS RDS DeleteDBSnapshot); mutating (dry_run + confirm). Scoped to the namespace's own backup prefix"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: backup
+        env: BACKUP_NAME
+        required: true
+        type: string
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   restore:
     script: mariadb/restore.sh
     description: "Recreate a namespace's MariaDB from its physical backup (optionally point-in-time); the namespace is the database identity — version, storage, name, S3 location, and credentials are all resolved internally"

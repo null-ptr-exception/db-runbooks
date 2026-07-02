@@ -231,21 +231,10 @@ tasks:
         env: ACCOUNT_PRIVILEGES
         required: true
         type: string
-      - name: password_secret_name
-        env: ACCOUNT_PASSWORD_SECRET_NAME
-        required: false
-        type: string
-        default: ""
-      - name: password_secret_key
-        env: ACCOUNT_PASSWORD_SECRET_KEY
-        required: false
-        type: string
-        default: password
-      - name: password_secret_prefix
-        env: ACCOUNT_PASSWORD_SECRET_PREFIX
-        required: false
-        type: string
-        default: mariadb-account-
+      # The password Secret is a managed-database internal: its name is derived by
+      # convention (mariadb-account-<username>), its key defaults to "password",
+      # and the result returns it as password_secret.{name,key}. Not task inputs;
+      # ACCOUNT_PASSWORD_SECRET_NAME / _KEY / _PREFIX stay as env overrides only.
       - name: generate_password
         env: GENERATE_PASSWORD
         required: false

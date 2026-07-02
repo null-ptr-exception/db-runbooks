@@ -54,6 +54,11 @@ if [[ "$cmd" == "create" && "${args[1]:-}" == "secret" ]]; then
   exit 0
 fi
 
+if [[ "$cmd" == "annotate" ]]; then
+  printf '%s\n' "${args[*]}" > "${TEST_TMPDIR}/annotate-secret.args"
+  exit 0
+fi
+
 if [[ "$cmd" == "get" ]]; then
   resource="${args[1]:-}"
   name="${args[2]:-}"
@@ -81,6 +86,11 @@ if [[ "$cmd" == "get" ]]; then
 
   if [[ "$resource" == "pods" ]]; then
     printf ''
+    exit 0
+  fi
+
+  if [[ "$resource" == "secret" && "$output" == *annotations* ]]; then
+    printf '%s' "${MOCK_SECRET_OWNER:-}"
     exit 0
   fi
 
@@ -336,23 +346,20 @@ assert_json() {
   ! printf '%s' "$output" | grep -q 'root-pass'
 }
 
-@test "new account without password Secret name is blocked" {
+@test "password Secret name is derived by convention when not provided" {
   run "${SCRIPT}" \
     --context kind-cluster-dbs \
     --namespace mariadb-2 \
     --database app_db \
     --username app_user \
     --privileges SELECT \
-    --dry-run false \
-    --confirm true \
+    --dry-run true \
     --json
 
   [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "BLOCKED" ]
-  [ "$reason_code" = "PASSWORD_SECRET_REQUIRED" ]
+  # underscores in the username are normalised into a valid Secret name
+  [ "$(printf '%s' "$output" | jq -r '.password_secret.name')" = "mariadb-account-app-user" ]
+  [ "$(printf '%s' "$output" | jq -r '.password_secret.key')" = "password" ]
 }
 
 @test "secret-provided password path blocks when Secret is unreadable" {
@@ -521,6 +528,17 @@ assert_json() {
   assert_json '.status' 'CREATED'
   assert_json '.reason_code' 'ACCOUNT_CREATED'
   assert_json '.password_secret.managed' 'false'
+}
+
+@test "PASSWORD_SECRET_CONFLICT when the derived Secret belongs to a different account" {
+  export KUBECTL_CREATE_FAIL=1        # Secret already exists
+  export SECRET_ALREADY_EXISTS=1
+  export MOCK_SECRET_OWNER=other_user # owned by a different account
+
+  run "${SCRIPT}" $(common_args)
+
+  assert_json '.status' 'BLOCKED'
+  assert_json '.reason_code' 'PASSWORD_SECRET_CONFLICT'
 }
 
 @test "existing account is idempotent and does not rewrite password Secret" {

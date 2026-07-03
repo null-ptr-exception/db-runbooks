@@ -44,6 +44,21 @@ ensure_minio_bucket() {
       "mc alias set local http://minio:9000 minioadmin minioadmin-changeme-prod && mc mb -p local/${bucket}"
 }
 
+delete_namespace_and_wait() {
+  local ctx="$1"
+  local ns="$2"
+  local timeout="${3:-300s}"
+
+  if kubectl --context "$ctx" delete ns "$ns" --ignore-not-found --wait=true --timeout="$timeout"; then
+    return 0
+  fi
+
+  echo "=== namespace delete diagnostics for ${ctx}/${ns} ===" >&2
+  kubectl --context "$ctx" get ns "$ns" -o yaml >&2 || true
+  kubectl --context "$ctx" -n "$ns" get users.k8s.mariadb.com,grants.k8s.mariadb.com,mariadbs.k8s.mariadb.com,physicalbackups.k8s.mariadb.com -o wide >&2 || true
+  return 1
+}
+
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   "${ROOT_DIR}/scripts/preflight.sh"
@@ -175,8 +190,8 @@ teardown_suite() {
 
   # Delete mariadb-1 first — the operator in db-ops processes CR finalizers.
   # Then delete db-ops — no finalizer-bearing CRs remain.
-  kubectl --context "$ctx_a" delete ns mariadb-1 --ignore-not-found --wait=false || true
-  kubectl --context "$ctx_b" delete ns mariadb-1 --ignore-not-found --wait=false || true
+  delete_namespace_and_wait "$ctx_a" mariadb-1 300s || true
+  delete_namespace_and_wait "$ctx_b" mariadb-1 300s || true
   kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found --wait=false || true
   kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found --wait=false || true
 

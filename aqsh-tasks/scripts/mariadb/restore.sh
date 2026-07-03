@@ -192,7 +192,7 @@ OPERATOR_BACKUP_ENDPOINT="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
 # into a YAML heredoc: kubectl apply accepts JSON, so there is no string-injection
 # surface even if a field's validation is relaxed later. targetRecoveryTime is
 # emitted only when a PITR target was given.
-MANIFEST="$(jq -n \
+if ! MANIFEST="$(jq -n \
   --arg target "$TARGET" \
   --arg namespace "$NAMESPACE" \
   --arg image "$IMAGE" \
@@ -213,7 +213,7 @@ MANIFEST="$(jq -n \
     apiVersion: "k8s.mariadb.com/v1alpha1",
     kind: "MariaDB",
     metadata: {name: $target, namespace: $namespace},
-    spec: {
+    spec: ({
       image: $image,
       rootPasswordSecretKeyRef: {name: $rootSecret, key: $rootKey},
       storage: {size: $storageSize},
@@ -230,8 +230,17 @@ MANIFEST="$(jq -n \
           secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
         }
       } + (if $targetTime == "" then {} else {targetRecoveryTime: $targetTime} end))
-    } + (($resourcesJson | try fromjson catch null) as $resources | if $resources == null then {} else {resources: $resources} end)
-  }')"
+    } + (($resourcesJson | try fromjson catch null) as $resources | if $resources == null then {} else {resources: $resources} end))
+  }' 2>&1)"; then
+  trap - ERR
+  mdbt_fail "$OP" "failed to render MariaDB restore manifest: ${MANIFEST}" \
+    "$(jq -n \
+      --arg ns "$NAMESPACE" \
+      --arg target "$TARGET" \
+      --arg source "${SOURCE_NAME:-}" \
+      --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
+      '{namespace: $ns, target: $target, source: (if $source == "" then null else $source end), sourceResourcesJson: $resourcesJson}')" 3
+fi
 
 # The restored instance is reachable at the operator-managed primary Service;
 # its root credentials live in the platform-managed Secret (returned by ref).

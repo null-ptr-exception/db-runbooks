@@ -604,6 +604,117 @@ tasks:
         type: string
         default: ""
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+  # Reconfig gateway (see docs/mongodb/reconfig.md). Deployment-naming fields
+  # (sts_name, credential_*) are deliberately NOT task inputs — same
+  # auto-detect tier as recovery/* (CLAUDE.md "Configuration Layers").
+  reconfig/plan:
+    script: mongodb/reconfig/plan.sh
+    description: "Read-only risk report for a proposed RS reconfig (returns plan_hash)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: ops_json
+        env: RECONFIG_OPS_JSON
+        required: true
+        type: string
+  reconfig/apply:
+    script: mongodb/reconfig/apply.sh
+    description: "Execute a planned RS reconfig (CAS on plan_hash; one reconfig step per op)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: ops_json
+        env: RECONFIG_OPS_JSON
+        required: true
+        type: string
+      - name: plan_hash
+        env: RECONFIG_PLAN_HASH
+        required: true
+        type: string
+        pattern: '^rcp[0-9a-f]{24}$'
+      - name: override_reason
+        env: OVERRIDE_REASON
+        required: false
+        type: string
+        default: ""
+      - name: requested_by
+        env: REQUESTED_BY
+        required: false
+        type: string
+        default: ""
+      - name: request_id
+        env: REQUEST_ID
+        required: false
+        type: string
+        default: ""
+  reconfig/force-dr:
+    script: mongodb/reconfig/force-dr.sh
+    description: "Break-glass forced reconfig for site-loss DR (dry_run -> confirm)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: incident_id
+        env: INCIDENT_ID
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9._-]+$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: plan_hash
+        env: RECONFIG_PLAN_HASH
+        required: false
+        type: string
+        default: ""
+        pattern: '^(rcp[0-9a-f]{24})?$'
+      - name: requested_by
+        env: REQUESTED_BY
+        required: false
+        type: string
+        default: ""
+  reconfig/freeze:
+    script: mongodb/reconfig/freeze.sh
+    description: "Toggle the change-freeze annotation (blocks reconfig/apply, never force-dr)"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: enabled
+        env: FREEZE_ENABLED
+        required: true
+        type: string
+        pattern: '^(true|false)$'
+      - name: reason
+        env: FREEZE_REASON
+        required: false
+        type: string
+        default: ""
   recovery/recover:
     script: mongodb/recovery/recover.sh
     description: "One-call orchestrated recovery: gates -> wipe -> wait -> reset"

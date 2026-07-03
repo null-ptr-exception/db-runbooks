@@ -92,8 +92,12 @@ A distinct `*_DEFAULT` variable name (rather than reusing the task-input env
 var name) is deliberate: sourcing the internal config file can never silently
 clobber an explicit caller override, because it writes to a different name.
 
-**Auto-detect tier (MongoDB `recovery/*` tasks only)**: `pre-check`, `wipe`,
-`reset`, `status`, `fix-no-primary`, and `recover` do NOT declare `sts_name`,
+**Auto-detect tier (MongoDB `recovery/*` and `reconfig/*` tasks)**:
+`pre-check`, `wipe`, `reset`, `status`, `fix-no-primary`, and `recover` —
+plus the reconfig gateway tasks (`reconfig/plan`, `reconfig/apply`,
+`reconfig/force-dr`, `reconfig/freeze`; see `docs/mongodb/reconfig.md`,
+which also keeps its policy knobs `RECONFIG_*` internal-config only) —
+do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
 task inputs at all — these tasks operate on something close to a destructive

@@ -11,6 +11,39 @@
 #   mariadb-1:  MariaDB instance (operator-managed)
 #   minio:      MinIO for backup tests
 
+wait_deployment_rollout() {
+  local ctx="$1"
+  local ns="$2"
+  local deployment="$3"
+  local timeout="$4"
+
+  if kubectl --context "$ctx" -n "$ns" rollout status "deployment/${deployment}" --timeout="$timeout"; then
+    return 0
+  fi
+
+  echo "=== diagnostics for ${ctx}/${ns}/deployment/${deployment} ===" >&2
+  kubectl --context "$ctx" -n "$ns" get pods -o wide >&2 || true
+  kubectl --context "$ctx" -n "$ns" describe "deployment/${deployment}" >&2 || true
+  kubectl --context "$ctx" -n "$ns" describe pods -l "app=${deployment}" >&2 || true
+  kubectl --context "$ctx" -n "$ns" logs -l "app=${deployment}" --all-containers --tail=200 >&2 || true
+  return 1
+}
+
+ensure_minio_bucket() {
+  local ctx="$1"
+  local bucket="$2"
+  local pod="minio-mc-${bucket}"
+
+  kubectl --context "$ctx" -n minio delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl --context "$ctx" -n minio run "$pod" \
+    --image=minio/mc \
+    --restart=Never \
+    --rm -i \
+    --pod-running-timeout=180s \
+    --command -- sh -c \
+      "mc alias set local http://minio:9000 minioadmin minioadmin-changeme-prod && mc mb -p local/${bucket}"
+}
+
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   "${ROOT_DIR}/scripts/preflight.sh"
@@ -46,6 +79,8 @@ setup_suite() {
   # Build aqsh image and push to local registry
   docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
   docker push localhost:5005/db-runbooks:latest
+  kind load docker-image localhost:5005/db-runbooks:latest --name cluster-a
+  kind load docker-image localhost:5005/db-runbooks:latest --name cluster-b
 
   local HELMFILE="${ROOT_DIR}/tests/mariadb/helmfile.yaml"
 
@@ -100,31 +135,36 @@ EOF
 
   # Wait for deployments on cluster-a
   echo "Waiting for kube-federated-auth..."
-  kubectl --context "$CTX_A" -n "$NS" rollout status deployment/kube-federated-auth --timeout=120s
+  kubectl --context "$CTX_A" -n "$NS" wait \
+    --for=condition=Available deployment/kube-federated-auth --timeout=300s
 
   echo "Waiting for redis (cluster-a)..."
-  kubectl --context "$CTX_A" -n "$NS" rollout status deployment/redis --timeout=60s
+  wait_deployment_rollout "$CTX_A" "$NS" redis 120s
 
   echo "Waiting for aqsh (cluster-a)..."
-  kubectl --context "$CTX_A" -n "$NS" rollout status deployment/aqsh --timeout=120s
+  wait_deployment_rollout "$CTX_A" "$NS" aqsh 300s
 
   echo "Waiting for mariadb (cluster-a)..."
   kubectl --context "$CTX_A" -n mariadb-1 wait \
-    --for=condition=Ready mariadb/mariadb --timeout=300s
+    --for=condition=Ready mariadb/mariadb --timeout=900s
 
   # Wait for deployments on cluster-b
   echo "Waiting for redis (cluster-b)..."
-  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/redis --timeout=60s
+  wait_deployment_rollout "$CTX_B" "$NS" redis 120s
 
   echo "Waiting for aqsh (cluster-b)..."
-  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/aqsh --timeout=120s
+  wait_deployment_rollout "$CTX_B" "$NS" aqsh 300s
 
   echo "Waiting for mariadb (cluster-b)..."
   kubectl --context "$CTX_B" -n mariadb-1 wait \
-    --for=condition=Ready mariadb/mariadb --timeout=300s
+    --for=condition=Ready mariadb/mariadb --timeout=900s
 
   echo "Waiting for test-client..."
-  kubectl --context "$CTX_B" -n "$NS" rollout status deployment/test-client --timeout=60s
+  wait_deployment_rollout "$CTX_B" "$NS" test-client 120s
+
+  echo "Waiting for minio..."
+  wait_deployment_rollout "$CTX_B" minio minio 180s
+  ensure_minio_bucket "$CTX_B" db-backups
 
   echo "=== mariadb test suite setup complete ==="
 }
@@ -135,10 +175,10 @@ teardown_suite() {
 
   # Delete mariadb-1 first — the operator in db-ops processes CR finalizers.
   # Then delete db-ops — no finalizer-bearing CRs remain.
-  kubectl --context "$ctx_a" delete ns mariadb-1 --ignore-not-found || true
-  kubectl --context "$ctx_b" delete ns mariadb-1 --ignore-not-found || true
-  kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found || true
-  kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found || true
+  kubectl --context "$ctx_a" delete ns mariadb-1 --ignore-not-found --wait=false || true
+  kubectl --context "$ctx_b" delete ns mariadb-1 --ignore-not-found --wait=false || true
+  kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found --wait=false || true
+  kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found --wait=false || true
 
   if [[ "${TEARDOWN:-}" == "true" ]]; then
     ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

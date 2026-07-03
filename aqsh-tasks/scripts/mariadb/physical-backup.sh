@@ -140,6 +140,13 @@ backup_result() {
     } + (if $dry then {manifest: $manifest} else {} end)'
 }
 
+backup_status_result() {
+  local status_json="$1"
+  backup_result true false | jq \
+    --argjson status "$status_json" \
+    '. + {physicalBackupStatus: $status.status, physicalBackupConditions: ($status.conditions // [])}'
+}
+
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
   mdbt_write_result "$(response_ok "$OP" "dry run: PhysicalBackup manifest rendered for ${MARIADB_NAME}" "$(backup_result false true)")"
   exit 0
@@ -171,7 +178,18 @@ printf '%s\n' "$MANIFEST" | _kubectl apply -f -
 # — emit a partial result (with the backup location) then exit non-zero.
 if [[ "$WAIT_TIMEOUT" != "0" ]]; then
   if ! _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" --timeout="$WAIT_TIMEOUT" >/dev/null 2>&1; then
-    mdbt_write_result "$(response_err "$OP" "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}" "$(backup_result true false)" 1)"
+    status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json | jq -c '.status // {}' 2>/dev/null || printf '{}')"
+    mdbt_write_result "$(response_err "$OP" "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}" "$(backup_status_result "$status_json")" 1)"
+    exit 1
+  fi
+
+  status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json | jq -c '.status // {}')"
+  if jq -e '
+    (.status == "Failed") or
+    any(.conditions[]?; .type == "Complete" and .status == "True" and .reason == "JobFailed")
+  ' <<<"$status_json" >/dev/null; then
+    reason="$(jq -r '.conditions[]? | select(.type == "Complete") | .reason // empty' <<<"$status_json" | tail -1)"
+    mdbt_write_result "$(response_err "$OP" "PhysicalBackup ${BACKUP_NAME} failed${reason:+: ${reason}}" "$(backup_status_result "$status_json")" 1)"
     exit 1
   fi
 fi

@@ -51,9 +51,13 @@ case "$verb" in
     case "$args" in
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;   # resolve-name list (jsonpath)
       *items*spec.image*) printf '%s' "${MOCK_SOURCE_IMAGES:-}"; exit 0 ;; # distinct-image scan (jsonpath)
-      *"-o json"*)  # single-source spec fetch (image + storage in one call)
-        jq -n --arg img "${MOCK_SOURCE_IMAGE:-}" --arg sz "${MOCK_SOURCE_STORAGE:-}" \
-          '{spec: {image: $img, storage: {size: $sz}}}';      exit 0 ;;
+      *"-o json"*)  # single-source spec fetch
+        jq -n \
+          --arg img "${MOCK_SOURCE_IMAGE:-}" \
+          --arg sz "${MOCK_SOURCE_STORAGE:-}" \
+          --argjson resources "${MOCK_SOURCE_RESOURCES:-null}" \
+          '{spec: {image: $img, storage: {size: $sz}}}
+           | if $resources == null then . else .spec.resources = $resources end'; exit 0 ;;
       *"get mariadb"*) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;  # target existence probe
       *) echo "mock kubectl: unhandled get: $args" >&2;       exit 1 ;;   # fail loudly on a new get
     esac ;;
@@ -150,9 +154,19 @@ result_field() { jq -r "$1" "${RESULT}"; }
 
   [ "$(jq -r '.spec.bootstrapFrom.backupContentType' "${CAPTURE}")" = "Physical" ]
   [ "$(jq -r '.spec.bootstrapFrom.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-bg" ]
+  [ "$(jq -r '.spec.bootstrapFrom.s3.tls.enabled' "${CAPTURE}")" = "false" ]
   [ "$(jq -r '.spec | has("replication")' "${CAPTURE}")" = "false" ]
   [ "$(jq -r '.spec | has("multiCluster")' "${CAPTURE}")" = "false" ]
   [ "$(jq -r '.spec.bootstrapFrom | has("targetRecoveryTime")' "${CAPTURE}")" = "false" ]
+}
+
+@test "restore inherits source resources when available" {
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    MOCK_SOURCES=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi MOCK_TARGET_EXISTS=0 \
+    MOCK_SOURCE_RESOURCES='{"requests":{"cpu":"100m","memory":"512Mi"},"limits":{"memory":"1Gi"}}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.spec.resources.requests.memory' "${CAPTURE}")" = "512Mi" ]
+  [ "$(jq -r '.spec.resources.limits.memory' "${CAPTURE}")" = "1Gi" ]
 }
 
 @test "restore resolves the S3 endpoint and bucket from deploy-time config" {
@@ -163,8 +177,8 @@ EOF
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=0 \
     MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
   [ "$status" -eq 0 ]
-  # endpoint comes from config; bucket/prefix follow the shared convention.
-  [ "$(jq -r '.spec.bootstrapFrom.s3.endpoint' "${CAPTURE}")" = "http://minio.kind-b.test:30080" ]
+  # URL-form endpoint comes from config; operator manifests use host:port.
+  [ "$(jq -r '.spec.bootstrapFrom.s3.endpoint' "${CAPTURE}")" = "minio.kind-b.test:30080" ]
   [ "$(jq -r '.spec.bootstrapFrom.s3.bucket' "${CAPTURE}")" = "db-backups" ]
   [ "$(jq -r '.spec.bootstrapFrom.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-bg" ]
 }
@@ -174,7 +188,7 @@ EOF
     BACKUP_ENDPOINT="http://minio.kind-b.test:30080"
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
-  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" = "http://minio.kind-b.test:30080" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" = "minio.kind-b.test:30080" ]
 }
 
 @test "restore with target_time injects point-in-time recovery" {

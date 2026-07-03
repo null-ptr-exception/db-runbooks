@@ -21,6 +21,13 @@ spec:
         app: aqsh
     spec:
       serviceAccountName: kube-auth-proxy
+      initContainers:
+        - name: wait-redis
+          image: redis:alpine
+          command:
+            - sh
+            - -c
+            - until redis-cli -h redis -p 6379 ping | grep -q PONG; do sleep 1; done
       {{- if .Values.aqsh.config }}
       volumes:
         - name: aqsh-config
@@ -62,6 +69,7 @@ spec:
             periodSeconds: 10
         - name: kube-auth-proxy
           image: {{ .Values.aqsh.authProxy.image }}
+          imagePullPolicy: {{ .Values.aqsh.authProxy.imagePullPolicy }}
           env:
             - name: UPSTREAM
               value: "http://localhost:8080"

@@ -155,6 +155,13 @@ mdbt_validate_endpoint() {
   fi
 }
 
+mdbt_operator_s3_endpoint() {
+  local endpoint="$1"
+  endpoint="${endpoint#*://}"
+  endpoint="${endpoint%%/*}"
+  printf '%s' "$endpoint"
+}
+
 mdbt_validate_region() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^[A-Za-z0-9-]+$ ]]; then
@@ -235,6 +242,8 @@ mdbt_wait_mariadb_ready() {
 # A PhysicalBackup with no schedule runs exactly once, immediately.
 mdbt_physical_backup_manifest() {
   local name="$1" namespace="$2" mariadb="$3"
+  local operator_endpoint
+  operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
   jq -n \
     --arg name "$name" \
     --arg namespace "$namespace" \
@@ -243,7 +252,7 @@ mdbt_physical_backup_manifest() {
     --arg compression "${BACKUP_COMPRESSION}" \
     --arg bucket "$BACKUP_BUCKET" \
     --arg prefix "$BACKUP_PREFIX" \
-    --arg endpoint "$BACKUP_ENDPOINT" \
+    --arg endpoint "$operator_endpoint" \
     --arg region "$BACKUP_REGION" \
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
@@ -262,6 +271,7 @@ mdbt_physical_backup_manifest() {
             prefix: $prefix,
             endpoint: $endpoint,
             region: $region,
+            tls: {enabled: false},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
             secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
           }

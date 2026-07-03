@@ -33,6 +33,8 @@ setup_file() {
 
   kubectl --context "$CTX_B" -n minio rollout status deployment/minio --timeout=120s
 
+  _cleanup_restore_targets
+
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
@@ -41,15 +43,32 @@ setup() {
   load '../test_helper/bats-assert/load'
 }
 
+kexec() { kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"; }
+
+_delete_mariadb_and_wait() {
+  local target="$1"
+  [[ -n "$target" ]] || return 0
+  kubectl --context "$CTX_A" -n mariadb-1 delete mariadb "$target" --ignore-not-found
+  kubectl --context "$CTX_A" -n mariadb-1 wait --for=delete "mariadb/${target}" --timeout=180s >/dev/null 2>&1 || true
+}
+
+_cleanup_restore_targets() {
+  local targets target
+  targets=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | sed -n '/^mariadb-1-restore-[0-9]\{14\}$/p')
+
+  while IFS= read -r target; do
+    _delete_mariadb_and_wait "$target"
+  done <<< "$targets"
+}
+
 # Remove any restored instances this suite created so later suites still see a
 # single MariaDB CR in the namespace.
 teardown() {
-  if [[ -n "${RESTORE_TARGET:-}" ]]; then
-    kubectl --context "$CTX_A" -n mariadb-1 delete mariadb "$RESTORE_TARGET" --ignore-not-found >/dev/null 2>&1 || true
-  fi
+  _delete_mariadb_and_wait "${RESTORE_TARGET:-}"
+  _cleanup_restore_targets
 }
-
-kexec() { kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"; }
 
 http_post() {
   local url="$1" body="$2" response

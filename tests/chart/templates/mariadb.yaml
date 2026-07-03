@@ -33,4 +33,20 @@ spec:
   image: {{ .Values.mariadb.image }}
   storage:
     size: {{ .Values.mariadb.storage }}
+  resources:
+    requests:
+      cpu: {{ .Values.mariadb.resources.requests.cpu | quote }}
+      memory: {{ .Values.mariadb.resources.requests.memory | quote }}
+    limits:
+      memory: {{ .Values.mariadb.resources.limits.memory | quote }}
+  startupProbe:
+    exec:
+      command:
+        - bash
+        - -c
+        - mariadb -u root -p"${MARIADB_ROOT_PASSWORD}" -e "SELECT 1;"
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 10
+    failureThreshold: 90
 {{- end }}

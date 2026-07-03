@@ -5,6 +5,7 @@
 federatedAuth:
   enabled: false
   image: ghcr.io/rophy/kube-federated-auth:3.2.0
+  imagePullPolicy: IfNotPresent
   # clusters config is passed at install time (runtime-discovered)
   clusters: {}
   # CA certs and tokens are passed at install time
@@ -23,12 +24,13 @@ redis:
 aqsh:
   enabled: false
   image: localhost:5005/db-runbooks:latest
-  imagePullPolicy: Always
+  imagePullPolicy: IfNotPresent
   tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
   config: {}
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
+    imagePullPolicy: IfNotPresent
     tokenReviewURL: ""
 
 # --- mariadb (operator-managed) ---
@@ -38,6 +40,12 @@ mariadb:
   image: mariadb:10.6
   rootPassword: mariadb-test-pass
   storage: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
 
 # --- mariadb RBAC ---
 mariadbRbac:

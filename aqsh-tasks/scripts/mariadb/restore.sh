@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # =============================================================================
 # mariadb/restore.sh
@@ -73,6 +73,7 @@ TARGET="${RESTORE_TARGET:-}"
 SOURCE_NAME="${RESTORE_SOURCE:-}"
 IMAGE="${RESTORE_IMAGE:-}"
 STORAGE_SIZE="${STORAGE_SIZE:-}"
+SOURCE_RESOURCES_JSON="null"
 # Backup location (bucket / prefix / endpoint) — resolved from deploy-time config
 # + the per-namespace naming convention, identically to the write side. Sets
 # BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT (each env-overridable).
@@ -84,6 +85,21 @@ BACKUP_ACCESS_SECRET="minio"
 BACKUP_ACCESS_KEY="access-key-id"
 BACKUP_SECRET_KEY="secret-access-key"
 REPLICAS="1"                           # restore is standalone by design
+
+restore_unhandled_error() {
+  local code="$?"
+  local line="${BASH_LINENO[0]:-unknown}"
+  trap - ERR
+  mdbt_write_result "$(response_err "$OP" "restore task aborted before completing at line ${line} (exit ${code})" \
+    "$(jq -n \
+      --arg namespace "${NAMESPACE:-}" \
+      --arg target "${TARGET:-}" \
+      --arg source "${SOURCE_NAME:-}" \
+      '{namespace: $namespace, target: $target, source: (if $source == "" then null else $source end)}')" \
+    "$code")" || true
+  exit "$code"
+}
+trap restore_unhandled_error ERR
 
 # Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
@@ -126,11 +142,12 @@ fi
 
 # Fetch the source spec once (image + storage) to halve the API calls and avoid
 # a race window if the source is mutated between two separate gets.
-if [[ -n "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
+if [[ -n "$SOURCE_NAME" ]]; then
   SOURCE_JSON="$(_kubectl get mariadb "$SOURCE_NAME" -o json 2>/dev/null || true)"
   if [[ -n "$SOURCE_JSON" ]]; then
     [[ -z "$IMAGE" ]]        && IMAGE="$(jq -r '.spec.image // empty' <<<"$SOURCE_JSON")"
     [[ -z "$STORAGE_SIZE" ]] && STORAGE_SIZE="$(jq -r '.spec.storage.size // empty' <<<"$SOURCE_JSON")"
+    SOURCE_RESOURCES_JSON="$(jq -c '.spec.resources // null' <<<"$SOURCE_JSON")"
   fi
 fi
 
@@ -169,6 +186,7 @@ mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
+OPERATOR_BACKUP_ENDPOINT="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
 
 # Build the MariaDB CR programmatically with jq rather than interpolating values
 # into a YAML heredoc: kubectl apply accepts JSON, so there is no string-injection
@@ -184,12 +202,13 @@ MANIFEST="$(jq -n \
   --argjson replicas "$REPLICAS" \
   --arg bucket "$BACKUP_BUCKET" \
   --arg prefix "$BACKUP_PREFIX" \
-  --arg endpoint "$BACKUP_ENDPOINT" \
+  --arg endpoint "$OPERATOR_BACKUP_ENDPOINT" \
   --arg region "$BACKUP_REGION" \
   --arg accessSecret "$BACKUP_ACCESS_SECRET" \
   --arg accessKey "$BACKUP_ACCESS_KEY" \
   --arg secretKey "$BACKUP_SECRET_KEY" \
   --arg targetTime "$TARGET_TIME" \
+  --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
   '{
     apiVersion: "k8s.mariadb.com/v1alpha1",
     kind: "MariaDB",
@@ -206,11 +225,12 @@ MANIFEST="$(jq -n \
           prefix: $prefix,
           endpoint: $endpoint,
           region: $region,
+          tls: {enabled: false},
           accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
           secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
         }
       } + (if $targetTime == "" then {} else {targetRecoveryTime: $targetTime} end))
-    }
+    } + (($resourcesJson | try fromjson catch null) as $resources | if $resources == null then {} else {resources: $resources} end)
   }')"
 
 # The restored instance is reachable at the operator-managed primary Service;
@@ -261,7 +281,9 @@ if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
     "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 2
 fi
 
-printf '%s\n' "$MANIFEST" | _kubectl apply -f -
+if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
+  mdbt_fail "$OP" "failed to apply MariaDB restore manifest: ${apply_out}" "$(restore_result false false)" 3
+fi
 
 # wait_timeout="0" returns immediately; otherwise wait for Ready. The instance is
 # already provisioned at this point, so a wait timeout must NOT lose the result —

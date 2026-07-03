@@ -125,29 +125,25 @@ backup="$BG_BACKUP_DATA"
 bootstrap_payload="$(jq -n \
   --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
   --arg image "$GREEN_IMAGE" \
-  --arg rootSecret "$ROOT_SECRET_NAME" --arg rootKey "$ROOT_SECRET_KEY" \
   --arg storage "$STORAGE_SIZE" --arg replicas "$REPLICAS" \
-  --arg region "$BACKUP_REGION" --arg accessSecret "$BACKUP_ACCESS_SECRET" \
-  --arg accessKey "$BACKUP_ACCESS_KEY" --arg secretKey "$BACKUP_SECRET_KEY" \
   --arg gtid "$GTID_DOMAIN_ID" --arg serverIdx "$SERVER_ID_START_INDEX" \
   --arg blueHost "$BLUE_HOST" --arg greenHost "$GREEN_HOST" --arg timeout "$WAIT_TIMEOUT" \
   '{
     namespace: $ns, green_name: $mdb, blue_name: $blue, green_image: $image,
-    root_secret_name: $rootSecret, root_secret_key: $rootKey,
     storage_size: $storage, replicas: $replicas,
-    backup_region: $region, backup_access_secret: $accessSecret,
-    backup_access_key: $accessKey, backup_secret_key: $secretKey,
     gtid_domain_id: $gtid, server_id_start_index: $serverIdx,
     blue_host: $blueHost, green_host: $greenHost,
     internal_step: "bootstrap",
     wait_ready: "true", wait_timeout: $timeout, confirm: "true"
   } | with_entries(select(.value != ""))')"
-  # The backup bucket/prefix/endpoint are NOT forwarded: green re-resolves them
-  # from its own deploy-time config + the per-namespace convention, so green uses
-  # its own (in-cluster) MinIO endpoint rather than blue's cross-cluster one. This
-  # relies on green keeping the namespace identity (green_namespace defaults to
-  # namespace) so green's resolved prefix (mariadb/<namespace>) matches where blue
-  # wrote the backup — the standard same-namespace, cross-cluster blue-green case.
+  # Managed-DB internals are NOT forwarded: the backup bucket/prefix/endpoint and
+  # the credentials (root Secret, S3 access Secret/keys, region) are platform
+  # conventions, so green re-resolves them from its own deploy-time config /
+  # defaults. Green thus uses its own (in-cluster) MinIO endpoint rather than
+  # blue's cross-cluster one. This relies on green keeping the namespace identity
+  # (green_namespace defaults to namespace) so green's resolved prefix
+  # (mariadb/<namespace>) matches where blue wrote the backup — the standard
+  # same-namespace, cross-cluster blue-green case.
 
 bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
   "$bootstrap_payload" "$PEER_TIMEOUT")" \

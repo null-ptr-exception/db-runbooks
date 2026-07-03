@@ -68,6 +68,55 @@ tasks:
         required: false
         type: string
         default: auto
+  switch-primary:
+    script: mariadb/switch-primary.sh
+    description: "Promote a chosen replica to primary within one replicated MariaDB (AWS RDS FailoverDBCluster); operator-driven graceful switchover, guarded by a strict lag pre-check"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target
+        env: TARGET_POD_INDEX
+        required: true
+        type: string
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: lag_threshold
+        env: LAG_THRESHOLD
+        required: false
+        type: string
+        default: "0"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "300"
+      - name: rollback_on_timeout
+        env: ROLLBACK_ON_TIMEOUT
+        required: false
+        type: string
+        default: "true"
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   status:
     script: mariadb/status.sh
     description: "Read-only MariaDB status summary for operator and native StatefulSet targets"

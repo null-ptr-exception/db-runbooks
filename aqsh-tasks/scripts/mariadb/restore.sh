@@ -282,7 +282,12 @@ if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
 fi
 
 if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
-  mdbt_fail "$OP" "failed to apply MariaDB restore manifest: ${apply_out}" "$(restore_result false false)" 3
+  # Disable the ERR trap so its generic message can't mask the real apply error,
+  # and use a minimal data payload (not restore_result) so nothing else can fail
+  # here and swallow ${apply_out}.
+  trap - ERR
+  mdbt_fail "$OP" "failed to apply MariaDB restore manifest: ${apply_out}" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 3
 fi
 
 # wait_timeout="0" returns immediately; otherwise wait for Ready. The instance is

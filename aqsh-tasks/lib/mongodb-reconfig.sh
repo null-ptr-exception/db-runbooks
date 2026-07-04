@@ -201,7 +201,7 @@ reconfig_validate_ops() {
         if (type != "object") then bad("each op must be an object")
         elif .action == "add_member" then
           if ((.host // "") | type) != "string" or (.host // "") == "" then bad("add_member requires host")
-          elif (has("votes") and ((.votes | type) != "number" or ([0,1] | index(.votes)) == null)) then bad("add_member votes must be 0 or 1")
+          elif (has("votes") and ((.votes | type) != "number" or ((.votes == 0 or .votes == 1) | not))) then bad("add_member votes must be 0 or 1")
           elif (has("priority") and ((.priority | type) != "number" or .priority < 0 or .priority > 1000)) then bad("add_member priority must be 0..1000")
           elif (has("hidden") and (.hidden | type) != "boolean") then bad("add_member hidden must be a boolean")
           else empty end
@@ -209,7 +209,9 @@ reconfig_validate_ops() {
           if ((.member // "") | type) != "string" or (.member // "") == "" then bad("remove_member requires member") else empty end
         elif .action == "set_votes" then
           if ((.member // "") | type) != "string" or (.member // "") == "" then bad("set_votes requires member")
-          elif ((.votes | type) != "number" or ([0,1] | index(.votes)) == null) then bad("set_votes votes must be 0 or 1")
+          # NOT `[0,1] | index(.votes)` — the pipe rebinds `.` to [0,1], so
+          # `.votes` indexes an array with a string and aborts the whole program
+          elif ((.votes | type) != "number" or ((.votes == 0 or .votes == 1) | not)) then bad("set_votes votes must be 0 or 1")
           else empty end
         elif .action == "set_priority" then
           if ((.member // "") | type) != "string" or (.member // "") == "" then bad("set_priority requires member")
@@ -356,9 +358,10 @@ _reconfig_plan_hash() {
 # ---------------------------------------------------------------------------
 _reconfig_get_annotation() {
   local sts_name="$1" key="$2"
-  # bracket notation: annotation keys contain both dots and a slash
-  _kubectl get statefulset "$sts_name" \
-    -o jsonpath="{.metadata.annotations['${key}']}" 2>/dev/null || true
+  # kubectl's jsonpath dialect needs dots escaped even inside bracket quotes;
+  # go through jq instead — no escaping rules to get wrong
+  _kubectl get statefulset "$sts_name" -o json 2>/dev/null \
+    | jq -r --arg k "$key" '.metadata.annotations[$k] // ""' 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

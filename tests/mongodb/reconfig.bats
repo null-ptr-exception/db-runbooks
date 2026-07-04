@@ -602,7 +602,7 @@ _mongo0_eval() {
   # dr-active annotation is set, audit entry recorded
   local dr_ann
   dr_ann=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
-    -o jsonpath="{.metadata.annotations['reconfig.db-runbooks/dr-active']}")
+    -o json | jq -r '.metadata.annotations["reconfig.db-runbooks/dr-active"] // ""')
   assert_equal "$dr_ann" "true"
   local audit_action
   audit_action=$(kubectl --context "$ctx" -n mongo-1 get configmap mongodb-reconfig-audit \
@@ -655,7 +655,7 @@ _mongo0_eval() {
 
   # dr-active annotation cleared; all members voting again
   dr_ann=$(kubectl --context "$ctx" -n mongo-1 get statefulset mongodb \
-    -o jsonpath="{.metadata.annotations['reconfig.db-runbooks/dr-active']}")
+    -o json | jq -r '.metadata.annotations["reconfig.db-runbooks/dr-active"] // ""')
   assert_equal "$dr_ann" ""
   live_votes=$(_mongo0_eval "print(rs.conf().members.map(function(m){return m.votes;}).join(','));")
   assert_equal "$live_votes" "1,1,1"

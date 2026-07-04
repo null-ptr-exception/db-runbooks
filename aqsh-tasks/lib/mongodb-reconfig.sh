@@ -90,7 +90,9 @@ try {
     ok: 1,
     set: c._id,
     version: c.version,
-    term: (s.term !== undefined ? s.term : 0),
+    // rs.status().term is a BSON Long in mongosh — JSON.stringify would emit
+    // {low,high,unsigned}; force a plain number so jq/bash see a scalar
+    term: (s.term !== undefined ? (s.term.toNumber ? s.term.toNumber() : s.term) : 0),
     members: c.members.map(function(m){
       return {_id: m._id, host: m.host, votes: m.votes, priority: m.priority,
               arbiterOnly: !!m.arbiterOnly, hidden: !!m.hidden, tags: (m.tags || {})};
@@ -572,7 +574,7 @@ reconfig_run_checks() {
   if [[ -n "$primary_host" ]]; then
     local primary_impact
     primary_impact=$(jq -cn --argjson b "$members" --argjson a "$projected" --arg p "$primary_host" '
-      ($b[] | select(.host == $p)) as $before
+      ([$b[] | select(.host == $p)][0] // null) as $before
       | ([$a[] | select(.host == $p)][0] // null) as $after
       | if $before == null then "none"
         elif $after == null then "removed"
@@ -879,8 +881,11 @@ reconfig_apply() {
         '{($k1): null, ($k2): null}')" && dr_cleared=true
   fi
 
+  # NOTE: not ${post_facts:-{}} — bash closes the expansion at the FIRST `}`,
+  # so a non-empty value would gain a stray trailing brace and corrupt the JSON
   local post_conf
-  post_conf=$(printf '%s' "${post_facts:-{}}" | jq -c '{version: (.version // null), members: (.members // [])}')
+  [[ -z "$post_facts" ]] && post_facts='{}'
+  post_conf=$(printf '%s' "$post_facts" | jq -c '{version: (.version // null), members: (.members // [])}')
   local audited=true
   local audit_entry
   audit_entry=$(jq -cn --arg sts "$sts_name" --argjson ops "$ops" \

@@ -100,6 +100,18 @@ _primary_index() {
     -o jsonpath='{.status.currentPrimaryPodIndex}' 2>/dev/null
 }
 
+# A valid podIndex other than the current primary (replicas: 3 → 0,1,2).
+_other_index() { echo $(( ( ${1:-0} + 1 ) % 3 )); }
+
+# _switch_payload <target> [confirm] — dry_run unless a confirm arg is given.
+_switch_payload() {
+  if [[ -n "${2:-}" ]]; then
+    printf '{"namespace":"mariadb-1","target":"%s","dry_run":"false","confirm":"true","lag_threshold":"30"}' "$1"
+  else
+    printf '{"namespace":"mariadb-1","target":"%s","lag_threshold":"30"}' "$1"
+  fi
+}
+
 _root_password() {
   kubectl --context "$CTX_A" -n mariadb-1 get secret mariadb \
     -o jsonpath='{.data.password}' | base64 -d
@@ -124,31 +136,36 @@ _sql_primary() {
   assert_output --partial "switch-primary"
 }
 
-@test "mariadb-1 is replicated with the primary at podIndex 0" {
+@test "mariadb-1 is replicated with a well-defined primary" {
+  # The primary's podIndex is NOT assumed to be 0: earlier suites (e.g. restart)
+  # roll the primary pod, and the operator fails over to another replica. Assert
+  # only that it's a replicated instance with some current primary in range.
   assert_equal "$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.spec.replicas}')" "3"
-  assert_equal "$(_primary_index)" "0"
+  run _primary_index
+  assert_output --regexp '^[0-2]$'
 }
 
 @test "switch-primary dry_run shows the plan without switching" {
-  _submit "switch-primary" '{"namespace":"mariadb-1","target":"1"}'
+  local from target; from="$(_primary_index)"; target="$(_other_index "$from")"
+  _submit "switch-primary" "$(_switch_payload "$target")"
   local data; data="$(_task_result_data)"
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
-  assert_equal "$(echo "$data" | jq -r '.from_pod_index')" "0"
-  assert_equal "$(echo "$data" | jq -r '.to_pod_index')" "1"
-  assert_equal "$(_primary_index)" "0"   # unchanged
+  assert_equal "$(echo "$data" | jq -r '.from_pod_index')" "$from"
+  assert_equal "$(echo "$data" | jq -r '.to_pod_index')" "$target"
+  assert_equal "$(_primary_index)" "$from"   # unchanged
 }
 
 @test "switch-primary promotes the target replica to primary" {
+  local from target; from="$(_primary_index)"; target="$(_other_index "$from")"
   # lag_threshold 30 tolerates minor idle-replication lag so the pre-check
   # doesn't flake; the replicas are otherwise caught up.
-  _submit "switch-primary" \
-    '{"namespace":"mariadb-1","target":"1","dry_run":"false","confirm":"true","lag_threshold":"30"}'
+  _submit "switch-primary" "$(_switch_payload "$target" true)"
   local data; data="$(_task_result_data)"
   assert_equal "$(echo "$data" | jq -r '.status')" "CHANGED"
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "PRIMARY_SWITCHED"
 
   # The operator must have actually flipped the primary...
-  assert_equal "$(_primary_index)" "1"
+  assert_equal "$(_primary_index)" "$target"
   # ...and the new primary must be genuinely writable (not just a status flip).
   _sql_primary "CREATE DATABASE IF NOT EXISTS switch_e2e; \
     CREATE TABLE IF NOT EXISTS switch_e2e.t (id INT PRIMARY KEY); \

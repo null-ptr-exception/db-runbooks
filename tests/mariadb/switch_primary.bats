@@ -30,6 +30,12 @@ setup_file() {
 
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
 
+  # Earlier suites (restart) roll the primary pod and trigger an operator
+  # failover; wait for mariadb-1 to settle back to Ready before switching, so we
+  # operate on a healthy topology rather than mid-reconcile churn.
+  kubectl --context "$CTX_A" -n mariadb-1 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s || true
+
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
 }
 
@@ -145,10 +151,16 @@ _sql_primary() {
   assert_output --regexp '^[0-2]$'
 }
 
+_dump_state() {
+  echo "# CR: index=$(_primary_index) ready=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" >&3
+  echo "# replication: $(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.replicationStatus}' 2>/dev/null)" >&3
+}
+
 @test "switch-primary dry_run shows the plan without switching" {
   local from target; from="$(_primary_index)"; target="$(_other_index "$from")"
   _submit "switch-primary" "$(_switch_payload "$target")"
   local data; data="$(_task_result_data)"
+  echo "# dry_run result: $data" >&3
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
   assert_equal "$(echo "$data" | jq -r '.from_pod_index')" "$from"
   assert_equal "$(echo "$data" | jq -r '.to_pod_index')" "$target"
@@ -157,10 +169,14 @@ _sql_primary() {
 
 @test "switch-primary promotes the target replica to primary" {
   local from target; from="$(_primary_index)"; target="$(_other_index "$from")"
+  echo "# switching primary ${from} -> ${target}" >&3
+  _dump_state
   # lag_threshold 30 tolerates minor idle-replication lag so the pre-check
   # doesn't flake; the replicas are otherwise caught up.
   _submit "switch-primary" "$(_switch_payload "$target" true)"
   local data; data="$(_task_result_data)"
+  echo "# switch result: $data" >&3
+  _dump_state
   assert_equal "$(echo "$data" | jq -r '.status')" "CHANGED"
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "PRIMARY_SWITCHED"
 

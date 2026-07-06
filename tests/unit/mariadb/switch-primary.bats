@@ -75,12 +75,19 @@ run_switch() {
 }
 field() { jq -r "$1" "${RESULT}"; }
 
-@test "switch-primary requires a target" {
-  run_switch DRY_RUN=true
-  [ "$(field '.reason_code')" = "TARGET_REQUIRED" ]
+@test "switch-primary auto-selects a caught-up replica when target is omitted" {
+  run_switch DRY_RUN=true    # no TARGET_POD_INDEX
+  [ "$(field '.reason_code')" = "SWITCH_DRY_RUN" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+  [ "$(field '.target_auto_selected')" = "true" ]
 }
 
-@test "switch-primary rejects a non-integer target" {
+@test "switch-primary blocks when no eligible replica exists to auto-select" {
+  run_switch DRY_RUN=true MOCK_LAG=30   # only replica is lagging beyond threshold 0
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+}
+
+@test "switch-primary rejects a non-integer explicit target" {
   run_switch DRY_RUN=true TARGET_POD_INDEX=abc
   [ "$(field '.reason_code')" = "TARGET_INVALID" ]
 }

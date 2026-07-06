@@ -110,11 +110,13 @@ _primary_index() {
 _other_index() { echo $(( ( ${1:-0} + 1 ) % 3 )); }
 
 # _switch_payload <target> [confirm] — dry_run unless a confirm arg is given.
+# lag_threshold is intentionally NOT sent (it's internal policy, not a task
+# input); the setup_file readiness wait leaves replicas fully synced (lag 0).
 _switch_payload() {
   if [[ -n "${2:-}" ]]; then
-    printf '{"namespace":"mariadb-1","target":"%s","dry_run":"false","confirm":"true","lag_threshold":"30"}' "$1"
+    printf '{"namespace":"mariadb-1","target":"%s","dry_run":"false","confirm":"true"}' "$1"
   else
-    printf '{"namespace":"mariadb-1","target":"%s","lag_threshold":"30"}' "$1"
+    printf '{"namespace":"mariadb-1","target":"%s"}' "$1"
   fi
 }
 
@@ -165,6 +167,19 @@ _dump_state() {
   assert_equal "$(echo "$data" | jq -r '.from_pod_index')" "$from"
   assert_equal "$(echo "$data" | jq -r '.to_pod_index')" "$target"
   assert_equal "$(_primary_index)" "$from"   # unchanged
+}
+
+@test "switch-primary auto-selects a target when none is given (dry_run)" {
+  local from; from="$(_primary_index)"
+  _submit "switch-primary" '{"namespace":"mariadb-1"}'
+  local data; data="$(_task_result_data)"
+  echo "# auto dry_run result: $data" >&3
+  assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
+  assert_equal "$(echo "$data" | jq -r '.target_auto_selected')" "true"
+  # picked a real replica that isn't the current primary
+  local to; to="$(echo "$data" | jq -r '.to_pod_index')"
+  [ "$to" != "$from" ]
+  [[ "$to" =~ ^[0-2]$ ]]
 }
 
 @test "switch-primary promotes the target replica to primary" {

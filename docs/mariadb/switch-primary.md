@@ -1,7 +1,9 @@
 # MariaDB Switch Primary AQSH Runbook
 
-`switch-primary` promotes a chosen replica to primary within one replicated
-MariaDB instance, by patching `spec.replication.primary.podIndex`. The
+`switch-primary` promotes a replica to primary within one replicated MariaDB
+instance, by patching `spec.replication.primary.podIndex`. The caller may name a
+`target` replica, or omit it to let the task auto-pick the most caught-up healthy
+replica (AWS RDS `FailoverDBCluster` likewise makes the target optional). The
 mariadb-operator then performs a **graceful switchover** (read-lock the old
 primary → wait for replicas in sync → promote the target → reconnect replicas →
 demote the old primary). AWS RDS analogue: `FailoverDBCluster` (with a target).
@@ -39,28 +41,33 @@ mariadb.spec.replication.primary.podIndex` (like `restart` probes `podMetadata` 
 | Input | Env | Required | Default | Notes |
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | Target MariaDB namespace |
-| `target` | `TARGET_POD_INDEX` | ✓ | — | The replica podIndex to promote |
+| `target` | `TARGET_POD_INDEX` | | (auto) | Replica podIndex to promote; **omit to auto-pick** the most caught-up healthy replica (like RDS `FailoverDBCluster`) |
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR (auto-detected if one) |
 | `context` | `K8S_CONTEXT` | | `""` | Reachability hook |
-| `lag_threshold` | `LAG_THRESHOLD` | | `0` | Max `secondsBehindMaster` allowed to switch |
 | `wait_timeout` | `WAIT_TIMEOUT` | | `300` | Seconds to wait for the switch to complete |
-| `rollback_on_timeout` | `ROLLBACK_ON_TIMEOUT` | | `true` | Auto-roll-back if the switch gets stuck |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to switch |
 
-`ALLOW_POD_EVICTION` (env only, default `false`) gates the eviction recovery step
-until an e2e proves it reliable — auto-deleting a primary pod on an unproven
-sequence could turn a hiccup into an outage.
+### Internal config (policy / safety — NOT task inputs)
+
+These are per-deployment policy, env-overridable only, deliberately kept off the
+caller-facing API:
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| `LAG_THRESHOLD` | `0` | Max `secondsBehindMaster` a replica may have to be switch-eligible. The acceptable lag is a deployment policy, not a per-call choice. |
+| `ROLLBACK_ON_TIMEOUT` | `true` | Auto-roll-back a stuck switch to restore write capability. A safety behaviour, not something a caller should disable per call. |
+| `ALLOW_POD_EVICTION` | `false` | Gates the pod-eviction recovery step until an e2e proves it reliable — auto-deleting a primary pod on an unproven sequence could turn a hiccup into an outage. |
 
 ## Example
 
 ```bash
-# plan
+# plan — auto-pick the target (omit "target")
 curl -sX POST "$MARIADB_AQSH_URL/tasks/switch-primary" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{ "namespace": "mariadb-1", "target": "1" }'
+  -d '{ "namespace": "mariadb-1" }'
 
-# switch
+# switch to a specific replica
 curl -sX POST "$MARIADB_AQSH_URL/tasks/switch-primary" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{ "namespace": "mariadb-1", "target": "1", "dry_run": "false", "confirm": "true" }'

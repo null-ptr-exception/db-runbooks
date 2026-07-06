@@ -70,12 +70,15 @@ tasks:
         default: auto
   switch-primary:
     script: mariadb/switch-primary.sh
-    description: "Promote a chosen replica to primary within one replicated MariaDB (AWS RDS FailoverDBCluster); operator-driven graceful switchover, guarded by a strict lag pre-check"
+    description: "Promote a replica to primary within one replicated MariaDB (AWS RDS FailoverDBCluster); operator-driven graceful switchover. Target is optional — omit it to auto-pick the most caught-up healthy replica."
     # Headroom for the forward switch (WAIT_TIMEOUT, 300s) plus bounded recovery
     # (rollback + optional eviction, RECOVERY_TIMEOUT each) so the final status
     # always gets emitted within the task budget.
     timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
+    # Note: the lag policy (LAG_THRESHOLD) and the auto-rollback safety behaviour
+    # (ROLLBACK_ON_TIMEOUT) are deliberately NOT task inputs — they are
+    # per-deployment policy / safety, env-overridable internal config only.
     input:
       - name: namespace
         env: DB_NAMESPACE
@@ -84,7 +87,7 @@ tasks:
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - name: target
         env: TARGET_POD_INDEX
-        required: true
+        required: false
         type: string
       - name: context
         env: K8S_CONTEXT
@@ -95,21 +98,11 @@ tasks:
         env: MARIADB_NAME
         required: false
         type: string
-      - name: lag_threshold
-        env: LAG_THRESHOLD
-        required: false
-        type: string
-        default: "0"
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false
         type: string
         default: "300"
-      - name: rollback_on_timeout
-        env: ROLLBACK_ON_TIMEOUT
-        required: false
-        type: string
-        default: "true"
       - name: dry_run
         env: DRY_RUN
         required: false

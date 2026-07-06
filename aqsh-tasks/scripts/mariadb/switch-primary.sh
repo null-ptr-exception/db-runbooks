@@ -44,7 +44,8 @@ NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
 MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
-TARGET_INDEX="${TARGET_POD_INDEX:-}"       # required: replica podIndex to promote
+TARGET_INDEX="${TARGET_POD_INDEX:-}"       # optional: replica podIndex; auto-picked if empty
+AUTO_SELECTED=false                        # set true when we pick the target ourselves
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"        # seconds to wait for the switch to complete
@@ -52,6 +53,9 @@ WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"        # seconds to wait for the switch to c
 # still fit inside the aqsh task timeout and the final status always gets emitted.
 RECOVERY_TIMEOUT="${SWITCH_RECOVERY_TIMEOUT:-120}"
 POLL_INTERVAL="${SWITCH_POLL_INTERVAL:-5}" # seconds between status polls
+# Policy / safety knobs — internal config (env-overridable), NOT task inputs:
+# the acceptable lag is a per-deployment policy, and auto-rollback is a safety
+# behaviour that should stay on rather than be a caller's per-call choice.
 LAG_THRESHOLD="${LAG_THRESHOLD:-0}"        # max secondsBehindMaster to allow switching
 ROLLBACK_ON_TIMEOUT="${ROLLBACK_ON_TIMEOUT:-true}"
 # Gated until an e2e proves the eviction recovery is reliable (see #59): a bad
@@ -70,12 +74,13 @@ emit() {
     --argjson to "$(json_num_or_null "${TARGET_INDEX:-}")" \
     --argjson dry_run "$(bool "$DRY_RUN" && echo true || echo false)" \
     --argjson confirm "$(bool "$CONFIRM" && echo true || echo false)" \
+    --argjson auto_selected "$(bool "$AUTO_SELECTED" && echo true || echo false)" \
     --argjson changed "$changed" \
     --argjson extra "$extra" \
     '{
       status: $status, reason_code: $reason, summary: $summary,
       namespace: $namespace, mdb: $mdb, operator_controlled: true,
-      from_pod_index: $from, to_pod_index: $to,
+      from_pod_index: $from, to_pod_index: $to, target_auto_selected: $auto_selected,
       dry_run: $dry_run, confirm: $confirm, changed: $changed
     } + $extra')
   [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$out" > "$RESULT_FILE"
@@ -101,14 +106,6 @@ else
 fi
 
 # --- guards ------------------------------------------------------------------
-# Target is required.
-if [[ -z "$TARGET_INDEX" ]]; then
-  emit BLOCKED TARGET_REQUIRED "target (the replica podIndex to promote) is required" false; exit 0
-fi
-if [[ ! "$TARGET_INDEX" =~ ^[0-9]+$ ]]; then
-  emit BLOCKED TARGET_INVALID "target must be a non-negative integer podIndex" false; exit 0
-fi
-
 # Guard 1: version/capability — the CRD must expose replication.primary.podIndex.
 if ! mariadb_operator_metadata_field_supported "$RESOURCE" "replication.primary.podIndex"; then
   emit BLOCKED SWITCH_UNSUPPORTED "MariaDB CRD does not expose spec.replication.primary.podIndex; this operator version cannot switch the primary" false; exit 0
@@ -130,6 +127,30 @@ fi
 FROM_INDEX="$(_primary_index "$CR_JSON")"
 if [[ -z "$FROM_INDEX" ]]; then
   emit BLOCKED CURRENT_PRIMARY_UNKNOWN "cannot determine the current primary podIndex (status.currentPrimaryPodIndex empty)" false; exit 0
+fi
+
+# Target selection: an explicit podIndex, or — when the caller gives none — the
+# best replica we pick ourselves (AWS RDS FailoverDBCluster likewise makes the
+# target optional). Auto-pick = the healthy replica with the least lag within
+# LAG_THRESHOLD (tie-break: lowest podIndex); it passes Guard 4 by construction.
+if [[ -n "$TARGET_INDEX" ]]; then
+  if [[ ! "$TARGET_INDEX" =~ ^[0-9]+$ ]]; then
+    emit BLOCKED TARGET_INVALID "target must be a non-negative integer podIndex" false; exit 0
+  fi
+else
+  TARGET_INDEX="$(jq -r --argjson threshold "$LAG_THRESHOLD" --arg mdb "$MDB" '
+    (.status.replication.replicas // {})
+    | to_entries
+    | map({idx: (.key | ltrimstr($mdb + "-") | (try tonumber catch null)),
+           lag: .value.secondsBehindMaster, v: .value})
+    | map(select(.idx != null and .v.slaveIORunning == true and .v.slaveSQLRunning == true
+                 and (.lag != null) and (.lag <= $threshold)))
+    | sort_by(.lag, .idx)
+    | (.[0].idx // "")' <<<"$CR_JSON")"
+  if [[ -z "$TARGET_INDEX" ]]; then
+    emit BLOCKED NO_ELIGIBLE_REPLICA "no healthy, caught-up replica available to promote (lag_threshold=${LAG_THRESHOLD}s); nothing safe to switch to" false; exit 0
+  fi
+  AUTO_SELECTED=true
 fi
 
 # Guard 3: target in range and not already primary.
@@ -166,8 +187,9 @@ if [[ "$(jq -r '.target_ok and .all_ok' <<<"$REPL_CHECK")" != "true" ]]; then
 fi
 
 # --- dry-run / confirm -------------------------------------------------------
+_pick_note="$(bool "$AUTO_SELECTED" && echo " (auto-selected)" || echo "")"
 if bool "$DRY_RUN"; then
-  emit READY SWITCH_DRY_RUN "dry run: would switch primary from podIndex ${FROM_INDEX} to ${TARGET_INDEX} (operator performs a graceful switchover)" false; exit 0
+  emit READY SWITCH_DRY_RUN "dry run: would switch primary from podIndex ${FROM_INDEX} to ${TARGET_INDEX}${_pick_note} (operator performs a graceful switchover)" false; exit 0
 fi
 bool "$CONFIRM" || { emit BLOCKED SWITCH_CONFIRM_REQUIRED "set confirm=true with dry_run=false to switch the primary" false; exit 0; }
 

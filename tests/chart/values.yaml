@@ -57,13 +57,14 @@ mongodb:
   # restart_ondelete.bats for how k8s_sts_restart's OnDelete branch is
   # exercised against this.
   updateStrategy: RollingUpdate
-  # Naming convention this deployment's recovery/account/sanity-check tasks
-  # use by default (see aqsh-tasks/config/mongodb.env's *_DEFAULT keys and
-  # CLAUDE.md "Configuration Layers"). The RBAC ClusterRole below is scoped
-  # to these names — change all three together.
+  # Naming convention this deployment's recovery/account/sanity-check/
+  # reconfig tasks use by default (see aqsh-tasks/config/mongodb.env's
+  # *_DEFAULT keys and CLAUDE.md "Configuration Layers"). The RBAC
+  # ClusterRole below is scoped to these names — change them together.
   stsName: mongodb
   credentialSecret: mongodb-credentials
   recoveryConfigmap: mongodb-recovery-config
+  reconfigAuditConfigmap: mongodb-reconfig-audit
 
 # --- mongodb RBAC ---
 mongodbRbac:

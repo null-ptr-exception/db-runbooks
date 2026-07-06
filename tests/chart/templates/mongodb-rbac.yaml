@@ -26,7 +26,9 @@ rules:
     verbs: ["get", "list"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: [{{ .Values.mongodb.recoveryConfigmap | default "mongodb-recovery-config" | quote }}]
+    resourceNames:
+      - {{ .Values.mongodb.recoveryConfigmap | default "mongodb-recovery-config" | quote }}
+      - {{ .Values.mongodb.reconfigAuditConfigmap | default "mongodb-reconfig-audit" | quote }}
     verbs: ["get", "patch"]
   # create cannot be scoped by resourceNames (Kubernetes RBAC ignores
   # resourceNames for create requests — there's no object yet to match

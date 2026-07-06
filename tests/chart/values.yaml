@@ -38,6 +38,9 @@ mariadb:
   enabled: false
   namespace: mariadb-1
   image: mariadb:10.6
+  # replicas > 1 turns on operator replication (1 primary + N-1 replicas),
+  # required by the switch-primary e2e. Default 1 = standalone.
+  replicas: 1
   rootPassword: mariadb-test-pass
   storage: 1Gi
   resources:

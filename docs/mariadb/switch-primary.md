@@ -66,9 +66,19 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/switch-primary" \
   -d '{ "namespace": "mariadb-1", "target": "1", "dry_run": "false", "confirm": "true" }'
 ```
 
+## Testing
+
+- Unit (`tests/unit/mariadb/switch-primary.bats`): mocked kubectl covering the
+  guards, dry_run/confirm, the happy switch, and the stuck → rollback / SWITCH_STUCK
+  ladder.
+- e2e (`tests/mariadb/switch_primary.bats`): real operator on the 2-cluster lab —
+  `mariadb-1` runs replicated (helmfile `replicas: 3`); the test switches the
+  primary to podIndex 1 and asserts `status.currentPrimaryPodIndex` flipped and
+  the new primary is writable.
+
 ## Notes / follow-up (see #59)
 
-- e2e coverage needs a **replicated** MariaDB (replicas ≥ 2) — including a
-  deliberately-induced stuck switchover — to validate the recovery ladder before
-  `ALLOW_POD_EVICTION` is enabled by default.
+- The stuck-switch recovery ladder (rollback / gated pod-eviction) is unit-tested
+  only; validating it live needs a fault-injection harness, and
+  `ALLOW_POD_EVICTION` stays gated until then.
 - A MaxScale-based switchover (production-grade) is a larger future item.

@@ -31,6 +31,8 @@ releases:
       - mariadb:
           enabled: true
           namespace: mariadb-1
+          # Replicated so the switch-primary e2e can promote a replica.
+          replicas: 3
 
   # cluster-b: MinIO for backup tests
   - name: minio

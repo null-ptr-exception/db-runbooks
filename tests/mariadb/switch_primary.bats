@@ -153,7 +153,7 @@ _sql_primary() {
 
 _dump_state() {
   echo "# CR: index=$(_primary_index) ready=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" >&3
-  echo "# replication: $(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.replicationStatus}' 2>/dev/null)" >&3
+  echo "# replication: $(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.replication}' 2>/dev/null)" >&3
 }
 
 @test "switch-primary dry_run shows the plan without switching" {

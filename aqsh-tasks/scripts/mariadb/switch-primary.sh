@@ -50,6 +50,9 @@ TARGET_INDEX="${TARGET_POD_INDEX:-}"       # required: replica podIndex to promo
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"        # seconds to wait for the switch to complete
+# Recovery (rollback/eviction) uses a shorter budget so forward + recovery waits
+# still fit inside the aqsh task timeout and the final status always gets emitted.
+RECOVERY_TIMEOUT="${SWITCH_RECOVERY_TIMEOUT:-120}"
 POLL_INTERVAL="${SWITCH_POLL_INTERVAL:-5}" # seconds between status polls
 LAG_THRESHOLD="${LAG_THRESHOLD:-0}"        # max secondsBehindMaster to allow switching
 ROLLBACK_ON_TIMEOUT="${ROLLBACK_ON_TIMEOUT:-true}"
@@ -139,17 +142,28 @@ if [[ "$TARGET_INDEX" == "$FROM_INDEX" ]]; then
   emit UNCHANGED ALREADY_PRIMARY "podIndex ${TARGET_INDEX} is already the primary; nothing to do" false; exit 0
 fi
 
-# Guard 4: strict lag pre-check — only switch when all replicas are healthy and
-# caught up, so the operator's sync-wait is instant and we never park the current
-# primary in a stuck read_only state.
-REPL_CHECK="$(jq --argjson threshold "$LAG_THRESHOLD" '
+# Guard 4: strict lag pre-check. `.status.replication.replicas` is keyed by pod
+# name (<mdb>-<index>). Verify the TARGET pod is actually a known replica (a bare
+# all(...) would pass vacuously if the target key were missing) AND that every
+# replica is healthy and caught up — so the operator's sync-wait is instant and
+# the current primary never parks in a stuck read_only state.
+TARGET_KEY="${MDB}-${TARGET_INDEX}"
+REPL_CHECK="$(jq --argjson threshold "$LAG_THRESHOLD" --arg tk "$TARGET_KEY" '
+  def healthy: (.slaveIORunning == true and .slaveSQLRunning == true and (.secondsBehindMaster != null) and (.secondsBehindMaster <= $threshold));
   (.status.replication.replicas // {}) as $r
+  | ($r[$tk]) as $t
   | {
-      ok: (($r | length) > 0 and all($r[]; .slaveIORunning == true and .slaveSQLRunning == true and (.secondsBehindMaster != null) and (.secondsBehindMaster <= $threshold))),
+      target_present: ($t != null),
+      target_ok: ($t != null and ($t | healthy)),
+      all_ok: (($r | length) > 0 and all($r[]; healthy)),
       replicas: $r
     }' <<<"$CR_JSON")"
-if [[ "$(jq -r '.ok' <<<"$REPL_CHECK")" != "true" ]]; then
-  emit BLOCKED REPLICAS_NOT_IN_SYNC "replicas are not all healthy and caught up (lag_threshold=${LAG_THRESHOLD}s); refusing to switch to avoid a stuck read_only window" false \
+if [[ "$(jq -r '.target_present' <<<"$REPL_CHECK")" != "true" ]]; then
+  emit BLOCKED TARGET_NOT_A_REPLICA "target podIndex ${TARGET_INDEX} (pod ${TARGET_KEY}) is not a known replica in status.replication.replicas" false \
+    "$(jq -c '{replicas: .replicas}' <<<"$REPL_CHECK")"; exit 0
+fi
+if [[ "$(jq -r '.target_ok and .all_ok' <<<"$REPL_CHECK")" != "true" ]]; then
+  emit BLOCKED REPLICAS_NOT_IN_SYNC "replicas (incl. the target) are not all healthy and caught up (lag_threshold=${LAG_THRESHOLD}s); refusing to switch to avoid a stuck read_only window" false \
     "$(jq -c '{replicas: .replicas}' <<<"$REPL_CHECK")"; exit 0
 fi
 
@@ -167,7 +181,8 @@ _patch_index() {
 
 # Poll until currentPrimaryPodIndex == want and the CR is Ready, or timeout.
 _wait_switch() {
-  local want="$1" deadline=$(( SECONDS + WAIT_TIMEOUT )) cr
+  local want="$1" timeout="${2:-$WAIT_TIMEOUT}" cr
+  local deadline=$(( SECONDS + timeout ))
   while (( SECONDS < deadline )); do
     cr="$(_cr_json)" || cr=""
     if [[ -n "$cr" && "$(_primary_index "$cr")" == "$want" && "$(_ready "$cr")" == "True" ]]; then
@@ -193,7 +208,7 @@ _record() { recovery="$(jq -c --arg s "$1" '.attempted += [$s]' <<<"$recovery")"
 if bool "$ROLLBACK_ON_TIMEOUT"; then
   _record "rollback"
   _patch_index "$FROM_INDEX" || true
-  if _wait_switch "$FROM_INDEX"; then
+  if _wait_switch "$FROM_INDEX" "$RECOVERY_TIMEOUT"; then
     emit ERROR SWITCH_TIMEOUT_ROLLED_BACK "switch to podIndex ${TARGET_INDEX} did not complete within ${WAIT_TIMEOUT}s; auto-rolled back to ${FROM_INDEX} (DB is primary-serving again)" false \
       "$(jq -c '. + {recovered: true}' <<<"$recovery")"; exit 1
   fi
@@ -205,7 +220,7 @@ if bool "$ROLLBACK_ON_TIMEOUT"; then
     if [[ -n "$stuck_pod" ]]; then
       _record "evict:${stuck_pod}"
       _kubectl delete pod "$stuck_pod" --ignore-not-found >/dev/null 2>&1 || true
-      if _wait_switch "$FROM_INDEX"; then
+      if _wait_switch "$FROM_INDEX" "$RECOVERY_TIMEOUT"; then
         emit ERROR SWITCH_TIMEOUT_RECOVERED "switch timed out; auto-recovered by rolling back and evicting the stuck primary pod (${stuck_pod})" false \
           "$(jq -c '. + {recovered: true}' <<<"$recovery")"; exit 1
       fi

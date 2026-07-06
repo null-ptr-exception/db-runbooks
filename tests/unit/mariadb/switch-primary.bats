@@ -131,9 +131,15 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.to_pod_index')" = "1" ]
 }
 
+@test "switch-primary blocks when the target is not a known replica" {
+  # mock exposes only replica 'mariadb-1'; target 2 (in range for 3 replicas) is absent
+  run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=2 MOCK_PRIMARY_INDEX=0 MOCK_REPLICAS=3
+  [ "$(field '.reason_code')" = "TARGET_NOT_A_REPLICA" ]
+}
+
 @test "switch-primary auto-rolls-back when the switch gets stuck" {
   run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0 \
-    WAIT_TIMEOUT=1 MOCK_SWITCH_STUCK=1 MOCK_ROLLBACK_RECOVERS=1
+    WAIT_TIMEOUT=1 SWITCH_RECOVERY_TIMEOUT=1 MOCK_SWITCH_STUCK=1 MOCK_ROLLBACK_RECOVERS=1
   [ "$status" -ne 0 ]
   [ "$(field '.reason_code')" = "SWITCH_TIMEOUT_ROLLED_BACK" ]
   [ "$(field '.recovered')" = "true" ]
@@ -141,7 +147,7 @@ field() { jq -r "$1" "${RESULT}"; }
 
 @test "switch-primary reports SWITCH_STUCK when rollback cannot recover and eviction is gated" {
   run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0 \
-    WAIT_TIMEOUT=1 MOCK_SWITCH_STUCK=1 MOCK_ROLLBACK_RECOVERS=0
+    WAIT_TIMEOUT=1 SWITCH_RECOVERY_TIMEOUT=1 MOCK_SWITCH_STUCK=1 MOCK_ROLLBACK_RECOVERS=0
   [ "$status" -ne 0 ]
   [ "$(field '.reason_code')" = "SWITCH_STUCK" ]
   [ "$(field '.recovered')" = "false" ]

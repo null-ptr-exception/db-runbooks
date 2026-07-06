@@ -71,7 +71,10 @@ tasks:
   switch-primary:
     script: mariadb/switch-primary.sh
     description: "Promote a chosen replica to primary within one replicated MariaDB (AWS RDS FailoverDBCluster); operator-driven graceful switchover, guarded by a strict lag pre-check"
-    timeout: 10m
+    # Headroom for the forward switch (WAIT_TIMEOUT, 300s) plus bounded recovery
+    # (rollback + optional eviction, RECOVERY_TIMEOUT each) so the final status
+    # always gets emitted within the task budget.
+    timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
     input:
       - name: namespace

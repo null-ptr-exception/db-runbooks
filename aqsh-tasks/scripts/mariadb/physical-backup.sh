@@ -183,7 +183,7 @@ if [[ "$WAIT_TIMEOUT" != "0" ]]; then
     exit 1
   fi
 
-  status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json | jq -c '.status // {}')"
+  status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json 2>/dev/null | jq -c '.status // {}' 2>/dev/null || printf '{}')"
   if jq -e '
     (.status == "Failed") or
     any(.conditions[]?; .type == "Complete" and .status == "True" and .reason == "JobFailed")

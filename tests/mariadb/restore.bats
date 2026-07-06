@@ -168,12 +168,15 @@ _submit() {
   export RESTORE_TARGET
   [[ -n "$RESTORE_TARGET" && "$RESTORE_TARGET" != "null" ]]
 
-  # 4. The restored CR must actually be Ready per the operator.
+  # 4. The restored CR must actually be Ready per the operator...
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready "mariadb/${RESTORE_TARGET}" --timeout=300s
   echo "restored conditions:"
   kubectl --context "$CTX_A" -n mariadb-1 get mariadb "$RESTORE_TARGET" \
     -o jsonpath='{range .status.conditions[*]}{.type}={.status} {end}'; echo
+  # ...and the operator must have marked the bootstrapFrom restore complete (#48).
+  assert_equal "$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb "$RESTORE_TARGET" \
+    -o jsonpath='{.status.conditions[?(@.type=="BackupRestored")].status}')" "True"
 
   # 5. The seeded rows must be present in the restored instance — proves the
   #    bootstrapFrom / S3 restore actually moved data, not just provisioned.

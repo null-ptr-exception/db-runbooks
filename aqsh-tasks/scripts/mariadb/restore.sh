@@ -90,7 +90,7 @@ restore_unhandled_error() {
   local code="$?"
   local line="${BASH_LINENO[0]:-unknown}"
   trap - ERR
-  mdbt_write_result "$(response_err "$OP" "restore task aborted before completing at line ${line} (exit ${code})" \
+  mdbt_write_result "$(response_err "${OP:-restore}" "restore task aborted before completing at line ${line} (exit ${code})" \
     "$(jq -n \
       --arg namespace "${NAMESPACE:-}" \
       --arg target "${TARGET:-}" \
@@ -187,6 +187,7 @@ if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
 OPERATOR_BACKUP_ENDPOINT="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
+OPERATOR_BACKUP_TLS="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
 
 # Build the MariaDB CR programmatically with jq rather than interpolating values
 # into a YAML heredoc: kubectl apply accepts JSON, so there is no string-injection
@@ -203,6 +204,7 @@ if ! MANIFEST="$(jq -n \
   --arg bucket "$BACKUP_BUCKET" \
   --arg prefix "$BACKUP_PREFIX" \
   --arg endpoint "$OPERATOR_BACKUP_ENDPOINT" \
+  --argjson tls "$OPERATOR_BACKUP_TLS" \
   --arg region "$BACKUP_REGION" \
   --arg accessSecret "$BACKUP_ACCESS_SECRET" \
   --arg accessKey "$BACKUP_ACCESS_KEY" \
@@ -225,7 +227,7 @@ if ! MANIFEST="$(jq -n \
           prefix: $prefix,
           endpoint: $endpoint,
           region: $region,
-          tls: {enabled: false},
+          tls: {enabled: $tls},
           accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
           secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
         }

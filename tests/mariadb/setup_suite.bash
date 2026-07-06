@@ -41,7 +41,7 @@ ensure_minio_bucket() {
     --rm -i \
     --pod-running-timeout=180s \
     --command -- sh -c \
-      "mc alias set local http://minio:9000 minioadmin minioadmin-changeme-prod && mc mb -p local/${bucket}"
+      "timeout 60 mc alias set local http://minio:9000 minioadmin minioadmin-changeme-prod && timeout 60 mc mb -p local/${bucket}"
 }
 
 delete_namespace_and_wait() {

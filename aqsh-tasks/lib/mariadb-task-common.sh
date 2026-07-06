@@ -162,6 +162,17 @@ mdbt_operator_s3_endpoint() {
   printf '%s' "$endpoint"
 }
 
+# mdbt_operator_s3_tls_enabled <endpoint>
+# The operator endpoint is a bare host:port, so TLS can't be inferred from it.
+# Derive it from the original endpoint's scheme: https:// -> true, else false.
+# So a real https S3 endpoint keeps TLS while the plain-HTTP MinIO lab does not.
+mdbt_operator_s3_tls_enabled() {
+  case "$1" in
+    https://*) printf 'true' ;;
+    *) printf 'false' ;;
+  esac
+}
+
 mdbt_validate_region() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^[A-Za-z0-9-]+$ ]]; then
@@ -242,8 +253,9 @@ mdbt_wait_mariadb_ready() {
 # A PhysicalBackup with no schedule runs exactly once, immediately.
 mdbt_physical_backup_manifest() {
   local name="$1" namespace="$2" mariadb="$3"
-  local operator_endpoint
+  local operator_endpoint operator_tls
   operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
+  operator_tls="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
   jq -n \
     --arg name "$name" \
     --arg namespace "$namespace" \
@@ -253,6 +265,7 @@ mdbt_physical_backup_manifest() {
     --arg bucket "$BACKUP_BUCKET" \
     --arg prefix "$BACKUP_PREFIX" \
     --arg endpoint "$operator_endpoint" \
+    --argjson tls "$operator_tls" \
     --arg region "$BACKUP_REGION" \
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
@@ -271,7 +284,7 @@ mdbt_physical_backup_manifest() {
             prefix: $prefix,
             endpoint: $endpoint,
             region: $region,
-            tls: {enabled: false},
+            tls: {enabled: $tls},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
             secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
           }

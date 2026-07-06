@@ -121,7 +121,9 @@ mise install "${RUNTIME_MISE_TOOLS[@]}"
 mise ls --current "${RUNTIME_MISE_TOOLS[@]}"
 _ensure_local_bin
 for tool in "${RUNTIME_MISE_TOOLS[@]}"; do
-  tool_dir="$(mise where "$tool")"
+  # Don't let one `mise where` failure abort the whole preflight (set -e); skip
+  # the tool and continue linking the rest.
+  tool_dir="$(mise where "$tool" 2>/dev/null)" || { echo "warning: 'mise where $tool' failed; skipping symlink" >&2; continue; }
   if [[ -x "${tool_dir}/${tool}" ]]; then
     ln -sf "${tool_dir}/${tool}" "${LOCAL_BIN}/${tool}"
   fi

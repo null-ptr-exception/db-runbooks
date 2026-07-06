@@ -119,11 +119,20 @@ fi
 
 mise install "${RUNTIME_MISE_TOOLS[@]}"
 mise ls --current "${RUNTIME_MISE_TOOLS[@]}"
+_ensure_local_bin
+for tool in "${RUNTIME_MISE_TOOLS[@]}"; do
+  # Don't let one `mise where` failure abort the whole preflight (set -e); skip
+  # the tool and continue linking the rest.
+  tool_dir="$(mise where "$tool" 2>/dev/null)" || { echo "warning: 'mise where $tool' failed; skipping symlink" >&2; continue; }
+  if [[ -x "${tool_dir}/${tool}" ]]; then
+    ln -sf "${tool_dir}/${tool}" "${LOCAL_BIN}/${tool}"
+  fi
+done
 
 # helmfile-infra.yaml relies on `helm diff` to compute upgrade plans.
 if ! helm plugin list 2>/dev/null | grep -q '^diff'; then
   _fix "Installing helm-diff plugin..."
-  helm plugin install https://github.com/databus23/helm-diff
+  helm plugin install https://github.com/databus23/helm-diff --verify=false
 fi
 _ok "helm-diff $(helm plugin list 2>/dev/null | awk '$1=="diff"{print $2}')"
 

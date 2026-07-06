@@ -82,6 +82,7 @@ spec:
       containers:
         - name: kube-federated-auth
           image: {{ .Values.federatedAuth.image }}
+          imagePullPolicy: {{ .Values.federatedAuth.imagePullPolicy }}
           env:
             - name: CONFIG_PATH
               value: /etc/kube-federated-auth/config/clusters.yaml

@@ -102,6 +102,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(jq -r '.spec.mariaDbRef.name' "${CAPTURE}")" = "mariadb" ]
   [ "$(jq -r '.spec.storage.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-1" ]
   [ "$(jq -r '.spec.storage.s3.bucket' "${CAPTURE}")" = "db-backups" ]
+  [ "$(jq -r '.spec.storage.s3.tls.enabled' "${CAPTURE}")" = "false" ]
 }
 
 @test "physical-backup auto-detects the single instance when omitted" {
@@ -175,5 +176,5 @@ EOF
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
     MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
   [ "$status" -eq 0 ]
-  [ "$(jq -r '.spec.storage.s3.endpoint' "${CAPTURE}")" = "http://minio.kind-b.test:30080" ]
+  [ "$(jq -r '.spec.storage.s3.endpoint' "${CAPTURE}")" = "minio.kind-b.test:30080" ]
 }

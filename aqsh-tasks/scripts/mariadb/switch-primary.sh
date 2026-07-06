@@ -38,8 +38,6 @@ source "${LIB_DIR}/mariadb-operator.sh"
 
 bool() { case "${1:-}" in 1 | true | TRUE | yes | YES | on | ON) return 0 ;; *) return 1 ;; esac; }
 
-OP="switch-primary"
-
 # --- inputs ------------------------------------------------------------------
 CONTEXT="${K8S_CONTEXT:-}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"

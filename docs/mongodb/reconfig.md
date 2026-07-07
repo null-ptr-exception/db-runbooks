@@ -184,7 +184,7 @@ port — the selector must match exactly one member.
 | `set_votes` | `member`, `votes` (0 or 1) | Grants/removes a vote. `votes:0` automatically forces `priority:0` (MongoDB requirement). This changes quorum math — always read the plan's `vote_parity` and `zone_quorum` checks. | **Common** |
 | `add_member` | `host`, optional `votes`/`priority`/`hidden` | Adds a member (port defaults to `:27017`, `_id` auto-allocated). For a local host the backing pod must already exist and be Ready (block otherwise) — scale the StatefulSet first, then add. | Occasional |
 | `set_hidden` | `member`, `hidden` (bool) | `true` hides a member from clients and forces `priority:0` (member keeps replicating). This is the correct first step when re-integrating a stale member. | Occasional |
-| `remove_member` | `member` | Removes the member from the config entirely. **Uncommon — 不建議動**: prefer `set_votes 0` + `set_hidden true` unless the host is permanently gone; a removed member's data drifts irreversibly and re-adding later means full initial sync. | **Uncommon** |
+| `remove_member` | `member` | Removes the member from the config entirely. **Uncommon — not recommended**: prefer `set_votes 0` + `set_hidden true` unless the host is permanently gone; a removed member's data drifts irreversibly and re-adding later means full initial sync. | **Uncommon** |
 
 ---
 
@@ -297,9 +297,9 @@ per-deployment **policy**, deliberately not task inputs.
 | Key | Default | Meaning / effect of changing it | Touch it? |
 |---|---|---|---|
 | `RECONFIG_DR_MIN_UNREACHABLE_SECONDS_DEFAULT` | 300 | How long a site must be silent before force-dr may fire. Lower = faster DR but network blips can qualify (this sandbox uses 45 for tests). Raise for flaky networks. | Review with on-call team; don't change casually |
-| `RECONFIG_LAG_WARN_SECONDS_DEFAULT` | 60 | Replication lag above this marks a member unhealthy in `member_health` and in quorum simulation. Lower = stricter plans. | Rarely — **不建議動** unless your workload's normal lag differs |
-| `RECONFIG_AUDIT_CONFIGMAP_DEFAULT` | `mongodb-reconfig-audit` | Audit ConfigMap name. Must match the RBAC `resourceNames` pin (chart value `mongodb.reconfigAuditConfigmap`) — change both together or audit writes get denied. | **不建議動** |
-| `RECONFIG_AUDIT_MAX_ENTRIES_DEFAULT` | 20 | Ring buffer depth. Bigger keeps more history but a ConfigMap caps at ~1 MiB. | **不建議動** |
+| `RECONFIG_LAG_WARN_SECONDS_DEFAULT` | 60 | Replication lag above this marks a member unhealthy in `member_health` and in quorum simulation. Lower = stricter plans. | Rarely — **not recommended** unless your workload's normal lag differs |
+| `RECONFIG_AUDIT_CONFIGMAP_DEFAULT` | `mongodb-reconfig-audit` | Audit ConfigMap name. Must match the RBAC `resourceNames` pin (chart value `mongodb.reconfigAuditConfigmap`) — change both together or audit writes get denied. | **Not recommended** |
+| `RECONFIG_AUDIT_MAX_ENTRIES_DEFAULT` | 20 | Ring buffer depth. Bigger keeps more history but a ConfigMap caps at ~1 MiB. | **Not recommended** |
 
 Annotations the gateway owns on the StatefulSet (do not set by hand;
 `freeze`/`force-dr`/`apply` manage their lifecycle):
@@ -316,10 +316,10 @@ Annotations the gateway owns on the StatefulSet (do not set by hand;
 | `apply` set_priority / set_votes | Common | The normal path for topology tuning. |
 | `freeze` on/off | Common (per calendar) | Tie to your change-management calendar. |
 | `apply` add_member / set_hidden | Occasional | Scaling and re-integration flows. |
-| `apply` remove_member | **Uncommon — 不建議動** | Prefer votes:0 + hidden. Only remove when the host is permanently decommissioned. |
+| `apply` remove_member | **Uncommon — not recommended** | Prefer votes:0 + hidden. Only remove when the host is permanently decommissioned. |
 | `force-dr` dry_run | Occasional (drills) | Safe to run in game-days; changes nothing. |
-| `force-dr` confirm | **Break-glass only — 不建議動** | Real incidents with an incident_id only. Every use should end in a postmortem reading the audit entry. |
-| Editing `RECONFIG_*` internal config | **Uncommon — 不建議動** | Per-deployment policy; involve the on-call team (see table above). |
+| `force-dr` confirm | **Break-glass only — not recommended** | Real incidents with an incident_id only. Every use should end in a postmortem reading the audit entry. |
+| Editing `RECONFIG_*` internal config | **Uncommon — not recommended** | Per-deployment policy; involve the on-call team (see table above). |
 | Hand-editing the gateway annotations / audit ConfigMap | **Never** | You would be lying to your own safety system. |
 
 ---

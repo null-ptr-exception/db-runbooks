@@ -742,3 +742,43 @@ tasks:
         required: false
         type: string
         default: "300"
+  # FCV gateway (see docs/mongodb/fcv.md). Deployment-naming fields
+  # (sts_name, credential_*) are deliberately NOT task inputs — same
+  # auto-detect tier as recovery/* (CLAUDE.md "Configuration Layers").
+  fcv/status:
+    script: mongodb/fcv/status.sh
+    description: "Read-only: server version, current FCV, transitional state, allowed FCV targets"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+  fcv/set:
+    script: mongodb/fcv/set.sh
+    description: "Set featureCompatibilityVersion on the primary, validated against the binary version (dry_run -> confirm)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_version
+        env: FCV_TARGET_VERSION
+        required: true
+        type: string
+        pattern: '^[0-9]+\.[0-9]+$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"

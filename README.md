@@ -119,6 +119,8 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `sanity-check` | Kubernetes infra → connectivity → MongoDB-internals health check | [docs/mongodb/sanity-check.md](docs/mongodb/sanity-check.md) |
 | `create-account`, `delete-account`, `ban-account`, `extend-expiry`, `update-account-roles`, `force-permanent`, `reset-password`, `reconcile-expiry` | Run-account lifecycle management | [docs/mongodb/account-lifecycle.md](docs/mongodb/account-lifecycle.md) |
 | `recovery/pre-check`, `/wipe`, `/reset`, `/status`, `/fix-no-primary`, `/recover` | Replica-set member recovery (gate checks, wipe + resync, no-primary diagnosis) | [docs/mongodb/recovery.md](docs/mongodb/recovery.md) |
+| `reconfig/plan`, `/apply`, `/force-dr`, `/freeze` | Gated replica-set reconfig (risk report → CAS apply, break-glass DR, change freeze) | [docs/mongodb/reconfig.md](docs/mongodb/reconfig.md) |
+| `fcv/status`, `fcv/set` | featureCompatibilityVersion report + gated upgrade/downgrade validated against the binary version | [docs/mongodb/fcv.md](docs/mongodb/fcv.md) |
 | `backup` | Backup to MinIO | — |
 
 ### Task API Example

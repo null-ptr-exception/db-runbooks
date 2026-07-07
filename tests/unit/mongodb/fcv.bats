@@ -6,7 +6,7 @@
 # placed in $TEST_TMPDIR/bin; no cluster.
 #
 # Mock control env vars:
-#   MOCK_POD_LIST      names  pod names returned by `kubectl get pods -l ...`
+#   MOCK_POD_LIST      pod names returned by `kubectl get pods -l ...`
 #   MOCK_POD_READY     True/False  Ready-condition status for every pod
 #   MOCK_POD_PHASE     phase  pod phase for every pod (Running fallback path)
 #   MOCK_FCV_EXEC_OUT  text   what the exec'd mongosh prints (e.g.

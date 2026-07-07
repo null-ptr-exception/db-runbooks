@@ -30,13 +30,21 @@ setup_file() {
 
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
 
-  # Earlier suites (restart) roll the primary pod and trigger an operator
-  # failover; wait for mariadb-1 to settle back to Ready before switching, so we
-  # operate on a healthy topology rather than mid-reconcile churn.
-  kubectl --context "$CTX_A" -n mariadb-1 wait \
-    --for=condition=Ready mariadb/mariadb --timeout=300s || true
-
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
+
+  # Make this file runnable in isolation (not only when it runs last): wait for
+  # Ready AND for the operator to finish populating .status.replication.replicas,
+  # which it does asynchronously *after* Ready. Fail loudly if it never settles.
+  kubectl --context "$CTX_A" -n mariadb-1 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s
+  local elapsed=0 count=0
+  while (( elapsed < 180 )); do
+    count=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb \
+      -o json | jq '.status.replication.replicas // {} | length') || count=0
+    [[ "$count" -ge 2 ]] && break
+    sleep 5; elapsed=$((elapsed + 5))
+  done
+  [[ "$count" -ge 2 ]] || { echo "replication status not populated (replicas=$count) after ${elapsed}s" >&2; return 1; }
 }
 
 setup() {
@@ -47,9 +55,9 @@ setup() {
 # Always leave the primary back on podIndex 0 so later suites see the original
 # topology (some assume mariadb-0 is primary).
 teardown_file() {
-  kubectl --context "kind-cluster-a" -n mariadb-1 patch mariadb mariadb \
+  kubectl --context "$CTX_A" -n mariadb-1 patch mariadb mariadb \
     --type merge -p '{"spec":{"replication":{"primary":{"podIndex":0}}}}' >/dev/null 2>&1 || true
-  kubectl --context "kind-cluster-a" -n mariadb-1 wait \
+  kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=jsonpath='{.status.currentPrimaryPodIndex}'=0 mariadb/mariadb --timeout=300s >/dev/null 2>&1 || true
 }
 
@@ -106,8 +114,13 @@ _primary_index() {
     -o jsonpath='{.status.currentPrimaryPodIndex}' 2>/dev/null
 }
 
-# A valid podIndex other than the current primary (replicas: 3 → 0,1,2).
-_other_index() { echo $(( ( ${1:-0} + 1 ) % 3 )); }
+_replica_count() {
+  kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.spec.replicas}'
+}
+
+# A valid podIndex other than the current primary, derived from the live
+# replica count rather than a hardcoded topology.
+_other_index() { local n; n="$(_replica_count)"; echo $(( ( ${1:-0} + 1 ) % ${n:-3} )); }
 
 # _switch_payload <target> [confirm] — dry_run unless a confirm arg is given.
 # lag_threshold is intentionally NOT sent (it's internal policy, not a task

@@ -293,10 +293,10 @@ conventional deployment with zero config):
 
 | Key | Meaning | Touch it? |
 |---|---|---|
-| `MONGO_STS_NAME_DEFAULT` | StatefulSet name when detection shouldn't run | 不建議動 |
-| `MONGO_CRED_SECRET_DEFAULT` | Credential secret name | 不建議動 |
-| `MONGO_CRED_USER_DEFAULT` | Literal username (when not stored in the secret) | 不建議動 |
-| `MONGO_CRED_USER_KEY_DEFAULT` / `MONGO_CRED_PASS_KEY_DEFAULT` | Keys inside the credential secret | 不建議動 |
+| `MONGO_STS_NAME_DEFAULT` | StatefulSet name when detection shouldn't run | Not recommended — leave unset |
+| `MONGO_CRED_SECRET_DEFAULT` | Credential secret name | Not recommended — leave unset |
+| `MONGO_CRED_USER_DEFAULT` | Literal username (when not stored in the secret) | Not recommended — leave unset |
+| `MONGO_CRED_USER_KEY_DEFAULT` / `MONGO_CRED_PASS_KEY_DEFAULT` | Keys inside the credential secret | Not recommended — leave unset |
 
 ---
 

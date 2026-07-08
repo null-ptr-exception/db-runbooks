@@ -295,3 +295,51 @@ mdbt_physical_backup_manifest() {
       }
     }'
 }
+
+# mdbt_logical_backup_manifest <name> <namespace> <mariadb_ref>
+# Emit a mariadb-operator `Backup` CR as JSON (logical / mariadb-dump backup).
+# The single source of truth for the Backup shape, sibling to the PhysicalBackup
+# builder above. Kept to the fields required by BOTH operator generations —
+# mariaDbRef + storage.s3 are the only required fields, and neither `compression`
+# nor `databases` exists on the legacy mmontes-era CRD — so the same manifest
+# applies cleanly whether the cluster runs the current or the legacy operator.
+# S3 location/credentials come from the BACKUP_* environment, identically to the
+# physical builder. A Backup with no schedule runs exactly once, immediately.
+mdbt_logical_backup_manifest() {
+  local name="$1" namespace="$2" mariadb="$3"
+  local operator_endpoint operator_tls
+  operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
+  operator_tls="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
+  jq -n \
+    --arg apiVersion "$(mdb_operator_apiversion)" \
+    --arg name "$name" \
+    --arg namespace "$namespace" \
+    --arg mariadb "$mariadb" \
+    --arg bucket "$BACKUP_BUCKET" \
+    --arg prefix "$BACKUP_PREFIX" \
+    --arg endpoint "$operator_endpoint" \
+    --argjson tls "$operator_tls" \
+    --arg region "$BACKUP_REGION" \
+    --arg accessSecret "$BACKUP_ACCESS_SECRET" \
+    --arg accessKey "$BACKUP_ACCESS_KEY" \
+    --arg secretKey "$BACKUP_SECRET_KEY" \
+    '{
+      apiVersion: $apiVersion,
+      kind: "Backup",
+      metadata: {name: $name, namespace: $namespace},
+      spec: {
+        mariaDbRef: {name: $mariadb},
+        storage: {
+          s3: {
+            bucket: $bucket,
+            prefix: $prefix,
+            endpoint: $endpoint,
+            region: $region,
+            tls: {enabled: $tls},
+            accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
+            secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+          }
+        }
+      }
+    }'
+}

@@ -31,6 +31,11 @@ rules:
   - apiGroups: [{{ .Values.mariadb.operatorGroup | quote }}, "mariadb.mmontes.io"]
     resources: ["externalmariadbs", "physicalbackups"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # Logical backup/restore via the operator Backup/Restore CRs (present on both
+  # operator generations).
+  - apiGroups: [{{ .Values.mariadb.operatorGroup | quote }}, "mariadb.mmontes.io"]
+    resources: ["backups", "restores"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

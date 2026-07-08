@@ -182,11 +182,12 @@ if ! mdb_has_crd physicalbackups; then
     exit 0
   fi
 
-  if mdbt_pb_handrolled_run "$OP" "$PB_POD" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" "$BACKUP_BUCKET" "$PB_OBJECT"; then
+  rc=0
+  mdbt_pb_handrolled_run "$OP" "$PB_POD" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" "$BACKUP_BUCKET" "$PB_OBJECT" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
     mdbt_write_result "$(response_ok "$OP" "hand-rolled physical backup ${BACKUP_NAME} streamed for ${MARIADB_NAME}" "$(hr_result true false)")"
     exit 0
   fi
-  rc=$?
   mdbt_fail "$OP" "hand-rolled physical backup failed (exit ${rc}: 3=no root credential, 4=minio setup, other=mariabackup/upload stream)" \
     "$(hr_result false false)" 1
 fi

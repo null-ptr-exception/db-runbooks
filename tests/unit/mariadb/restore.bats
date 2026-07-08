@@ -49,6 +49,8 @@ done
 case "$verb" in
   get)
     case "$args" in
+      *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';  exit 0 ;;   # operator-group detect
+      *"get crd "*|*" crd "*) exit 0 ;;                                       # physicalbackups CRD present (operator path)
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;   # resolve-name list (jsonpath)
       *items*spec.image*) printf '%s' "${MOCK_SOURCE_IMAGES:-}"; exit 0 ;; # distinct-image scan (jsonpath)
       *"-o json"*)  # single-source spec fetch

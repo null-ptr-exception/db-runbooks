@@ -32,6 +32,10 @@ MDB_INPUT="${MARIADB_NAME:-}"
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"              # for mariadb_autodetect_target (source auto-detect)
+# shellcheck source=../../lib/minio-client.sh
+source "${LIB_DIR}/minio-client.sh"         # mc helpers for the hand-rolled path
+# shellcheck source=../../lib/mariadb-physical-backup.sh
+source "${LIB_DIR}/mariadb-physical-backup.sh"  # hand-rolled mariabackup (legacy operator)
 
 # Deploy-time S3/MinIO settings (MINIO_ENDPOINT, MINIO_BUCKET, ...).
 mdbt_load_config
@@ -146,6 +150,46 @@ backup_status_result() {
     --argjson status "$status_json" \
     '. + {physicalBackupStatus: $status.status, physicalBackupConditions: ($status.conditions // [])}'
 }
+
+# --- Route by operator capability --------------------------------------------
+# The current operator drives a PhysicalBackup CR (the path below). A legacy
+# operator without that CRD takes the hand-rolled mariabackup path, which streams
+# from the source pod straight to S3 via mc. Detection fails soft; when the CRD
+# is present nothing changes.
+if ! mdb_has_crd physicalbackups; then
+  ROOT_SECRET_NAME="${ROOT_SECRET_NAME:-mariadb}"
+  ROOT_SECRET_KEY="${ROOT_SECRET_KEY:-password}"
+  PB_POD="$(mdbt_pb_target_pod "$MARIADB_NAME" "$TARGET")"
+  PB_OBJECT="${BACKUP_PREFIX}/${BACKUP_NAME}.xb"
+
+  hr_result() {  # <created:bool> <dryRun:bool>
+    jq -n \
+      --arg namespace "$NAMESPACE" --arg mariadb "$MARIADB_NAME" \
+      --arg backupName "$BACKUP_NAME" --arg bucket "$BACKUP_BUCKET" \
+      --arg object "$PB_OBJECT" --arg pod "$PB_POD" \
+      --argjson created "$1" --argjson dry "$2" \
+      --argjson plan "$(mdbt_pb_handrolled_plan "$PB_POD" "$PB_OBJECT")" \
+      '{
+        namespace: $namespace, mariadb: $mariadb, backupName: $backupName,
+        backup: {bucket: $bucket, object: $object, contentType: "Physical", mode: "hand-rolled"},
+        target: $pod, restorableBy: {task: "restore", namespace: $namespace},
+        dryRun: $dry, created: $created
+      } + (if $dry then {plan: $plan} else {} end)'
+  }
+
+  if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
+    mdbt_write_result "$(response_ok "$OP" "dry run: hand-rolled physical backup planned for ${MARIADB_NAME} (legacy operator, no PhysicalBackup CRD)" "$(hr_result false true)")"
+    exit 0
+  fi
+
+  if mdbt_pb_handrolled_run "$OP" "$PB_POD" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" "$BACKUP_BUCKET" "$PB_OBJECT"; then
+    mdbt_write_result "$(response_ok "$OP" "hand-rolled physical backup ${BACKUP_NAME} streamed for ${MARIADB_NAME}" "$(hr_result true false)")"
+    exit 0
+  fi
+  rc=$?
+  mdbt_fail "$OP" "hand-rolled physical backup failed (exit ${rc}: 3=no root credential, 4=minio setup, other=mariabackup/upload stream)" \
+    "$(hr_result false false)" 1
+fi
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
   mdbt_write_result "$(response_ok "$OP" "dry run: PhysicalBackup manifest rendered for ${MARIADB_NAME}" "$(backup_result false true)")"

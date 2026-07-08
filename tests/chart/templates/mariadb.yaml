@@ -31,6 +31,17 @@ spec:
     key: password
   port: 3306
   image: {{ .Values.mariadb.image }}
+{{- if gt (int .Values.mariadb.replicas) 1 }}
+  replicas: {{ .Values.mariadb.replicas }}
+  replication:
+    enabled: true
+    primary:
+      podIndex: 0
+    replica:
+      replPasswordSecretKeyRef:
+        name: mariadb
+        key: password
+{{- end }}
   storage:
     size: {{ .Values.mariadb.storage }}
   resources:

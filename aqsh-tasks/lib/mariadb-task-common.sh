@@ -86,7 +86,10 @@ mdbt_write_result() {
 }
 
 mdbt_fail() {
-  local op="$1" message="$2" data="${3:-{}}" code="${4:-1}"
+  # NB: default via a second statement, not "${3:-{}}" — that brace-in-default
+  # form appends a stray "}" when $3 is set, corrupting a non-empty data payload.
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}"
+  [[ -n "$data" ]] || data="{}"
   mdbt_write_result "$(response_err "$op" "$message" "$data" "$code")"
   exit "$code"
 }

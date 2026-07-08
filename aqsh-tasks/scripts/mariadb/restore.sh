@@ -194,6 +194,7 @@ OPERATOR_BACKUP_TLS="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
 # surface even if a field's validation is relaxed later. targetRecoveryTime is
 # emitted only when a PITR target was given.
 if ! MANIFEST="$(jq -n \
+  --arg apiVersion "$(mdb_operator_apiversion)" \
   --arg target "$TARGET" \
   --arg namespace "$NAMESPACE" \
   --arg image "$IMAGE" \
@@ -212,7 +213,7 @@ if ! MANIFEST="$(jq -n \
   --arg targetTime "$TARGET_TIME" \
   --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
   '{
-    apiVersion: "k8s.mariadb.com/v1alpha1",
+    apiVersion: $apiVersion,
     kind: "MariaDB",
     metadata: {name: $target, namespace: $namespace},
     spec: ({

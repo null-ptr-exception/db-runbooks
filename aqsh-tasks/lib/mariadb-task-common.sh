@@ -29,6 +29,8 @@ source "${LIB_DIR}/logging.sh"
 source "${LIB_DIR}/response.sh"
 # shellcheck source=aqsh-tasks/lib/k8s.sh
 source "${LIB_DIR}/k8s.sh"
+# shellcheck source=aqsh-tasks/lib/mariadb-operator-profile.sh
+source "${LIB_DIR}/mariadb-operator-profile.sh"  # operator generation / apiGroup detection
 
 # Deploy-time config mounted by the aqsh ConfigMap (MINIO_ENDPOINT, MINIO_BUCKET,
 # ...). Overridable so tests / out-of-cluster callers can point elsewhere.
@@ -257,6 +259,7 @@ mdbt_physical_backup_manifest() {
   operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
   operator_tls="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
   jq -n \
+    --arg apiVersion "$(mdb_operator_apiversion)" \
     --arg name "$name" \
     --arg namespace "$namespace" \
     --arg mariadb "$mariadb" \
@@ -271,7 +274,7 @@ mdbt_physical_backup_manifest() {
     --arg accessKey "$BACKUP_ACCESS_KEY" \
     --arg secretKey "$BACKUP_SECRET_KEY" \
     '{
-      apiVersion: "k8s.mariadb.com/v1alpha1",
+      apiVersion: $apiVersion,
       kind: "PhysicalBackup",
       metadata: {name: $name, namespace: $namespace},
       spec: {

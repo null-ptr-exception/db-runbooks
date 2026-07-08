@@ -21,11 +21,29 @@ BG_MDB="${MARIADB_NAME:-${MARIADB_STS_NAME:-mariadb}}"
 BG_CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 BG_CONFIRM="${CONFIRM:-false}"
 
+# bg_require_bluegreen_capable [op]
+# Blue/green is built on the current-generation operator's ExternalMariaDB +
+# multiCluster + physical bootstrapFrom, NONE of which exist on the legacy
+# mmontes-era operator. Gate on the ExternalMariaDB CRD (the blue/green-specific,
+# current-generation-only kind) so a legacy cluster gets a clear "upgrade the
+# operator" message instead of a cryptic `no matches for kind "ExternalMariaDB"`
+# partway through bootstrap. Fails soft-detection's way: only blocks when the CRD
+# is confidently absent.
+bg_require_bluegreen_capable() {
+  local op="${1:-blue-green}"
+  mdb_has_crd externalmariadbs && return 0
+  bg_fail "$op" "blue-green requires the k8s.mariadb.com generation operator (ExternalMariaDB + multiCluster); this cluster's operator (group $(mdb_operator_group)) has no ExternalMariaDB CRD — upgrade the operator to use blue-green" \
+    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, required: ["externalmariadbs CRD", "multiCluster", "physical bootstrapFrom"]}')" 2
+}
+
 bg_init_target() {
   K8S_CONTEXT="$BG_CONTEXT"
   # shellcheck disable=SC2034
   K8S_NAMESPACE="$BG_NAMESPACE"
   mariadb_set_target "$BG_CONTEXT" "$BG_NAMESPACE" "$BG_RESOURCE" "$BG_MDB" "$BG_CONTAINER"
+  # Every blue/green entry point routes through here, so this single gate covers
+  # them all (create, bootstrap-green, switchover, status, …).
+  bg_require_bluegreen_capable
 }
 
 # --- Generic task helpers ---------------------------------------------------

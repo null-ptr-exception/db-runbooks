@@ -45,6 +45,10 @@ fi
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"              # for mariadb_resolve_name (source auto-detect)
+# shellcheck source=../../lib/minio-client.sh
+source "${LIB_DIR}/minio-client.sh"         # mc helpers for the hand-rolled path
+# shellcheck source=../../lib/mariadb-physical-restore.sh
+source "${LIB_DIR}/mariadb-physical-restore.sh"  # hand-rolled physical restore (legacy operator)
 
 # Deploy-time S3/MinIO settings (MINIO_ENDPOINT, MINIO_BUCKET, ...).
 mdbt_load_config
@@ -280,6 +284,70 @@ restore_result() {
       restored: $restored
     } + (if $dry then {manifest: $manifest} else {} end)'
 }
+
+# --- Route by operator capability: legacy has no physical bootstrapFrom -------
+# When the operator lacks the PhysicalBackup CRD it also lacks physical
+# bootstrapFrom (both are current-generation only). Take the hand-rolled path:
+# pre-populate the datadir PVC from the .xb via a Job and let the new instance
+# adopt it. Fail-closed verify keeps a bad restore from reporting success.
+if ! mdb_has_crd physicalbackups; then
+  if [[ -n "$TARGET_TIME" ]]; then
+    trap - ERR
+    mdbt_fail "$OP" "point-in-time recovery is not supported on the legacy operator's hand-rolled physical restore (omit target_time, or use logical-restore)" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+  fi
+
+  setup_minio_client >/dev/null 2>&1 || true
+  PR_OBJECT="$(mdbt_pr_source_object "$BACKUP_BUCKET" "$BACKUP_PREFIX" "${RESTORE_BACKUP_OBJECT:-}")"
+  PR_PVC="$(mdbt_pr_pvc_name "$TARGET")"
+
+  pr_result() {  # <restored:bool> <dryRun:bool>
+    jq -n \
+      --arg namespace "$NAMESPACE" --arg target "$TARGET" --arg image "$IMAGE" \
+      --arg bucket "$BACKUP_BUCKET" --arg object "$PR_OBJECT" \
+      --arg host "$CONNECTION_HOST" --arg pvc "$PR_PVC" \
+      --arg secretName "$ROOT_SECRET_NAME" --arg secretKey "$ROOT_SECRET_KEY" \
+      --argjson restored "$1" --argjson dry "$2" \
+      --argjson plan "$(mdbt_pr_plan "$BACKUP_BUCKET" "$PR_OBJECT" "$PR_PVC" "$TARGET")" \
+      '{
+        namespace: $namespace, target: $target, image: $image,
+        backup: {bucket: $bucket, object: $object, contentType: "Physical", mode: "hand-rolled"},
+        connection: {host: $host, port: 3306},
+        credentialsRef: {secretName: $secretName, secretKey: $secretKey},
+        dryRun: $dry, restored: $restored
+      } + (if $dry then {plan: $plan} else {} end)'
+  }
+
+  if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
+    mdbt_write_result "$(response_ok "$OP" "dry run: hand-rolled physical restore planned for ${TARGET} (legacy operator, no physical bootstrapFrom)" "$(pr_result false true)")"
+    exit 0
+  fi
+
+  if [[ -z "$PR_OBJECT" ]]; then
+    trap - ERR
+    mdbt_fail "$OP" "no physical backup (.xb) found under s3://${BACKUP_BUCKET}/${BACKUP_PREFIX} to restore from" \
+      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p}')" 2
+  fi
+
+  if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
+    trap - ERR
+    mdbt_fail "$OP" "target MariaDB '${TARGET}' already exists; restore provisions a NEW instance and never overwrites in place (choose a different target name)" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg t "$TARGET" '{namespace: $ns, target: $t}')" 2
+  fi
+
+  rc=0
+  mdbt_pr_orchestrate "$TARGET" "$NAMESPACE" "$IMAGE" "$STORAGE_SIZE" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" \
+    "$BACKUP_BUCKET" "$PR_OBJECT" "$OPERATOR_BACKUP_ENDPOINT" \
+    "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" \
+    "$(mdb_operator_apiversion)" "$WAIT_TIMEOUT" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    mdbt_write_result "$(response_ok "$OP" "MariaDB physically restored into new instance ${TARGET} from ${PR_OBJECT}" "$(pr_result true false)")"
+    exit 0
+  fi
+  trap - ERR
+  mdbt_fail "$OP" "hand-rolled physical restore failed (exit ${rc}: 10=pvc, 11=prepare job, 12=mariadb apply, 13=not Ready, 14=verify — PVC not adopted or no user tables)" \
+    "$(pr_result false false)" 1
+fi
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
   mdbt_write_result "$(response_ok "$OP" "dry run: MariaDB restore manifest rendered for ${TARGET}" "$(restore_result false true)")"

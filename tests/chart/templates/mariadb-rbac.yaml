@@ -20,6 +20,15 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
+  # Hand-rolled physical restore on a legacy operator pre-creates the datadir PVC
+  # and runs a prepare Job (mbstream + mariabackup --prepare) before the new
+  # instance adopts the PVC.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["secrets"]
     # patch: tag the managed account password Secret with an owner annotation

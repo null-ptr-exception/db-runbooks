@@ -23,7 +23,7 @@ teardown_file() {
 }
 
 @test "backup task is registered in aqsh-mariadb" {
-  http_post "${MARIADB_AQSH_URL}/tasks" ''
+  http_get "${MARIADB_AQSH_URL}/tasks"
   assert_equal "$HTTP_CODE" "200"
 
   run echo "$HTTP_BODY"
@@ -31,7 +31,7 @@ teardown_file() {
 }
 
 @test "backup task is registered in aqsh-mongodb" {
-  http_post "${MONGODB_AQSH_URL}/tasks" ''
+  http_get "${MONGODB_AQSH_URL}/tasks"
   assert_equal "$HTTP_CODE" "200"
 
   run echo "$HTTP_BODY"

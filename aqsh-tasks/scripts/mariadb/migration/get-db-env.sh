@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# mariadb/get-db-env.sh
+# mariadb/migration/get-db-env.sh
 # Read named environment variable values from a MariaDB pod.
 # =============================================================================
 
@@ -13,16 +13,16 @@ MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
+  LIB_DIR="$(cd "${SCRIPT_DIR}/../../../lib" && pwd)"
 fi
 
-# shellcheck source=../../lib/logging.sh
+# shellcheck source=../../../lib/logging.sh
 source "${LIB_DIR}/logging.sh"
-# shellcheck source=../../lib/response.sh
+# shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
-# shellcheck source=../../lib/k8s.sh
+# shellcheck source=../../../lib/k8s.sh
 source "${LIB_DIR}/k8s.sh"
-# shellcheck source=../../lib/mariadb.sh
+# shellcheck source=../../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
 
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"

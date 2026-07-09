@@ -4,7 +4,7 @@ setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration-preflight.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/migration-preflight.sh"
   export MARIADB_NAME=mariadb
   export _LOG_CURRENT_LEVEL=3
   mkdir -p "${TEST_TMPDIR}/bin"

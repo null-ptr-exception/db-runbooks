@@ -104,7 +104,7 @@ tasks:
         type: string
         default: "true"
   get-db-env:
-    script: mariadb/get-db-env.sh
+    script: mariadb/migration/get-db-env.sh
     description: "Read named environment variable values from a MariaDB pod"
     timeout: 2m
     allowed_groups: ["system:serviceaccounts"]
@@ -660,7 +660,7 @@ tasks:
         type: string
         default: "false"
   migration-preflight:
-    script: mariadb/migration-preflight.sh
+    script: mariadb/migration/migration-preflight.sh
     description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"
     timeout: 3m
     allowed_groups: ["system:serviceaccounts"]
@@ -710,7 +710,7 @@ tasks:
         type: string
         default: ""
   check-connection:
-    script: mariadb/check-connection.sh
+    script: mariadb/migration/check-connection.sh
     description: "Check if a MariaDB pod can connect to a given host IP using root credentials"
     timeout: 2m
     allowed_groups: ["system:serviceaccounts"]
@@ -749,7 +749,7 @@ tasks:
         type: string
         default: "3306"
   setup-replication:
-    script: mariadb/setup-replication.sh
+    script: mariadb/migration/setup-replication.sh
     description: "Configure a MariaDB GTID replication channel using root credentials"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]

@@ -85,6 +85,24 @@ http_post() {
 }
 
 # ---------------------------------------------------------------------------
+# http_get <url>
+#
+# Runs curl inside the test-client pod with GET.
+# Sets HTTP_CODE and HTTP_BODY (exported so @test blocks can read them).
+# ---------------------------------------------------------------------------
+http_get() {
+  local url="$1"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X GET '${url}' \
+    -H 'Authorization: Bearer ${TOKEN}'")
+
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+# ---------------------------------------------------------------------------
 # wait_for_task <base_url> <task_id> [max_wait_seconds]
 #
 # Polls GET <base_url>/executions/<task_id> until status is completed or failed.

@@ -30,7 +30,7 @@ _preflight_result_data() {
 }
 
 @test "migration-preflight task is registered in aqsh-mariadb" {
-  http_post "${MARIADB_AQSH_URL}/tasks" ''
+  http_get "${MARIADB_AQSH_URL}/tasks"
   assert_equal "$HTTP_CODE" "200"
 
   run echo "$HTTP_BODY"

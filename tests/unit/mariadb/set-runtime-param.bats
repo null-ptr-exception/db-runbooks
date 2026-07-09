@@ -138,6 +138,33 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.results | all(.applied == false)')" = "true" ]
 }
 
+@test "set-runtime-param resolves a *multiplier relative value (current 151)" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE='*2'
+  [ "$(field '.reason_code')" = "SRP_DRY_RUN" ]
+  [ "$(field '.value')" = "302" ]
+  [ "$(field '.value_expr')" != "null" ]
+}
+
+@test "set-runtime-param resolves a +N additive relative value" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE='+100'
+  [ "$(field '.value')" = "251" ]
+}
+
+@test "set-runtime-param resolves a +percentage relative value" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE='+25%'
+  [ "$(field '.value')" = "189" ]
+}
+
+@test "set-runtime-param resolves a -percentage (scale down) relative value" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=wait_timeout RUNTIME_VALUE='-25%'
+  [ "$(field '.value')" = "113" ]
+}
+
+@test "set-runtime-param rejects a relative value on a non-numeric param" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=slow_query_log RUNTIME_VALUE='*2'
+  [ "$(field '.reason_code')" = "RELATIVE_UNSUPPORTED" ]
+}
+
 @test "set-runtime-param reports partial mutation as changed on failure" {
   # pod mariadb-1's SET GLOBAL fails; mariadb-0 already applied -> changed=true
   run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_FAIL_POD=mariadb-1

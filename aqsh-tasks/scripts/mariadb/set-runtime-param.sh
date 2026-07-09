@@ -68,6 +68,17 @@ srp_validate() {
     *) echo "not in the allow-list"; return 1 ;;
   esac
 }
+# params whose value is a plain number and can therefore take a RELATIVE value
+# (*1.5 / +100 / -25%). Enums / ON-OFF (slow_query_log, read_only, sync_binlog,
+# innodb_flush_log_at_trx_commit) can't.
+srp_is_numeric() {
+  case "$1" in
+    max_connections | wait_timeout | interactive_timeout | max_heap_table_size | tmp_table_size | sort_buffer_size | join_buffer_size | innodb_buffer_pool_size | max_statement_time | long_query_time) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+# printf format for a computed value: integers round to whole, time params keep ms
+srp_fmt() { case "$1" in max_statement_time | long_query_time) echo '%.3f' ;; *) echo '%.0f' ;; esac; }
 
 # --- inputs ------------------------------------------------------------------
 CONTEXT="${K8S_CONTEXT:-}"
@@ -77,6 +88,7 @@ MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 PARAM="${RUNTIME_PARAM:-}"          # empty => discovery/list mode
 VALUE="${RUNTIME_VALUE:-}"
+VALUE_EXPR=""                       # set to the original relative form (*1.5, +25%, …)
 SCOPE="${RUNTIME_SCOPE:-all}"       # all | primary | <pod-name>
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
@@ -92,7 +104,7 @@ emit() {
   out=$(jq -nc \
     --arg status "$status" --arg reason "$reason" --arg summary "$summary" \
     --arg namespace "$NAMESPACE" --arg mdb "${MDB:-}" \
-    --arg param "$PARAM" --arg value "$VALUE" --arg scope "$SCOPE" \
+    --arg param "$PARAM" --arg value "$VALUE" --arg value_expr "$VALUE_EXPR" --arg scope "$SCOPE" \
     --arg tier "$(srp_tier "$PARAM")" --arg note "$EPHEMERAL_NOTE" \
     --argjson dry_run "$(bool "$DRY_RUN" && echo true || echo false)" \
     --argjson confirm "$(bool "$CONFIRM" && echo true || echo false)" \
@@ -101,6 +113,7 @@ emit() {
       status: $status, reason_code: $reason, summary: $summary,
       namespace: $namespace, mdb: $mdb,
       param: (if $param == "" then null else $param end), value: (if $value == "" then null else $value end),
+      value_expr: (if $value_expr == "" then null else $value_expr end),
       scope: $scope, tier: (if $tier == "" then null else $tier end),
       ephemeral: true, ephemeral_note: $note,
       dry_run: $dry_run, confirm: $confirm, changed: $changed
@@ -156,6 +169,33 @@ fi
 if [[ -z "$VALUE" ]]; then
   emit BLOCKED VALUE_REQUIRED "value is required for '${PARAM}'" false; exit 0
 fi
+
+# Relative value (*1.5 / +100 / -25%): compute the absolute target from the live
+# value, then fall through to normal validation/apply. Numeric params only.
+if [[ "$VALUE" == [*+-]* || "$VALUE" == *% ]]; then
+  if ! srp_is_numeric "$PARAM"; then
+    emit BLOCKED RELATIVE_UNSUPPORTED "relative value '${VALUE}' is only valid for numeric params, not '${PARAM}'" false; exit 0
+  fi
+  _op=""; _operand=""
+  if [[ "$VALUE" =~ ^\*([0-9]+(\.[0-9]+)?)$ ]]; then _op=mul; _operand="${BASH_REMATCH[1]}"
+  elif [[ "$VALUE" =~ ^([+-])([0-9]+)%$ ]]; then _op=pct; _operand="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+  elif [[ "$VALUE" =~ ^([+-])([0-9]+(\.[0-9]+)?)$ ]]; then _op=add; _operand="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+  else
+    emit BLOCKED VALUE_INVALID "relative value '${VALUE}' malformed (use *1.5, +100, -50, +25%, -25%)" false; exit 0
+  fi
+  _cur="$(mariadb_sql "$QUERY_POD" "$ROOT_PW" "SELECT @@GLOBAL.${PARAM}" 2>/dev/null || true)"
+  if ! [[ "$_cur" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    emit BLOCKED CURRENT_UNREADABLE "cannot read current value of '${PARAM}' to resolve relative '${VALUE}'" false; exit 0
+  fi
+  _fmt="$(srp_fmt "$PARAM")"
+  case "$_op" in
+    mul) VALUE="$(awk -v c="$_cur" -v o="$_operand" -v f="$_fmt" 'BEGIN{printf f, c*o}')" ;;
+    add) VALUE="$(awk -v c="$_cur" -v o="$_operand" -v f="$_fmt" 'BEGIN{printf f, c+o}')" ;;
+    pct) VALUE="$(awk -v c="$_cur" -v o="$_operand" -v f="$_fmt" 'BEGIN{printf f, c*(1+o/100)}')" ;;
+  esac
+  VALUE_EXPR="$(printf '%s (from %s of %s)' "$VALUE" "$RUNTIME_VALUE" "$_cur")"
+fi
+
 if ! verr="$(srp_validate "$PARAM" "$VALUE")"; then
   emit BLOCKED VALUE_INVALID "value '${VALUE}' invalid for '${PARAM}': ${verr}" false; exit 0
 fi
@@ -202,7 +242,7 @@ if bool "$DRY_RUN"; then
   [[ "$TIER" == "memory" ]] && warn=" WARNING: raising a memory param can OOM a memory-limited pod."
   [[ "$TIER" == "durability" ]] && warn=" WARNING: relaxes durability — data-loss window on crash."
   [[ "$TIER" == "protect" ]] && warn=" WARNING: changes read/write mode — can block writes on the targeted pods."
-  emit READY SRP_DRY_RUN "dry run: would SET GLOBAL ${PARAM}=${VALUE} on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}].${warn} ${EPHEMERAL_NOTE}" false \
+  emit READY SRP_DRY_RUN "dry run: would SET GLOBAL ${PARAM}=${VALUE}${VALUE_EXPR:+ [${RUNTIME_VALUE}]} on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}].${warn} ${EPHEMERAL_NOTE}" false \
     "$(jq -c '{targets: .}' <<<"$(_current_json)")"
   exit 0
 fi
@@ -246,5 +286,5 @@ if [[ "$failed" -eq 1 ]]; then
   emit ERROR SRP_APPLY_FAILED "SET GLOBAL ${PARAM}=${VALUE} did not verify on one or more pods$([[ "$applied_any" -eq 1 ]] && echo ' (PARTIAL — some pods were changed)')" "$changed_json" \
     "$(jq -c '{results: ., partial: ('"$changed_json"')}' <<<"$results")"; exit 1
 fi
-emit CHANGED SRP_APPLIED "SET GLOBAL ${PARAM}=${VALUE} applied + verified on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}]. ${EPHEMERAL_NOTE}" true \
+emit CHANGED SRP_APPLIED "SET GLOBAL ${PARAM}=${VALUE}${VALUE_EXPR:+ [${RUNTIME_VALUE}]} applied + verified on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}]. ${EPHEMERAL_NOTE}" true \
   "$(jq -c '{results: .}' <<<"$results")"

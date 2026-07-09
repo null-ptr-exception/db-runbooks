@@ -135,3 +135,13 @@ _pod_max_conn() {
   assert_equal "$(_pod_max_conn mariadb-1)" "512"
   assert_equal "$(_pod_max_conn mariadb-2)" "512"
 }
+
+@test "set-runtime-param applies a relative value (+100) computed from live" {
+  local before; before="$(_pod_max_conn mariadb-0)"
+  _submit "set-runtime-param" \
+    '{"namespace":"mariadb-1","param":"max_connections","value":"+100","dry_run":"false","confirm":"true"}'
+  local data; data="$(_task_result_data)"
+  assert_equal "$(echo "$data" | jq -r '.status')" "CHANGED"
+  assert_equal "$(echo "$data" | jq -r '.value_expr != null')" "true"
+  assert_equal "$(_pod_max_conn mariadb-0)" "$((before + 100))"
+}

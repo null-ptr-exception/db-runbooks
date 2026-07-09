@@ -26,7 +26,7 @@ during connection exhaustion). AWS RDS analogue: `ModifyDBParameterGroup` for a
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | Target MariaDB namespace |
 | `param` | `RUNTIME_PARAM` | | — | Variable to set; **omit to list** supported params + current values |
-| `value` | `RUNTIME_VALUE` | | — | Target value (`500` / `ON` / bytes) |
+| `value` | `RUNTIME_VALUE` | | — | Target value: absolute (`500` / `ON` / bytes) or **relative** to the live value (`*1.5`, `+100`, `-25%`) — relative works both directions and numeric params only |
 | `scope` | `RUNTIME_SCOPE` | | `all` | `all` \| `primary` \| `<pod-name>` |
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR |
 | `context` | `K8S_CONTEXT` | | `""` | Reachability hook |
@@ -65,6 +65,23 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/set-runtime-param" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{ "namespace": "mariadb-1", "param": "max_connections", "value": "500", "dry_run": "false", "confirm": "true" }'
 ```
+
+## Relative values
+
+For numeric params, `value` may be relative to the current live value — handy in
+an incident ("just bump it") without computing the exact number, and it works
+**both directions**:
+
+| form | meaning | example |
+|------|---------|---------|
+| `*F`   | multiply | `*1.5` → current × 1.5 |
+| `+N` / `-N` | add / subtract | `+100`, `-50` |
+| `+P%` / `-P%` | percentage | `+25%` (up), `-25%` (down, e.g. shrink `wait_timeout` to shed idle conns) |
+
+The computed absolute value is validated and shown in `dry_run` (with the
+original expression in `value_expr`) before you confirm — so a memory-tier `*2`
+still surfaces the concrete target + OOM warning. Relative is rejected for
+non-numeric params (`slow_query_log`, `read_only`, …).
 
 ## Notes
 

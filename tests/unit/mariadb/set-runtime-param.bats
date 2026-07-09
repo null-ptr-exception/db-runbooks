@@ -16,17 +16,21 @@ setup() {
 #!/usr/bin/env bash
 args="$*"
 [[ "$args" == *"get pods"* ]] && { printf 'mariadb-0\nmariadb-1\nmariadb-2\n'; exit 0; }
-[[ "$args" == *"get mariadb"*"currentPrimary"* ]] && { printf '%s' "${MOCK_PRIMARY:-mariadb-0}"; exit 0; }
+# MOCK_PRIMARY defaults to mariadb-0 only when UNSET; set it to "" to simulate no primary
+[[ "$args" == *"get mariadb"*"currentPrimary"* ]] && { printf '%s' "${MOCK_PRIMARY-mariadb-0}"; exit 0; }
 [[ "$args" == *"get mariadb"*"metadata.name"* ]] && { printf 'mariadb'; exit 0; }
 if [[ " ${args} " == *" exec "* ]]; then
   [[ "$args" == *"printenv MARIADB_ROOT_PASSWORD"* ]] && { printf 'testpass'; exit 0; }
+  pod=""; prev=""; for a in "$@"; do [[ "$prev" == "exec" ]] && { pod="$a"; break; }; prev="$a"; done
   q=""; prev=""
   for a in "$@"; do [[ "$prev" == "-e" ]] && { q="$a"; break; }; prev="$a"; done
   case "$q" in
     "SET GLOBAL "*)
+      [[ -n "${MOCK_FAIL_POD:-}" && "$pod" == "${MOCK_FAIL_POD}" ]] && exit 1
       rest="${q#SET GLOBAL }"; p="${rest%% =*}"; v="${rest##*= }"
       printf '%s' "$v" > "${MOCK_STATE}/${p}"; exit 0 ;;
     "SELECT @@GLOBAL."*)
+      [[ -n "${MOCK_READBACK+x}" ]] && { printf '%s' "${MOCK_READBACK}"; exit 0; }
       p="${q#SELECT @@GLOBAL.}"
       if [[ -f "${MOCK_STATE}/${p}" ]]; then cat "${MOCK_STATE}/${p}"; else printf '%s' "${MOCK_DEFAULT:-151}"; fi; exit 0 ;;
     "SELECT READ_ONLY FROM"*)
@@ -109,4 +113,36 @@ field() { jq -r "$1" "${RESULT}"; }
   run_srp DRY_RUN=true RUNTIME_PARAM=innodb_buffer_pool_size RUNTIME_VALUE=1073741824
   [ "$(field '.tier')" = "memory" ]
   [[ "$(field '.summary')" == *"OOM"* ]]
+}
+
+@test "set-runtime-param dry_run warns on a protect-tier param" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=read_only RUNTIME_VALUE=ON
+  [ "$(field '.tier')" = "protect" ]
+  [[ "$(field '.summary')" == *"read/write mode"* ]]
+}
+
+@test "set-runtime-param fails closed on an invalid dry_run value" {
+  run_srp DRY_RUN=treu CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$(field '.reason_code')" = "INVALID_BOOL" ]
+}
+
+@test "set-runtime-param blocks scope=primary when primary is unknown and multi-pod" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_SCOPE=primary RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=
+  [ "$(field '.reason_code')" = "PRIMARY_UNKNOWN" ]
+}
+
+@test "set-runtime-param treats a read-back mismatch as failure" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_READBACK=151
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = "SRP_APPLY_FAILED" ]
+  [ "$(field '.results | all(.applied == false)')" = "true" ]
+}
+
+@test "set-runtime-param reports partial mutation as changed on failure" {
+  # pod mariadb-1's SET GLOBAL fails; mariadb-0 already applied -> changed=true
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_FAIL_POD=mariadb-1
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = "SRP_APPLY_FAILED" ]
+  [ "$(field '.changed')" = "true" ]
+  [ "$(field '.partial')" = "true" ]
 }

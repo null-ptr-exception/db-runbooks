@@ -109,6 +109,12 @@ emit() {
   printf '%s\n' "$out"
 }
 
+# Fail closed: an unrecognized dry_run/confirm must NOT silently become "false"
+# and apply changes (e.g. a `dry_run=treu` typo would otherwise skip the dry run).
+_valid_bool() { case "${1,,}" in 1 | true | yes | on | 0 | false | no | off) return 0 ;; *) return 1 ;; esac; }
+_valid_bool "$DRY_RUN" || { emit BLOCKED INVALID_BOOL "dry_run must be a boolean (true/false); got '${DRY_RUN}'" false; exit 0; }
+_valid_bool "$CONFIRM" || { emit BLOCKED INVALID_BOOL "confirm must be a boolean (true/false); got '${CONFIRM}'" false; exit 0; }
+
 # --- resolve target ----------------------------------------------------------
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB_INPUT" "$CONTAINER"
 _on_ambiguous() { emit BLOCKED MARIADB_AMBIGUOUS "several MariaDB CRs in '${NAMESPACE}'; set mdb to choose one" false; exit 0; }
@@ -120,19 +126,23 @@ fi
 
 mapfile -t ALL_PODS < <(mariadb_list_pods)
 [[ ${#ALL_PODS[@]} -gt 0 ]] || { emit BLOCKED NO_PODS "no MariaDB pods found in '${NAMESPACE}'" false; exit 0; }
+# CURRENT_PRIMARY is the REAL primary (may be empty on a standalone or mid-reconcile
+# cluster); QUERY_POD is just "any ready pod" for read-only queries (root password,
+# information_schema, current values). scope=primary must NOT silently fall back to
+# QUERY_POD — see the scope resolution below.
 CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}' 2>/dev/null || true)"
-[[ -n "$CURRENT_PRIMARY" ]] || CURRENT_PRIMARY="${ALL_PODS[0]}"   # standalone: no currentPrimary
-ROOT_PW="$(mariadb_read_root_password "$CURRENT_PRIMARY" "${ALL_PODS[@]}")" \
+QUERY_POD="${CURRENT_PRIMARY:-${ALL_PODS[0]}}"
+ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
   || { emit BLOCKED ROOT_PASSWORD_UNAVAILABLE "cannot read MARIADB_ROOT_PASSWORD from any ready pod" false; exit 0; }
 
 # --- discovery / list mode (empty param) -------------------------------------
 if [[ -z "$PARAM" ]]; then
   rows='[]'
   while IFS= read -r p; do
-    cur="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PW" "SELECT @@GLOBAL.${p}" 2>/dev/null || echo "?")"
+    cur="$(mariadb_sql "$QUERY_POD" "$ROOT_PW" "SELECT @@GLOBAL.${p}" 2>/dev/null || echo "?")"
     rows="$(jq -c --arg p "$p" --arg t "$(srp_tier "$p")" --arg c "$cur" '. + [{param:$p, tier:$t, current:$c}]' <<<"$rows")"
   done < <(srp_params)
-  emit READY SRP_LIST "supported runtime params (current values read from ${CURRENT_PRIMARY})" false \
+  emit READY SRP_LIST "supported runtime params (current values read from ${QUERY_POD})" false \
     "$(jq -c '{params: .}' <<<"$rows")"
   exit 0
 fi
@@ -151,7 +161,7 @@ if ! verr="$(srp_validate "$PARAM" "$VALUE")"; then
 fi
 
 # --- static (restart-only) params are refused --------------------------------
-RO="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PW" \
+RO="$(mariadb_sql "$QUERY_POD" "$ROOT_PW" \
   "SELECT READ_ONLY FROM information_schema.SYSTEM_VARIABLES WHERE VARIABLE_NAME='${PARAM^^}'" 2>/dev/null || true)"
 if [[ -z "$RO" ]]; then
   emit BLOCKED PARAM_UNKNOWN "server does not expose '${PARAM}' (SYSTEM_VARIABLES empty)" false; exit 0
@@ -163,7 +173,14 @@ fi
 # --- resolve scope -> target pods --------------------------------------------
 case "$SCOPE" in
   all) TARGET_PODS=("${ALL_PODS[@]}") ;;
-  primary) TARGET_PODS=("$CURRENT_PRIMARY") ;;
+  primary)
+    if [[ -n "$CURRENT_PRIMARY" ]]; then
+      TARGET_PODS=("$CURRENT_PRIMARY")
+    elif [[ ${#ALL_PODS[@]} -eq 1 ]]; then
+      TARGET_PODS=("${ALL_PODS[0]}")   # standalone: the sole pod is the primary
+    else
+      emit BLOCKED PRIMARY_UNKNOWN "cannot resolve the primary (status.currentPrimary empty) with multiple pods; use scope=all or scope=<pod>" false; exit 0
+    fi ;;
   *)
     if printf '%s\n' "${ALL_PODS[@]}" | grep -qxF "$SCOPE"; then TARGET_PODS=("$SCOPE"); else
       emit BLOCKED SCOPE_INVALID "scope '${SCOPE}' is not a pod of this instance (use all|primary|<pod>)" false; exit 0
@@ -184,29 +201,50 @@ if bool "$DRY_RUN"; then
   warn=""
   [[ "$TIER" == "memory" ]] && warn=" WARNING: raising a memory param can OOM a memory-limited pod."
   [[ "$TIER" == "durability" ]] && warn=" WARNING: relaxes durability — data-loss window on crash."
+  [[ "$TIER" == "protect" ]] && warn=" WARNING: changes read/write mode — can block writes on the targeted pods."
   emit READY SRP_DRY_RUN "dry run: would SET GLOBAL ${PARAM}=${VALUE} on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}].${warn} ${EPHEMERAL_NOTE}" false \
     "$(jq -c '{targets: .}' <<<"$(_current_json)")"
   exit 0
 fi
 bool "$CONFIRM" || { emit BLOCKED CONFIRM_REQUIRED "set confirm=true with dry_run=false to apply (tier=${TIER})" false; exit 0; }
 
-# --- apply SET GLOBAL on each target pod (verify read-back) -------------------
+# --- apply SET GLOBAL on each target pod --------------------------------------
 # PARAM is allow-listed and VALUE is validated, so the identifier/literal are safe.
+# Read-back is AUTHORITATIVE: the pod only counts as applied if the live global
+# actually reports the intended value. @@GLOBAL returns 0/1 for ON/OFF, and size
+# params get rounded to a chunk multiple, so normalise the expected value and
+# tolerate rounding only for size (memory-tier) params.
+_want="$(case "${VALUE^^}" in ON | YES) echo 1 ;; OFF | NO) echo 0 ;; *) echo "$VALUE" ;; esac)"
 results='[]'
 failed=0
+applied_any=0
 for pod in "${TARGET_PODS[@]}"; do
-  if mariadb_sql "$pod" "$ROOT_PW" "SET GLOBAL ${PARAM} = ${VALUE}" >/dev/null 2>&1; then
-    now="$(mariadb_sql "$pod" "$ROOT_PW" "SELECT @@GLOBAL.${PARAM}" 2>/dev/null || echo "?")"
+  if ! mariadb_sql "$pod" "$ROOT_PW" "SET GLOBAL ${PARAM} = ${VALUE}" >/dev/null 2>&1; then
+    failed=1
+    results="$(jq -c --arg pod "$pod" '. + [{pod:$pod, applied:false, error:"SET GLOBAL failed"}]' <<<"$results")"
+    continue
+  fi
+  now="$(mariadb_sql "$pod" "$ROOT_PW" "SELECT @@GLOBAL.${PARAM}" 2>/dev/null || true)"
+  if [[ -z "$now" ]]; then
+    failed=1
+    results="$(jq -c --arg pod "$pod" '. + [{pod:$pod, applied:false, error:"read-back failed"}]' <<<"$results")"
+  elif [[ "$now" == "$_want" ]]; then
+    applied_any=1
     results="$(jq -c --arg pod "$pod" --arg now "$now" '. + [{pod:$pod, applied:true, value:$now}]' <<<"$results")"
+  elif [[ "$TIER" == "memory" ]]; then
+    applied_any=1   # size params round to a chunk multiple — accept, but flag it
+    results="$(jq -c --arg pod "$pod" --arg now "$now" --arg want "$_want" '. + [{pod:$pod, applied:true, value:$now, requested:$want, adjusted:true}]' <<<"$results")"
   else
     failed=1
-    results="$(jq -c --arg pod "$pod" '. + [{pod:$pod, applied:false}]' <<<"$results")"
+    results="$(jq -c --arg pod "$pod" --arg now "$now" --arg want "$_want" '. + [{pod:$pod, applied:false, value:$now, expected:$want, error:"read-back mismatch"}]' <<<"$results")"
   fi
 done
 
 if [[ "$failed" -eq 1 ]]; then
-  emit ERROR SRP_APPLY_FAILED "SET GLOBAL ${PARAM}=${VALUE} failed on one or more pods" false \
-    "$(jq -c '{results: .}' <<<"$results")"; exit 1
+  # honest `changed`: if some pods were already mutated, live state DID change
+  changed_json="$([[ "$applied_any" -eq 1 ]] && echo true || echo false)"
+  emit ERROR SRP_APPLY_FAILED "SET GLOBAL ${PARAM}=${VALUE} did not verify on one or more pods$([[ "$applied_any" -eq 1 ]] && echo ' (PARTIAL — some pods were changed)')" "$changed_json" \
+    "$(jq -c '{results: ., partial: ('"$changed_json"')}' <<<"$results")"; exit 1
 fi
-emit CHANGED SRP_APPLIED "SET GLOBAL ${PARAM}=${VALUE} applied on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}]. ${EPHEMERAL_NOTE}" true \
+emit CHANGED SRP_APPLIED "SET GLOBAL ${PARAM}=${VALUE} applied + verified on ${#TARGET_PODS[@]} pod(s) [tier=${TIER}]. ${EPHEMERAL_NOTE}" true \
   "$(jq -c '{results: .}' <<<"$results")"

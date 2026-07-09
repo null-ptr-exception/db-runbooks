@@ -22,7 +22,11 @@ replicas and won't promote until they are in sync. This task's job is to avoid a
 - **Strict lag pre-check** — the task only switches when every replica is healthy
   and within `lag_threshold` seconds. A synced replica makes the operator's
   sync-wait instant, so the current primary never sits in a stuck `read_only`
-  window. A lagging replica → `BLOCKED` before any change.
+  window. A lagging replica → `BLOCKED` before any change. The replica-health
+  signal comes from the CR's `status.replication.replicas` on the current-gen
+  operator, or from live `SHOW SLAVE STATUS` on the legacy operator (see
+  *Operator compatibility*); the output field `replicas_source`
+  (`cr_status` | `show_slave_status`) records which was used.
 - **Auto-recovery on a stuck switch** — if the switch doesn't complete within
   `wait_timeout`, the task rolls `podIndex` back and verifies the primary is
   serving again (`SWITCH_TIMEOUT_ROLLED_BACK`). If rollback doesn't recover and
@@ -35,6 +39,27 @@ replicas and won't promote until they are in sync. This task's job is to avoid a
 The task probes the CRD with `kubectl explain
 mariadb.spec.replication.primary.podIndex` (like `restart` probes `podMetadata` /
 `inheritMetadata`). If the field is absent → `BLOCKED SWITCH_UNSUPPORTED`.
+
+## Operator compatibility
+
+`switch-primary` works on **both** operator generations:
+
+- **Current gen (`k8s.mariadb.com`)** — reads per-replica health from the CR's
+  `status.replication.replicas` (keyed by pod name, with `slaveIORunning` /
+  `slaveSQLRunning` / `secondsBehindMaster`).
+- **Legacy gen (`mariadb.*.mmontes.io`)** — the switchover primitive
+  (`spec.replication.primary.podIndex`) and `status.currentPrimaryPodIndex`
+  exist, but the operator **never populates `status.replication.replicas`**. The
+  task falls back to querying each replica pod directly with `SHOW SLAVE STATUS`
+  and synthesizes the same health map, so the strict lag pre-check keeps its
+  guarantee. A replica whose status cannot be read (unreachable pod, no root
+  password) is treated as **unhealthy**, so the pre-check never blind-switches to
+  a replica it couldn't verify; if nothing can be resolved the task simply
+  `BLOCKED`s exactly as it would for a lagging replica.
+
+The fallback triggers on an empty/absent `status.replication.replicas`, so it is
+generation-agnostic — any operator that omits the map gets the SQL path
+automatically. `replicas_source` in the output tells you which source was used.
 
 ## Inputs
 
@@ -77,7 +102,8 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/switch-primary" \
 
 - Unit (`tests/unit/mariadb/switch-primary.bats`): mocked kubectl covering the
   guards, dry_run/confirm, the happy switch, and the stuck → rollback / SWITCH_STUCK
-  ladder.
+  ladder — plus the legacy-operator path (no `status.replication.replicas`) driving
+  auto-select and Guard 4 off the `SHOW SLAVE STATUS` fallback.
 - e2e (`tests/mariadb/switch_primary.bats`): real operator on the 2-cluster lab —
   `mariadb-1` runs replicated (helmfile `replicas: 3`); the test switches the
   primary to podIndex 1 and asserts `status.currentPrimaryPodIndex` flipped and

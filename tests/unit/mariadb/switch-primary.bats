@@ -17,7 +17,7 @@ setup() {
 #!/usr/bin/env bash
 # stateful mock: STATE file holds the current primary podIndex.
 args="$*"; verb=""
-for a in "$@"; do case "$a" in explain|get|patch|delete) verb="$a"; break;; esac; done
+for a in "$@"; do case "$a" in explain|get|patch|delete|exec) verb="$a"; break;; esac; done
 state() { cat "$MOCK_STATE" 2>/dev/null || printf '%s' "${MOCK_PRIMARY_INDEX:-0}"; }
 case "$verb" in
   explain) [[ "${MOCK_NO_SWITCH_FIELD:-0}" == "1" ]] && exit 1 || exit 0 ;;
@@ -28,6 +28,23 @@ case "$verb" in
       *"-o json"*)
         s="$(state)"; ready="True"; idx="$s"
         if [[ "$s" == "stuck" ]]; then idx="${MOCK_PRIMARY_INDEX:-0}"; ready="False"; fi
+        # MOCK_LEGACY=1 emulates the mmontes-era operator: it publishes
+        # currentPrimary/currentPrimaryPodIndex but NEVER status.replication, so
+        # the script must fall back to SHOW SLAVE STATUS over `exec` (below).
+        if [[ "${MOCK_LEGACY:-0}" == "1" ]]; then
+          jq -n --argjson idx "$idx" \
+            --arg enabled "${MOCK_REPL_ENABLED:-true}" \
+            --argjson replicas "${MOCK_REPLICAS:-3}" \
+            --arg ready "$ready" \
+            '{
+              spec: {replicas: $replicas, replication: {enabled: ($enabled=="true")}},
+              status: {
+                currentPrimary: ("mariadb-" + ($idx|tostring)),
+                currentPrimaryPodIndex: $idx,
+                conditions: [{type:"Ready", status:$ready}]
+              }
+            }'; exit 0
+        fi
         jq -n --argjson idx "$idx" \
           --arg enabled "${MOCK_REPL_ENABLED:-true}" \
           --argjson replicas "${MOCK_REPLICAS:-3}" \
@@ -43,6 +60,19 @@ case "$verb" in
             }
           }'; exit 0 ;;
       *) echo "mock: unhandled get: $args" >&2; exit 1 ;;
+    esac ;;
+  exec)
+    # kubectl exec <pod> -c <container> -- <cmd...>
+    case "$args" in
+      *"printenv MARIADB_ROOT_PASSWORD"*) printf '%s' "${MOCK_ROOT_PW:-test-pass}"; exit 0 ;;
+      *"SHOW SLAVE STATUS"*)
+        # A caught-up replica by default; knobs make it lag or break replication.
+        printf '*************************** 1. row ***************************\n'
+        printf '             Slave_IO_Running: %s\n' "${MOCK_LEGACY_IO:-Yes}"
+        printf '            Slave_SQL_Running: %s\n' "${MOCK_LEGACY_SQL:-Yes}"
+        printf '        Seconds_Behind_Master: %s\n' "${MOCK_LEGACY_LAG:-0}"
+        exit 0 ;;
+      *) echo "mock: unhandled exec: $args" >&2; exit 1 ;;
     esac ;;
   patch)
     n="$(printf '%s' "$args" | grep -oE 'podIndex":[0-9]+' | grep -oE '[0-9]+' | tail -1)"
@@ -158,4 +188,48 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -ne 0 ]
   [ "$(field '.reason_code')" = "SWITCH_STUCK" ]
   [ "$(field '.recovered')" = "false" ]
+}
+
+# --- legacy operator (mmontes): no status.replication.replicas ---------------
+# It publishes currentPrimaryPodIndex but not the per-replica health map, so the
+# script falls back to live SHOW SLAVE STATUS. These lock down that both the
+# auto-select and Guard 4 paths keep working (and stay safe) on legacy.
+
+@test "switch-primary (legacy) auto-selects via SHOW SLAVE STATUS fallback" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0    # no target
+  [ "$(field '.reason_code')" = "SWITCH_DRY_RUN" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+  [ "$(field '.target_auto_selected')" = "true" ]
+  [ "$(field '.replicas_source')" = "show_slave_status" ]
+}
+
+@test "switch-primary (legacy) blocks auto-select when replicas lag" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_LAG=30
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+}
+
+@test "switch-primary (legacy) blocks auto-select when replication is broken" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_IO=No
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+}
+
+@test "switch-primary (legacy) blocks an explicit target that is lagging" {
+  run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_LEGACY=1 \
+    MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_LAG=30
+  [ "$(field '.reason_code')" = "REPLICAS_NOT_IN_SYNC" ]
+  [ "$(field '.replicas_source')" = "show_slave_status" ]
+}
+
+@test "switch-primary (legacy) completes the switch on confirm" {
+  run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0
+  [ "$status" -eq 0 ]
+  [ "$(field '.status')" = "CHANGED" ]
+  [ "$(field '.reason_code')" = "PRIMARY_SWITCHED" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+}
+
+@test "switch-primary (current gen) reports replicas_source=cr_status" {
+  run_switch DRY_RUN=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0
+  [ "$(field '.reason_code')" = "SWITCH_DRY_RUN" ]
+  [ "$(field '.replicas_source')" = "cr_status" ]
 }

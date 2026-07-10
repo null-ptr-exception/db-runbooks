@@ -20,7 +20,7 @@ stringData:
   access-key-id: {{ .Values.minio.rootUser | quote }}
   secret-access-key: {{ .Values.minio.rootPassword | quote }}
 ---
-apiVersion: k8s.mariadb.com/v1alpha1
+apiVersion: {{ .Values.mariadb.operatorGroup }}/v1alpha1
 kind: MariaDB
 metadata:
   name: mariadb

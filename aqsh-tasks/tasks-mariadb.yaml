@@ -742,6 +742,46 @@ tasks:
         required: false
         type: string
         default: "false"
+  logical-backup:
+    script: mariadb/logical-backup.sh
+    description: "Take a logical (mariadb-dump) backup of a namespace's MariaDB to S3/MinIO via the operator Backup CR — the operator-managed logical counterpart of physical-backup; works on both operator generations. The S3 location and credentials are resolved internally"
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    # Same user-facing surface as physical-backup, minus the physical-only
+    # target/compression knobs: the namespace is the database identity; the S3
+    # location and credentials are platform internals resolved automatically.
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # wait_timeout doubles as the wait switch: "0" returns without waiting,
+      # any positive duration (e.g. 10m) waits up to that long for Complete.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   list-backups:
     script: backup/list-backups-mariadb.sh
     description: "List the backups stored for a namespace (AWS RDS DescribeDBSnapshots); read-only. Location is resolved internally from the platform convention"
@@ -802,6 +842,44 @@ tasks:
         env: TARGET_TIME
         required: false
         type: string
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # wait_timeout doubles as the wait switch: "0" returns without waiting,
+      # any positive duration (e.g. 10m) waits up to that long for Ready.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  logical-restore:
+    script: mariadb/logical-restore.sh
+    description: "Recreate a namespace's MariaDB from a logical (mariadb-dump) Backup CR into a NEW instance via bootstrapFrom.backupRef — the logical counterpart of restore; works on both operator generations. Version, storage, name, and source Backup are resolved internally"
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # Which Backup to restore from; omit to use the most recent one.
+      - name: backup
+        env: BACKUP_NAME
+        required: false
+        type: string
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false

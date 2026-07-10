@@ -37,6 +37,12 @@ aqsh:
 mariadb:
   enabled: false
   namespace: mariadb-1
+  # CRD apiGroup of the mariadb-operator generation this deployment runs:
+  # k8s.mariadb.com (current) or a legacy mariadb.*.mmontes.io fork. Drives both
+  # the operand apiVersion and the RBAC apiGroups so a non-default fork is not
+  # silently denied. Scripts detect this at runtime (see mariadb-operator-profile.sh);
+  # this value keeps the chart-rendered objects in sync with that convention.
+  operatorGroup: k8s.mariadb.com
   image: mariadb:10.6
   # replicas > 1 turns on operator replication (1 primary + N-1 replicas),
   # required by the switch-primary e2e. Default 1 = standalone.

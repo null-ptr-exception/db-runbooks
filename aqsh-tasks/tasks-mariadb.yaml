@@ -113,6 +113,50 @@ tasks:
         required: false
         type: string
         default: "false"
+  set-runtime-param:
+    script: mariadb/set-runtime-param.sh
+    description: "Emergency online override of a MariaDB runtime parameter via SET GLOBAL (AWS RDS ModifyDBParameterGroup, dynamic). EPHEMERAL — reverts on restart; durable changes go through a config PR. Omit param to list supported params."
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: param
+        env: RUNTIME_PARAM
+        required: false
+        type: string
+        pattern: '^[a-z_]*$'
+      - name: value
+        env: RUNTIME_VALUE
+        required: false
+        type: string
+      - name: scope
+        env: RUNTIME_SCOPE
+        required: false
+        type: string
+        default: "all"
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   status:
     script: mariadb/status.sh
     description: "Read-only MariaDB status summary for operator and native StatefulSet targets"

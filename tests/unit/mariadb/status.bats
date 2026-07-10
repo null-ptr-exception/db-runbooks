@@ -5,7 +5,7 @@ setup() {
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/status.sh"
-  export _LOG_CURRENT_LEVEL=3
+  export _LOG_CURRENT_LEVEL=4
   # Keep the caller environment from leaking a target name into auto-detect.
   unset MARIADB_NAME MARIADB_STS_NAME || true
   mkdir -p "${TEST_TMPDIR}/bin"

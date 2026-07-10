@@ -17,7 +17,7 @@ Set the minimum log level. Messages below this level are suppressed.
 
 | Parameter | Type | Values |
 |-----------|------|--------|
-| level | string | `DEBUG` `INFO` `ERROR` `CRIT` |
+| level | string | `DEBUG` `INFO` `WARN` `ERROR` `CRIT` |
 
 ---
 
@@ -35,6 +35,12 @@ Emit a DEBUG-level message (cyan).
 ### `log_info <operation> <message>`
 
 Emit an INFO-level message (green).
+
+---
+
+### `log_warn <operation> <message>`
+
+Emit a WARN-level message (magenta).
 
 ---
 

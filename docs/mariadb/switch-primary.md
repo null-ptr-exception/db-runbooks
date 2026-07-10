@@ -106,8 +106,11 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/switch-primary" \
   auto-select and Guard 4 off the `SHOW SLAVE STATUS` fallback.
 - e2e (`tests/mariadb/switch_primary.bats`): real operator on the 2-cluster lab —
   `mariadb-1` runs replicated (helmfile `replicas: 3`); the test switches the
-  primary to podIndex 1 and asserts `status.currentPrimaryPodIndex` flipped and
-  the new primary is writable.
+  primary, asserts `status.currentPrimaryPodIndex` flipped and the new primary
+  is writable, and exercises the live SQL fallback by pausing the controller,
+  clearing only the CR's replica-health status map, and asserting a dry-run uses
+  `replicas_source=show_slave_status`. A full legacy-operator deployment matrix
+  remains tracked in #63.
 
 ## Notes / follow-up (see #59)
 

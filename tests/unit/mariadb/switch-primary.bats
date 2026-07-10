@@ -66,11 +66,27 @@ case "$verb" in
     case "$args" in
       *"printenv MARIADB_ROOT_PASSWORD"*) printf '%s' "${MOCK_ROOT_PW:-test-pass}"; exit 0 ;;
       *"SHOW SLAVE STATUS"*)
-        # A caught-up replica by default; knobs make it lag or break replication.
+        # A caught-up replica by default. Per-pod knobs exercise mixed-health
+        # fallback maps; the unnumbered knobs remain the default for every pod.
+        io="${MOCK_LEGACY_IO:-Yes}"
+        sql="${MOCK_LEGACY_SQL:-Yes}"
+        lag="${MOCK_LEGACY_LAG:-0}"
+        case "$args" in
+          *"exec mariadb-1 "*)
+            io="${MOCK_LEGACY_IO_1:-$io}"
+            sql="${MOCK_LEGACY_SQL_1:-$sql}"
+            lag="${MOCK_LEGACY_LAG_1:-$lag}"
+            ;;
+          *"exec mariadb-2 "*)
+            io="${MOCK_LEGACY_IO_2:-$io}"
+            sql="${MOCK_LEGACY_SQL_2:-$sql}"
+            lag="${MOCK_LEGACY_LAG_2:-$lag}"
+            ;;
+        esac
         printf '*************************** 1. row ***************************\n'
-        printf '             Slave_IO_Running: %s\n' "${MOCK_LEGACY_IO:-Yes}"
-        printf '            Slave_SQL_Running: %s\n' "${MOCK_LEGACY_SQL:-Yes}"
-        printf '        Seconds_Behind_Master: %s\n' "${MOCK_LEGACY_LAG:-0}"
+        printf '             Slave_IO_Running: %s\n' "$io"
+        printf '            Slave_SQL_Running: %s\n' "$sql"
+        printf '        Seconds_Behind_Master: %s\n' "$lag"
         exit 0 ;;
       *) echo "mock: unhandled exec: $args" >&2; exit 1 ;;
     esac ;;
@@ -201,6 +217,19 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.to_pod_index')" = "1" ]
   [ "$(field '.target_auto_selected')" = "true" ]
   [ "$(field '.replicas_source')" = "show_slave_status" ]
+}
+
+@test "switch-primary (legacy) picks the healthy replica before the strict mixed-health guard" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 \
+    MOCK_LEGACY_LAG_1=0 MOCK_LEGACY_LAG_2=30
+  # Auto-selection correctly ignores replica-2, but Guard 4 deliberately still
+  # blocks the switch because the operator requires every replica caught up.
+  [ "$(field '.reason_code')" = "REPLICAS_NOT_IN_SYNC" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+  [ "$(field '.target_auto_selected')" = "true" ]
+  [ "$(field '.replicas_source')" = "show_slave_status" ]
+  [ "$(field '.replicas["mariadb-1"].secondsBehindMaster')" = "0" ]
+  [ "$(field '.replicas["mariadb-2"].secondsBehindMaster')" = "30" ]
 }
 
 @test "switch-primary (legacy) blocks auto-select when replicas lag" {

@@ -109,10 +109,40 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.results[0].pod')" = "mariadb-0" ]
 }
 
+@test "set-runtime-param scope=<pod> targets only the named pod" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_SCOPE=mariadb-1 RUNTIME_PARAM=max_connections RUNTIME_VALUE=400
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = "SRP_APPLIED" ]
+  [ "$(field '.results | length')" = "1" ]
+  [ "$(field '.results[0].pod')" = "mariadb-1" ]
+}
+
+@test "set-runtime-param rejects a nonexistent pod scope" {
+  run_srp DRY_RUN=true RUNTIME_SCOPE=mariadb-9 RUNTIME_PARAM=max_connections RUNTIME_VALUE=400
+  [ "$(field '.reason_code')" = "SCOPE_INVALID" ]
+  [ "$(field '.changed')" = "false" ]
+}
+
 @test "set-runtime-param dry_run warns on a memory-tier param" {
   run_srp DRY_RUN=true RUNTIME_PARAM=innodb_buffer_pool_size RUNTIME_VALUE=1073741824
   [ "$(field '.tier')" = "memory" ]
   [[ "$(field '.summary')" == *"OOM"* ]]
+}
+
+@test "set-runtime-param accepts and flags an adjusted memory-tier read-back" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=innodb_buffer_pool_size \
+    RUNTIME_VALUE=1073741824 MOCK_READBACK=1073741823
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = "SRP_APPLIED" ]
+  [ "$(field '.results | all(.applied == true and .adjusted == true)')" = "true" ]
+  [ "$(field '.results | all(.requested == "1073741824" and .value == "1073741823")')" = "true" ]
+}
+
+@test "set-runtime-param dry_run warns on a durability-tier param" {
+  run_srp DRY_RUN=true RUNTIME_PARAM=innodb_flush_log_at_trx_commit RUNTIME_VALUE=2
+  [ "$(field '.tier')" = "durability" ]
+  [[ "$(field '.summary')" == *"relaxes durability"* ]]
+  [[ "$(field '.summary')" == *"data-loss window"* ]]
 }
 
 @test "set-runtime-param dry_run warns on a protect-tier param" {

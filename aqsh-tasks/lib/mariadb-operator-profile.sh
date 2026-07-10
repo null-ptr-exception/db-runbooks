@@ -17,6 +17,10 @@
 #   2. Auto-detect      — the group serving the `mariadbs` CRD (present in BOTH
 #                         generations); trusted only when exactly one group does
 #   3. Hardcoded fallback — k8s.mariadb.com (current generation)
+# Detection uses Kubernetes API discovery rather than reading cluster-scoped
+# CustomResourceDefinition objects. Authenticated service accounts receive
+# discovery access through Kubernetes' standard system:discovery binding, so
+# tasks do not need a broad ClusterRoleBinding that can list every CRD.
 # Detection fails soft: any ambiguity or query error falls through to the next
 # tier, never a guess.
 # =============================================================================
@@ -33,7 +37,7 @@ fi
 # shellcheck source=aqsh-tasks/lib/logging.sh
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=aqsh-tasks/lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"   # for _kubectl_global (CRDs are cluster-scoped)
+source "${LIB_DIR}/k8s.sh"   # for _kubectl_global (API discovery is cluster-wide)
 
 # Both generations serve these kinds at v1alpha1.
 MDB_OPERATOR_VERSION="${MDB_OPERATOR_VERSION:-v1alpha1}"
@@ -47,9 +51,8 @@ _MDB_OPERATOR_GROUP_FALLBACK="k8s.mariadb.com"
 # print nothing so resolution falls through. Never fails the caller.
 _mdb_detect_operator_group() {
   local groups
-  groups="$(_kubectl_global get crd \
-    -o jsonpath='{range .items[?(@.spec.names.plural=="mariadbs")]}{.spec.group}{"\n"}{end}' \
-    2>/dev/null | sed '/^$/d' | sort -u)" || return 0
+  groups="$(_kubectl_global api-resources --cached=false -o name 2>/dev/null \
+    | sed -n 's/^mariadbs\.//p' | sed '/^$/d' | sort -u)" || return 0
   [[ "$(printf '%s\n' "$groups" | grep -c .)" -eq 1 ]] && printf '%s' "$groups"
   return 0
 }
@@ -84,9 +87,11 @@ mdb_operator_apiversion() {
 # 0 if the CRD `<plural>.<group>` is served on the cluster, 1 otherwise. Uses the
 # resolved group so a legacy-group cluster is queried for its own CRD names.
 mdb_has_crd() {
-  local plural="${1:?plural is required}" group
+  local plural="${1:?plural is required}" group resources
   group="$(mdb_operator_group)"
-  _kubectl_global get crd "${plural}.${group}" >/dev/null 2>&1
+  resources="$(_kubectl_global api-resources --cached=false --api-group="$group" -o name 2>/dev/null)" \
+    || return 1
+  grep -Fxq "${plural}.${group}" <<<"$resources"
 }
 
 # mdb_require_crd <plural> <op> [hint]

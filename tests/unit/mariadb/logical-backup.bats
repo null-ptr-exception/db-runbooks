@@ -28,8 +28,7 @@ setup() {
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 # Minimal kubectl mock:
-#   get crd -o jsonpath...mariadbs  → operator-group detection (returns a group)
-#   get crd <name>                  → CRD existence probe (MOCK_NO_CRD=1 → absent)
+#   api-resources                   → operator discovery (MOCK_NO_CRD=1 omits Backup)
 #   get ... {range .items...name}   → source auto-detect list (MOCK_SOURCES)
 #   get <name> -o json              → source status (MOCK_READY, MOCK_FOUND)
 #   apply                           → capture stdin
@@ -37,13 +36,15 @@ setup() {
 args="$*"
 verb=""
 for a in "$@"; do
-  case "$a" in get|apply|wait) verb="$a"; break ;; esac
+  case "$a" in api-resources|get|apply|wait) verb="$a"; break ;; esac
 done
 case "$verb" in
+  api-resources)
+    printf 'mariadbs.k8s.mariadb.com\n'
+    [[ "${MOCK_NO_CRD:-0}" == "1" ]] || printf 'backups.k8s.mariadb.com\n'
+    exit 0 ;;
   get)
     case "$args" in
-      *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';       exit 0 ;;   # group detect
-      *"get crd "*|*" crd "*) [[ "${MOCK_NO_CRD:-0}" == "1" ]] && exit 1 || exit 0 ;; # CRD probe
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";                exit 0 ;;   # resolve-name list
       *"-o json"*)
         [[ "${MOCK_GET_ERR:-0}" == "1" ]] && { echo "Unable to connect to the server: dial tcp: timeout" >&2; exit 1; }

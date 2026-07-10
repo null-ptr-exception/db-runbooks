@@ -8,10 +8,11 @@
 # things a mock can't, e.g. the operator ignoring the patch or currentPrimary not
 # converging.
 #
-# Scope is deliberately minimal per review: happy-path switch + assert the
-# primary flipped and the new primary is writable. The stuck-switch recovery
-# ladder (rollback / gated pod-eviction) stays unit-tested; validating it needs a
-# fault-injection harness tracked in #59.
+# Scope covers the happy-path switch plus the live SQL-health fallback: the
+# latter pauses the controller and removes only its replica status map so the
+# real task must query the still-running replicas with SHOW SLAVE STATUS. The
+# stuck-switch recovery ladder (rollback / gated pod-eviction) stays unit-tested;
+# validating it needs a fault-injection harness tracked in #59.
 
 setup_file() {
   load '../test_helper/bats-support/load'
@@ -21,6 +22,8 @@ setup_file() {
   CTX_B="kind-cluster-b"
   NS="db-ops"
   AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
+  OPERATOR_NS="db-ops"
+  OPERATOR_DEPLOYMENT="mariadb-operator"
 
   kubectl --context "$CTX_B" -n "$NS" wait pod \
     -l app=test-client --for=condition=Ready --timeout=120s
@@ -30,26 +33,30 @@ setup_file() {
 
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
 
-  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN OPERATOR_NS OPERATOR_DEPLOYMENT
 
   # Make this file runnable in isolation (not only when it runs last): wait for
   # Ready AND for the operator to finish populating .status.replication.replicas,
   # which it does asynchronously *after* Ready. Fail loudly if it never settles.
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=300s
-  local elapsed=0 count=0
-  while (( elapsed < 180 )); do
-    count=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb \
-      -o json | jq '.status.replication.replicas // {} | length') || count=0
-    [[ "$count" -ge 2 ]] && break
-    sleep 5; elapsed=$((elapsed + 5))
-  done
-  [[ "$count" -ge 2 ]] || { echo "replication status not populated (replicas=$count) after ${elapsed}s" >&2; return 1; }
+  _wait_for_replication_map 180
 }
 
 setup() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+
+  OPERATOR_SCALED_DOWN=false
+  OPERATOR_ORIGINAL_REPLICAS=""
+}
+
+teardown() {
+  # The SQL-fallback e2e deliberately pauses the controller. Always restore it,
+  # including when an assertion in that test fails midway through.
+  if [[ "${OPERATOR_SCALED_DOWN:-false}" == "true" ]]; then
+    _restore_operator
+  fi
 }
 
 # Always leave the primary back on podIndex 0 so later suites see the original
@@ -101,12 +108,12 @@ _task_result_data() {
 }
 
 _submit() {
-  local task="$1" payload="$2" task_id
+  local task="$1" payload="$2" max_wait="${3:-960}" task_id
   http_post "${AQSH_URL}/tasks/${task}" "$payload"
   assert_equal "$HTTP_CODE" "202"
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [[ -n "$task_id" ]] || { echo "no task id: $HTTP_BODY" >&2; return 1; }
-  wait_for_task "$AQSH_URL" "$task_id"
+  wait_for_task "$AQSH_URL" "$task_id" "$max_wait"
 }
 
 _primary_index() {
@@ -116,6 +123,69 @@ _primary_index() {
 
 _replica_count() {
   kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.spec.replicas}'
+}
+
+_wait_for_replication_map() {
+  local max_wait="${1:-180}" elapsed=0 count=0
+  while (( elapsed < max_wait )); do
+    count=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb \
+      -o json | jq '.status.replication.replicas // {} | length') || count=0
+    [[ "$count" -ge 2 ]] && return 0
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  echo "replication status not populated (replicas=$count) after ${elapsed}s" >&2
+  return 1
+}
+
+_wait_for_all_replicas_caught_up() {
+  local max_wait="${1:-120}" elapsed=0 replicas expected cr
+  replicas="$(_replica_count)"
+  expected=$((replicas - 1))
+  while (( elapsed < max_wait )); do
+    cr=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o json) || cr='{}'
+    if jq -e --argjson expected "$expected" '
+      (.status.replication.replicas // {}) as $r
+      | (($r | length) == $expected)
+        and all($r[];
+          .slaveIORunning == true
+          and .slaveSQLRunning == true
+          and .secondsBehindMaster == 0)
+    ' <<<"$cr" >/dev/null; then
+      return 0
+    fi
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  echo "replicas did not become fully caught up within ${max_wait}s" >&2
+  return 1
+}
+
+_wait_for_operator_scaled_down() {
+  local max_wait="${1:-60}" elapsed=0 running=1
+  while (( elapsed < max_wait )); do
+    running=$(kubectl --context "$CTX_A" -n "$OPERATOR_NS" \
+      get deployment "$OPERATOR_DEPLOYMENT" -o json | jq '.status.replicas // 0') || running=1
+    [[ "$running" == "0" ]] && return 0
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "${OPERATOR_DEPLOYMENT} still has ${running} replicas after ${max_wait}s" >&2
+  return 1
+}
+
+_restore_operator() {
+  local replicas="${OPERATOR_ORIGINAL_REPLICAS:-1}"
+  kubectl --context "$CTX_A" -n "$OPERATOR_NS" scale \
+    deployment "$OPERATOR_DEPLOYMENT" --replicas="$replicas"
+  if (( replicas > 0 )); then
+    kubectl --context "$CTX_A" -n "$OPERATOR_NS" rollout status \
+      deployment "$OPERATOR_DEPLOYMENT" --timeout=180s
+    kubectl --context "$CTX_A" -n mariadb-1 wait \
+      --for=condition=Ready mariadb/mariadb --timeout=300s
+    _wait_for_replication_map 180
+  fi
+  OPERATOR_SCALED_DOWN=false
 }
 
 # A valid podIndex other than the current primary, derived from the live
@@ -184,7 +254,7 @@ _dump_state() {
 
 @test "switch-primary auto-selects a target when none is given (dry_run)" {
   local from; from="$(_primary_index)"
-  _submit "switch-primary" '{"namespace":"mariadb-1"}'
+  _submit "switch-primary" '{"namespace":"mariadb-1"}' 180
   local data; data="$(_task_result_data)"
   echo "# auto dry_run result: $data" >&3
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
@@ -193,6 +263,42 @@ _dump_state() {
   local to; to="$(echo "$data" | jq -r '.to_pod_index')"
   [ "$to" != "$from" ]
   [[ "$to" =~ ^[0-2]$ ]]
+}
+
+@test "switch-primary reads live SQL health when the CR replica map is absent" {
+  # The current operator normally publishes status.replication.replicas, so
+  # briefly stop only its controller and remove that status field. The database
+  # pods stay running. This deterministically drives the production task through
+  # real pod exec + SHOW SLAVE STATUS without adding a test-only code switch.
+  _wait_for_all_replicas_caught_up 120
+  local from data to
+  from="$(_primary_index)"
+  OPERATOR_ORIGINAL_REPLICAS=$(kubectl --context "$CTX_A" -n "$OPERATOR_NS" \
+    get deployment "$OPERATOR_DEPLOYMENT" -o jsonpath='{.spec.replicas}')
+  [[ "$OPERATOR_ORIGINAL_REPLICAS" =~ ^[1-9][0-9]*$ ]]
+
+  OPERATOR_SCALED_DOWN=true
+  kubectl --context "$CTX_A" -n "$OPERATOR_NS" scale \
+    deployment "$OPERATOR_DEPLOYMENT" --replicas=0
+  _wait_for_operator_scaled_down 60
+  kubectl --context "$CTX_A" -n mariadb-1 patch \
+    --subresource=status mariadbs.k8s.mariadb.com mariadb --type merge \
+    -p '{"status":{"replication":null}}'
+  assert_equal "$(kubectl --context "$CTX_A" -n mariadb-1 get \
+    mariadbs.k8s.mariadb.com mariadb -o json | jq '.status.replication.replicas // {} | length')" "0"
+
+  _submit "switch-primary" '{"namespace":"mariadb-1"}' 180
+  data="$(_task_result_data)"
+  echo "# SQL fallback dry_run result: $data" >&3
+  assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
+  assert_equal "$(echo "$data" | jq -r '.replicas_source')" "show_slave_status"
+  assert_equal "$(echo "$data" | jq -r '.target_auto_selected')" "true"
+  to="$(echo "$data" | jq -r '.to_pod_index')"
+  [ "$to" != "$from" ]
+  [[ "$to" =~ ^[0-2]$ ]]
+  assert_equal "$(_primary_index)" "$from"
+
+  _restore_operator
 }
 
 @test "switch-primary promotes the target replica to primary" {

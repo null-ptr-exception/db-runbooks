@@ -432,20 +432,28 @@ _pbm_agent_exec() {
   kubectl --context "$CTX_A" -n "$namespace" exec mongodb-0 -c pbm-agent -- pbm "$@"
 }
 
-# _pbm_wait_agents <namespace> <expected_nodes> <timeout> — poll pbm status
-# until the expected number of agents have registered heartbeats.
+# _pbm_wait_agents <namespace> <expected_nodes> <timeout> — wait until the
+# pbm-agent CONTAINER is running in every pod. PBM-level registration is
+# deliberately NOT awaited here: without a storage config pbm-agent cannot
+# register and `pbm status` errors (field-verified — the reference repo
+# pushes an inline config mid-wait for exactly this reason), and a fresh
+# fixture must stay unconfigured so the tasks' storage auto-ensure path is
+# actually exercised. pbm/backup does its own agent wait after the config
+# lands.
 _pbm_wait_agents() {
   local namespace="$1" expected="${2:-2}" max_wait="${3:-180}"
-  local elapsed=0
-  echo "Waiting for ${expected} pbm agent(s) to register in ${namespace}..."
+  local elapsed=0 running
+  echo "Waiting for ${expected} pbm-agent container(s) to be running in ${namespace}..."
   while (( elapsed < max_wait )); do
-    if _pbm_agent_exec "$namespace" status -o json 2>/dev/null \
-        | jq -e --argjson n "$expected" '[.cluster[]?.nodes[]?] | length >= $n' >/dev/null 2>&1; then
+    running=$(kubectl --context "$CTX_A" -n "$namespace" get pods -l app=mongodb -o json 2>/dev/null \
+      | jq -r '[.items[].status.containerStatuses[]?
+          | select(.name == "pbm-agent") | select(.state.running != null)] | length' 2>/dev/null) || running=0
+    if [[ "${running:-0}" -ge "$expected" ]]; then
       return 0
     fi
     sleep 5; elapsed=$((elapsed + 5))
   done
-  echo "pbm agents not registered in ${namespace} after ${max_wait}s" >&2
+  echo "pbm-agent containers not running in ${namespace} after ${max_wait}s" >&2
   return 1
 }
 

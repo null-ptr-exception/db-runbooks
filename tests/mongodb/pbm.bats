@@ -35,17 +35,19 @@ setup() {
   load 'pbm_helpers'
 }
 
-@test "pbm/status on a fresh deployment: agents registered, storage unconfigured, pitr off" {
+@test "pbm/status on a fresh deployment: storage unconfigured reported gracefully, pitr off" {
   run_pbm_task "status" "{\"namespace\":\"${SNS}\"}"
   assert_equal "$TASK_STATUS" "completed"
 
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.sts')" "mongodb"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.agent_container')" "pbm-agent"
-  assert_equal "$(echo "$RESULT_DATA" | jq -r '[.agents[].nodes[]] | length')" "2"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.configured')" "false"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.pitr.enabled')" "false"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.resolved.bucket')" "db-backups"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.resolved.prefix')" "mongodb/${SNS}"
+  # agents cannot register before a storage config exists — the fresh view
+  # must say so instead of failing
+  echo "$RESULT_DATA" | jq -r '.note' | grep -qi "not configured"
 }
 
 @test "pbm/backup type=physical on a community-engine deployment fails PSMDB_REQUIRED" {
@@ -104,6 +106,15 @@ setup() {
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.backup.status')" "done"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.backup.type')" "logical"
+}
+
+@test "pbm/status after the first backup: agents registered, storage in sync" {
+  run_pbm_task "status" "{\"namespace\":\"${SNS}\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '[.agents[].nodes[]] | length')" "2"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.configured')" "true"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.in_sync')" "true"
+  echo "$RESULT_DATA" | jq -e '.snapshots.count >= 1'
 }
 
 @test "pbm/config dry-run reports in-sync after the auto-ensure; confirm is an already-in-sync no-op" {

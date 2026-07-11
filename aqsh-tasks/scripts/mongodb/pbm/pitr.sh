@@ -51,9 +51,13 @@ fi
 
 pbm_task_init "pbm-pitr"
 
-_STATUS_JSON=$(pbm_status_json "$PBM_POD" "$PBM_AGENT_CONTAINER") \
-  || fail_task "PBM_CLI_ERROR" "pbm status failed in ${PBM_POD}/${PBM_AGENT_CONTAINER}" \
-    "$(jq -nc --arg raw "${_STATUS_JSON:0:1000}" '{raw_output:$raw}')"
+# pbm status errors on a storage-unconfigured cluster (agents can't
+# register yet) — degrade to the empty state; the enable path's own gates
+# (NO_BASE_BACKUP, storage ensure) produce the accurate error downstream.
+if ! _STATUS_JSON=$(pbm_status_json "$PBM_POD" "$PBM_AGENT_CONTAINER"); then
+  log_warn "pbm-pitr" "pbm status unavailable (storage likely unconfigured) — treating PITR as disabled"
+  _STATUS_JSON='{}'
+fi
 _CURRENT=false
 pbm_pitr_enabled "$_STATUS_JSON" && _CURRENT=true
 

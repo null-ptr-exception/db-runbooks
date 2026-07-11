@@ -37,7 +37,7 @@ setup() {
   run_pbm_task "status" "{\"namespace\":\"${SNS}\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.agent_container')" "pbm-agent"
-  assert_equal "$(echo "$RESULT_DATA" | jq -r '[.agents[].nodes[]] | length')" "2"
+  # fresh deployment = storage unconfigured = agents cannot register yet
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.configured')" "false"
 }
 
@@ -63,4 +63,9 @@ setup() {
   assert_equal "$TASK_STATUS" "completed"
   echo "$RESULT_DATA" | jq -e --arg n "$backup_name" \
     '[.snapshots[] | select(.name == $n and .status == "done")] | length == 1'
+
+  # with the config in place, both agents must now be registered
+  run_pbm_task "status" "{\"namespace\":\"${SNS}\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '[.agents[].nodes[]] | length')" "2"
 }

@@ -144,6 +144,10 @@ before acting:
   bucket pre-created via `mc` from the aqsh pod, config fed to
   `pbm config --file /dev/stdin` (credentials never on an argv), then
   `pbm config --force-resync`. A fresh deployment needs **no setup step**.
+  Note that pbm-agents only *register* once a config exists (the config
+  write itself is a direct CLI-to-database operation, so no agent is needed
+  for it) — the first `pbm/backup` therefore also waits for the agents to
+  come up right after applying the config.
 - **Set and matching** → no-op.
 - **Set but pointing elsewhere** → the task fails `STORAGE_CONFIG_MISMATCH`
   and refuses to overwrite: an existing config may protect real backups.
@@ -220,6 +224,12 @@ locations), PITR state + covered chunk ranges, the running op, a snapshot
 summary, `physical_ready` (`engine` from live `buildInfo`, `psmdb` flag,
 `agent_data_volume`) and `physical_restore_in_progress` (a takeover
 annotation is on the StatefulSet).
+
+On a **storage-unconfigured** deployment `pbm status` itself errors and
+agents cannot register (they need a config to come up) — the task degrades
+gracefully instead of failing: `storage.configured: false`, empty
+`agents`, and a `note` pointing at the auto-ensure. `PBM_CLI_ERROR` is
+reserved for a status failure while a config exists.
 
 ### `pbm/backup`
 

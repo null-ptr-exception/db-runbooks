@@ -33,10 +33,6 @@ log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
 
 pbm_task_init "pbm-status"
 
-_STATUS_JSON=$(pbm_status_json "$PBM_POD" "$PBM_AGENT_CONTAINER") \
-  || fail_task "PBM_CLI_ERROR" "pbm status failed in ${PBM_POD}/${PBM_AGENT_CONTAINER}" \
-    "$(jq -nc --arg raw "${_STATUS_JSON:0:1000}" '{raw_output:$raw}')"
-
 pbm_resolve_backup_location "$DB_NAMESPACE"
 
 _CONFIGURED=false
@@ -47,6 +43,21 @@ if _CONFIG_JSON=$(pbm_get_config_json "$PBM_POD" "$PBM_AGENT_CONTAINER") \
   _CONFIGURED=true
   _CURRENT_STORAGE=$(pbm_redact_config "$_CONFIG_JSON" | jq -c '.storage.s3 | {endpointUrl, bucket, prefix, region}')
   if pbm_storage_matches "$_CONFIG_JSON"; then _IN_SYNC=true; else _IN_SYNC=false; fi
+fi
+
+# Without a storage config `pbm status` errors and agents cannot register
+# (field-verified) — a fresh deployment must still get a useful status
+# report, so degrade gracefully instead of failing. A status failure WITH
+# a config present is a real error.
+_NOTE=""
+if ! _STATUS_JSON=$(pbm_status_json "$PBM_POD" "$PBM_AGENT_CONTAINER"); then
+  if [[ "$_CONFIGURED" == "true" ]]; then
+    fail_task "PBM_CLI_ERROR" "pbm status failed in ${PBM_POD}/${PBM_AGENT_CONTAINER}" \
+      "$(jq -nc --arg raw "${_STATUS_JSON:0:1000}" '{raw_output:$raw}')"
+  fi
+  log_info "pbm-status" "pbm status unavailable and storage unconfigured — reporting the fresh-deployment view"
+  _STATUS_JSON='{}'
+  _NOTE="PBM storage is not configured yet — agents register once pbm/backup (auto-ensure) or pbm/config applies it"
 fi
 log_debug "pbm-status" "storage configured=${_CONFIGURED} in_sync=${_IN_SYNC}"
 
@@ -84,6 +95,7 @@ jq -n \
   --arg engine "$_ENGINE" \
   --argjson agent_volume "$_AGENT_VOLUME" \
   --argjson takeover_leftover "$_TAKEOVER_LEFTOVER" \
+  --arg note "$_NOTE" \
   '{namespace: $namespace, sts: $sts, agent_container: $agent_container,
     physical_ready: {engine: $engine, psmdb: ($engine | startswith("psmdb:")), agent_data_volume: $agent_volume},
     physical_restore_in_progress: $takeover_leftover,
@@ -103,5 +115,6 @@ jq -n \
     snapshots: {
       count: ([$status.backups.snapshot[]?] | length),
       latest: ([$status.backups.snapshot[]? | select(.status == "done")] | sort_by(.restoreTo // 0) | last)
-    }}' \
+    }}
+   + (if $note == "" then {} else {note: $note} end)' \
   > "$AQSH_RESULT_FILE"

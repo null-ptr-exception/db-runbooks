@@ -104,7 +104,9 @@ if [[ "$_TYPE" != "logical" ]]; then
 fi
 
 pbm_require_storage "pbm-backup"
-pbm_wait_agents_ready "$PBM_POD" "$PBM_AGENT_CONTAINER" 60
+# Generous budget: on a fresh deployment the auto-ensure above wrote the
+# very first config, and agents only register after one exists.
+pbm_wait_agents_ready "$PBM_POD" "$PBM_AGENT_CONTAINER" 120
 
 _NAME=$(pbm_start_backup "$PBM_POD" "$PBM_AGENT_CONTAINER" "$_TYPE" "$_NS_FILTER" "$_WITH_BASE") \
   || fail_task "BACKUP_START_FAILED" "pbm backup did not start" \

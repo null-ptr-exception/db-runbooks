@@ -43,7 +43,7 @@ tasks:
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
   backup:
     script: backup/backup-mongodb.sh
-    description: "Backup MongoDB database to MinIO"
+    description: "DEPRECATED — legacy mongodump snapshot to MinIO (fixed pod/secret names, no PITR); prefer the pbm/* task family (docs/mongodb/pbm.md)"
     timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -782,3 +782,314 @@ tasks:
         required: false
         type: string
         default: "false"
+  # PBM gateway — Percona Backup for MongoDB, logical + PITR only (see
+  # docs/mongodb/pbm.md). Deployment-naming fields (sts_name, agent
+  # container, storage location, S3 credentials) are deliberately NOT task
+  # inputs — same auto-detect tier as recovery/* (CLAUDE.md "Configuration
+  # Layers"). log_level IS a task input: per-call debug verbosity is a
+  # genuinely per-call decision.
+  pbm/status:
+    script: mongodb/pbm/status.sh
+    description: "Read-only: PBM agent health, storage config (+in-sync check), PITR state and covered ranges, running op, snapshot summary"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/backup:
+    script: mongodb/pbm/backup.sh
+    description: "Start a PBM logical backup (storage auto-ensured on first use) and wait for completion; physical/incremental are rejected with the reason"
+    timeout: 25m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: type
+        env: PBM_BACKUP_TYPE
+        required: false
+        type: string
+        default: "logical"
+        # non-logical values pass the pattern on purpose so the script can
+        # reject them with UNSUPPORTED_BACKUP_TYPE + the reason, instead of
+        # an opaque input-validation 400.
+        pattern: '^(logical|physical|incremental|external)?$'
+      - name: ns
+        env: PBM_NS_FILTER
+        required: false
+        type: string
+        default: ""
+        pattern: '^([A-Za-z0-9_*.-]+(,[A-Za-z0-9_*.-]+)*)?$'
+      - name: wait
+        env: PBM_WAIT
+        required: false
+        type: string
+        default: "true"
+      - name: wait_timeout
+        env: PBM_WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "1200"
+        pattern: '^([0-9]{1,5})?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/list:
+    script: mongodb/pbm/list.sh
+    description: "Read-only: backup inventory + PITR ranges; with name=<backup>, full describe-backup detail"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: name
+        env: PBM_BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$'
+      - name: include_restores
+        env: PBM_INCLUDE_RESTORES
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/restore:
+    script: mongodb/pbm/restore.sh
+    description: "Logical restore from a snapshot (backup_name) or to a point in time (time), dry_run -> confirm; PITR is disabled for the restore and stays off until a fresh base backup"
+    timeout: 30m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: backup_name
+        env: PBM_BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$'
+      - name: time
+        env: PBM_RESTORE_TIME
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})?$'
+      - name: ns
+        env: PBM_NS_FILTER
+        required: false
+        type: string
+        default: ""
+        pattern: '^([A-Za-z0-9_*.-]+(,[A-Za-z0-9_*.-]+)*)?$'
+      - name: wait_timeout
+        env: PBM_WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "1500"
+        pattern: '^([0-9]{1,5})?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/delete:
+    script: mongodb/pbm/delete.sh
+    description: "Remove backup artifacts, dry_run -> confirm: single snapshot (backup_name) or retention sweep (older_than = Nd or timestamp)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: backup_name
+        env: PBM_BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z)?$'
+      - name: older_than
+        env: PBM_OLDER_THAN
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/pitr:
+    script: mongodb/pbm/pitr.sh
+    description: "Enable/disable PITR oplog slicing (dry_run -> confirm); enable requires a done base backup; oplog_span_min tunes the RPO granularity"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: enabled
+        env: PBM_PITR_ENABLED
+        required: true
+        type: string
+        pattern: '^(true|false)$'
+      - name: oplog_span_min
+        env: PBM_OPLOG_SPAN_MIN
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9]+(\.[0-9]+)?)?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/logs:
+    script: mongodb/pbm/logs.sh
+    description: "Read-only: PBM agent log stream — filter by event (e.g. backup/<name>) and severity to diagnose failed operations"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: event
+        env: PBM_LOG_EVENT
+        required: false
+        type: string
+        default: ""
+        pattern: '^([A-Za-z0-9/:._-]+)?$'
+      - name: severity
+        env: PBM_LOG_SEVERITY
+        required: false
+        type: string
+        default: ""
+        pattern: '^(D|I|W|E|F)?$'
+      - name: tail
+        env: PBM_LOG_TAIL
+        required: false
+        type: string
+        default: "50"
+        pattern: '^[0-9]{1,4}$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/cancel-backup:
+    script: mongodb/pbm/cancel-backup.sh
+    description: "Abort the currently running backup (dry_run -> confirm); dry-run shows the op that would be aborted"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/config:
+    script: mongodb/pbm/config.sh
+    description: "Storage config gateway (dry_run -> confirm): diff current PBM storage vs the deployment-resolved location; confirm applies it + force-resync (the sanctioned path for endpoint/bucket migrations)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

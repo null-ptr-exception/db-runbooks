@@ -1,7 +1,8 @@
 # MongoDB Test Suite
 
 Validates the MongoDB aqsh task API end-to-end: sanity-check, restart,
-backup, account lifecycle, recovery, reconfig, and FCV.
+backup (PBM + deprecated legacy), account lifecycle, recovery, reconfig,
+and FCV.
 
 ## What it tests
 
@@ -16,7 +17,18 @@ backup, account lifecycle, recovery, reconfig, and FCV.
   it before restarting, instead of silently reporting success with no pod
   actually restarted (`restart_stuck_partition.bats`, separate
   `mongo-stuck-partition` namespace)
-- Backup task ships a dump to MinIO on cluster-b (`backup.bats`)
+- Legacy `backup` task ships a mongodump to MinIO on cluster-b
+  (`backup.bats`) — deprecated path kept for compatibility; the PBM family
+  below supersedes it (see `docs/mongodb/pbm.md`)
+- PBM gateway (`pbm/*`): fresh-deployment status, storage auto-ensure with
+  the artifact verified inside MinIO, list/describe, config in-sync no-op,
+  drop → dry-run → confirm restore round trip, XOR/gate validation, delete
+  dry-run/confirm, NO_PBM_AGENT error path (`pbm.bats`, separate `mongo-pbm`
+  namespace); PITR lifecycle — NO_BASE_BACKUP guard, 1-minute oplog span,
+  point-in-time restore keeping the pre-T1 marker and dropping the post-T1
+  one, PITR-disabled-after-restore contract, re-arm with a fresh base
+  (`pbm_pitr.bats`, `mongo-pbm-pitr`); convention independence against a
+  Bitnami-shaped StatefulSet (`pbm_bitnami.bats`, `mongo-pbm-bitnami`)
 - Run-account lifecycle: create/delete/ban/extend-expiry/reset-password/
   update-roles with the dry_run → confirm gate (`account_lifecycle.bats`)
 - Replica-set member recovery: gate checks, wipe + resync, reset,

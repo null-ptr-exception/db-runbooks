@@ -19,7 +19,12 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: [{{ .Values.mongodb.credentialSecret | default "mongodb-credentials" | quote }}]
+    resourceNames:
+      - {{ .Values.mongodb.credentialSecret | default "mongodb-credentials" | quote }}
+      # S3 credentials for the PBM gateway (pbm/* tasks render them into
+      # `pbm config` payloads) — same name PBM_S3_CREDENTIALS_SECRET_DEFAULT
+      # resolves; change them together (see values.yaml).
+      - {{ .Values.mongodb.backupSecret | default "minio" | quote }}
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["events"]

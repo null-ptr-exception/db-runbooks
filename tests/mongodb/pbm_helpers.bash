@@ -17,6 +17,10 @@
 # =============================================================================
 
 PBM_IMAGE="percona/percona-backup-mongodb:2.15.0"
+# Physical backups need $backupCursor — a Percona Server for MongoDB
+# extension — so the physical fixtures run PSMDB instead of vanilla mongo.
+PSMDB_IMAGE="percona/percona-server-mongodb:7.0.37-20"
+COMMUNITY_IMAGE="mongo:7"
 
 # ---------------------------------------------------------------------------
 # _pbm_common_env — contexts, aqsh URL, test-client pod + bearer token.
@@ -97,10 +101,17 @@ run_pbm_task() {
 
 # ---------------------------------------------------------------------------
 # Fixture: namespace + secrets + RoleBinding + RS StatefulSet with pbm-agent.
-# _pbm_apply_fixture <namespace> <official|bitnami>
+# _pbm_apply_fixture <namespace> <official|bitnami> [community|psmdb]
+#
+# engine=psmdb (the physical fixtures) additionally runs with REAL
+# authentication — --auth + a keyFile (initContainer copies it from the
+# secret and chmod-400s it, adopting the reference repo's whitespace-safe
+# handling) — so the agent's PBM_MONGODB_URI credentials are actually
+# verified, and mounts the data volume into the agent sidecar at the same
+# path (physical backups read data files directly).
 # ---------------------------------------------------------------------------
 _pbm_apply_fixture() {
-  local sns="${1:?namespace required}" variant="${2:-official}"
+  local sns="${1:?namespace required}" variant="${2:-official}" engine="${3:-community}"
   local ctx="$CTX_A"
 
   kubectl --context "$ctx" create namespace "$sns" \
@@ -113,8 +124,9 @@ _pbm_apply_fixture() {
     --from-literal=secret-access-key=minioadmin-changeme-prod \
     --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
 
-  # MongoDB credentials + variant-specific wiring.
-  local user_key pass_key mongo_env datadir_yaml run_as init_yaml mongod_args
+  # MongoDB credentials + variant/engine-specific wiring.
+  local user_key pass_key mongo_env datadir_yaml run_as mongod_args_inner
+  local init_entries=""
   if [[ "$variant" == "bitnami" ]]; then
     user_key="root-user"; pass_key="root-password"; run_as=1001
     kubectl --context "$ctx" -n "$sns" create secret generic mongodb-credentials \
@@ -127,14 +139,13 @@ _pbm_apply_fixture() {
             - name: MONGODB_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef: {name: mongodb-credentials, key: ${pass_key}}"
-    mongod_args='["--replSet", "rs0", "--bind_ip_all", "--dbpath", "/bitnami/mongodb/data/db"]'
+    mongod_args_inner='"--replSet", "rs0", "--bind_ip_all", "--dbpath", "/bitnami/mongodb/data/db"'
     datadir_yaml="
             - name: datadir
               mountPath: /bitnami/mongodb"
-    init_yaml="
-      initContainers:
+    init_entries+="
         - name: prepare-dbpath
-          image: mongo:7
+          image: \${MONGO_IMAGE_PLACEHOLDER}
           command: [\"sh\", \"-c\", \"mkdir -p /bitnami/mongodb/data/db\"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -154,12 +165,55 @@ _pbm_apply_fixture() {
             - name: MONGO_INITDB_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef: {name: mongodb-credentials, key: ${pass_key}}"
-    mongod_args='["--replSet", "rs0", "--bind_ip_all"]'
+    mongod_args_inner='"--replSet", "rs0", "--bind_ip_all"'
     datadir_yaml="
             - name: datadir
               mountPath: /data/db"
-    init_yaml=""
   fi
+
+  # Engine layer: psmdb = PSMDB image + REAL auth (keyFile) + the agent
+  # sharing the data volume (physical-backup prerequisite).
+  local mongo_image auth_args="" keyfile_mount="" pod_volumes="" agent_mounts=""
+  if [[ "$engine" == "psmdb" ]]; then
+    mongo_image="$PSMDB_IMAGE"
+    kubectl --context "$ctx" -n "$sns" create secret generic mongodb-keyfile \
+      --from-literal=keyfile="$(openssl rand -base64 96 | tr -d '\n')" \
+      --dry-run=client -o yaml | kubectl --context "$ctx" apply -f -
+    auth_args=', "--auth", "--keyFile", "/etc/mongodb-keyfile/keyfile"'
+    # chmod 400 under the pod's runAsUser: mongod rejects keyFiles readable
+    # by group/others, and secret volumes can't produce owner-only files.
+    init_entries+="
+        - name: prepare-keyfile
+          image: \${MONGO_IMAGE_PLACEHOLDER}
+          command: [\"sh\", \"-c\", \"cp /keyfile-src/keyfile /keyfile/keyfile && chmod 400 /keyfile/keyfile\"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [\"ALL\"]}
+          volumeMounts:
+            - name: keyfile-src
+              mountPath: /keyfile-src
+            - name: keyfile
+              mountPath: /keyfile"
+    keyfile_mount="
+            - name: keyfile
+              mountPath: /etc/mongodb-keyfile"
+    pod_volumes="
+      volumes:
+        - name: keyfile-src
+          secret:
+            secretName: mongodb-keyfile
+        - name: keyfile
+          emptyDir: {}"
+    agent_mounts="
+          volumeMounts:${datadir_yaml}"
+  else
+    mongo_image="$COMMUNITY_IMAGE"
+  fi
+  # The init entries reference the engine image; resolve the placeholder now.
+  init_entries="${init_entries//\$\{MONGO_IMAGE_PLACEHOLDER\}/${mongo_image}}"
+  local init_block=""
+  [[ -n "$init_entries" ]] && init_block="
+      initContainers:${init_entries}"
 
   # Namespace-scoped RoleBinding to the existing ClusterRole (default object
   # names, so the pinned resourceNames already cover this fixture).
@@ -201,12 +255,12 @@ spec:
         runAsNonRoot: true
         runAsUser: ${run_as}
         runAsGroup: ${run_as}
-        fsGroup: ${run_as}${init_yaml}
+        fsGroup: ${run_as}${init_block}
       containers:
         - name: mongodb
-          image: mongo:7
+          image: ${mongo_image}
           command: ["mongod"]
-          args: ${mongod_args}
+          args: [${mongod_args_inner}${auth_args}]
           env:${mongo_env}
           ports:
             - containerPort: 27017
@@ -221,7 +275,7 @@ spec:
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6
-          volumeMounts:${datadir_yaml}
+          volumeMounts:${datadir_yaml}${keyfile_mount}
         - name: pbm-agent
           image: ${PBM_IMAGE}
           # Retry wrapper: pbm-agent exits until the RS is initiated; a plain
@@ -240,7 +294,7 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: {drop: ["ALL"]}
-            seccompProfile: {type: RuntimeDefault}
+            seccompProfile: {type: RuntimeDefault}${agent_mounts}${pod_volumes}
   volumeClaimTemplates:
     - metadata:
         name: datadir
@@ -326,6 +380,9 @@ _pbm_wait_for_primary() {
 
 # mongod bypasses docker-entrypoint.sh (command: mongod), so the root user is
 # created explicitly; equal-priority RS -> try every pod, primary accepts it.
+# Auth-enabled fixtures (engine=psmdb): once the first user exists the
+# localhost exception closes, so an authenticated ping short-circuits the
+# retry loop instead of hammering createUser into "not authorized".
 _pbm_create_root_user() {
   local namespace="$1" variant="${2:-official}"
   local user pass
@@ -335,8 +392,14 @@ _pbm_create_root_user() {
     user="mongoadmin"; pass="testpass123"
   fi
   local elapsed=0 ready=false pod
-  while (( elapsed < 60 )); do
+  while (( elapsed < 90 )); do
     for pod in mongodb-0 mongodb-1; do
+      if kubectl --context "$CTX_A" -n "$namespace" exec "$pod" -c mongodb -- mongosh --quiet --norc \
+        "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin" \
+        --eval "db.adminCommand({ping:1}).ok" >/dev/null 2>&1; then
+        ready=true
+        break
+      fi
       if kubectl --context "$CTX_A" -n "$namespace" exec "$pod" -c mongodb -- mongosh --quiet --norc \
         "mongodb://localhost:27017/admin" --eval "
           try {
@@ -354,7 +417,7 @@ _pbm_create_root_user() {
     sleep 5; elapsed=$((elapsed + 5))
   done
   if [[ "$ready" != true ]]; then
-    echo "Failed to create/verify root user in ${namespace} after 60s" >&2
+    echo "Failed to create/verify root user in ${namespace} after 90s" >&2
     return 1
   fi
 }
@@ -388,11 +451,23 @@ _pbm_wait_agents() {
 
 # ---------------------------------------------------------------------------
 # _pbm_mongo_eval <namespace> <js> — run mongosh against the RS (routes to
-# the primary) from inside mongodb-0.
+# the primary) from inside mongodb-0. For the no-auth (community) fixtures.
 # ---------------------------------------------------------------------------
 _pbm_mongo_eval() {
   local namespace="$1" js="$2"
   local uri="mongodb://mongodb-0.mongodb.${namespace}.svc.cluster.local:27017,mongodb-1.mongodb.${namespace}.svc.cluster.local:27017/admin?replicaSet=rs0"
+  kubectl --context "$CTX_A" -n "$namespace" exec mongodb-0 -c mongodb -- \
+    mongosh --quiet --norc "$uri" --eval "$js"
+}
+
+# ---------------------------------------------------------------------------
+# _pbm_mongo_eval_auth <namespace> <user> <pass> <js> — authenticated
+# variant for the --auth fixtures (test-side only: the tests know their own
+# fixture's credentials; the pbm/* tasks under test never see them).
+# ---------------------------------------------------------------------------
+_pbm_mongo_eval_auth() {
+  local namespace="$1" user="$2" pass="$3" js="$4"
+  local uri="mongodb://${user}:${pass}@mongodb-0.mongodb.${namespace}.svc.cluster.local:27017,mongodb-1.mongodb.${namespace}.svc.cluster.local:27017/admin?replicaSet=rs0&authSource=admin"
   kubectl --context "$CTX_A" -n "$namespace" exec mongodb-0 -c mongodb -- \
     mongosh --quiet --norc "$uri" --eval "$js"
 }

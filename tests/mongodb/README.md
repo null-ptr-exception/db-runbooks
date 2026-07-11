@@ -23,12 +23,22 @@ and FCV.
 - PBM gateway (`pbm/*`): fresh-deployment status, storage auto-ensure with
   the artifact verified inside MinIO, list/describe, config in-sync no-op,
   drop → dry-run → confirm restore round trip, XOR/gate validation, delete
-  dry-run/confirm, NO_PBM_AGENT error path (`pbm.bats`, separate `mongo-pbm`
-  namespace); PITR lifecycle — NO_BASE_BACKUP guard, 1-minute oplog span,
-  point-in-time restore keeping the pre-T1 marker and dropping the post-T1
-  one, PITR-disabled-after-restore contract, re-arm with a fresh base
+  dry-run/confirm, NO_PBM_AGENT error path, PSMDB_REQUIRED on the
+  community engine (`pbm.bats`, separate `mongo-pbm` namespace); PITR
+  lifecycle — NO_BASE_BACKUP guard, 1-minute oplog span, point-in-time
+  restore keeping the pre-T1 marker and dropping the post-T1 one,
+  PITR-disabled-after-restore contract, re-arm with a fresh base
   (`pbm_pitr.bats`, `mongo-pbm-pitr`); convention independence against a
   Bitnami-shaped StatefulSet (`pbm_bitnami.bats`, `mongo-pbm-bitnami`)
+- PBM physical/incremental (`pbm_physical.bats`, `mongo-pbm-phys`, PSMDB
+  fixture with real --auth/keyFile): physical readiness in status, physical
+  backup → MinIO, incremental chain with auto --base + delete protection of
+  the chain anchor, the full-downtime takeover restore round trip with
+  surgical StatefulSet revert assertions, restore from the incremental
+  chain tip, PITR on a physical base (point-in-time takeover restore), and
+  a post-restore backup proving metadata resync; Bitnami-layout variant
+  (dbPath below the mount root) with a compact takeover round trip
+  (`pbm_physical_bitnami.bats`, `mongo-pbm-phys-bitnami`)
 - Run-account lifecycle: create/delete/ban/extend-expiry/reset-password/
   update-roles with the dry_run → confirm gate (`account_lifecycle.bats`)
 - Replica-set member recovery: gate checks, wipe + resync, reset,

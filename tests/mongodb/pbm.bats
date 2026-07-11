@@ -48,11 +48,20 @@ setup() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.storage.resolved.prefix')" "mongodb/${SNS}"
 }
 
-@test "pbm/backup type=physical is rejected with the operator rationale" {
+@test "pbm/backup type=physical on a community-engine deployment fails PSMDB_REQUIRED" {
+  # This fixture runs vanilla mongo:7 — no $backupCursor. The live engine
+  # gate must catch it and name the detected engine.
   run_pbm_task "backup" "{\"namespace\":\"${SNS}\",\"type\":\"physical\"}"
   assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PSMDB_REQUIRED"
+  echo "$RESULT_DATA" | jq -r '.details.engine' | grep -q "^community:"
+  echo "$RESULT_DATA" | jq -r '.details.hint' | grep -qi "percona-server-mongodb"
+}
+
+@test "pbm/backup type=external stays rejected" {
+  run_pbm_task "backup" "{\"namespace\":\"${SNS}\",\"type\":\"external\"}"
+  assert_equal "$TASK_STATUS" "failed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "UNSUPPORTED_BACKUP_TYPE"
-  echo "$RESULT_DATA" | jq -r '.details.reason' | grep -qi "operator"
 }
 
 @test "pbm/backup runs a logical backup, auto-ensures storage, and the artifact lands in MinIO" {

@@ -33,7 +33,8 @@ per-call operational decisions.
 
 | Situation | Use |
 |---|---|
-| Routine restorable backup (scheduled or ad-hoc) | `pbm/backup` |
+| Ad-hoc restorable backup | `pbm/backup` |
+| Recurring backup cycle (PBM has no built-in scheduler) | `pbm/schedule` — aqsh-managed CronJob, one gated call |
 | Very large data sets — dump/insert too slow | `pbm/backup type=physical` (needs PSMDB, see [requirements](#deployment-requirements)) |
 | Large data + frequent backups without re-uploading everything | `pbm/backup type=incremental` (chain auto-anchors its `--base`) |
 | Minute-level RPO / continuous protection | `pbm/pitr enabled=true` (+ small `oplog_span_min`) — works on logical AND physical bases |
@@ -173,14 +174,27 @@ restating this.
 - Restore time granularity is **any second inside the window** — chunks are
   storage units, not restore-point boundaries.
 
-### Scheduling (backup 循環)
+### Scheduling
 
-PBM has no built-in scheduler and neither does this gateway — recurrence
-belongs to the caller. The house pattern is a Kubernetes CronJob POSTing to
-the API (see [Usage Scenarios](#usage-scenarios)); changing the cycle is
-`kubectl patch cronjob` on `spec.schedule`, effective immediately. With PITR
-enabled, a daily base backup is usually enough — the oplog chunks carry the
-fine-grained restore points between bases.
+<a id="scheduling"></a>**PBM has no built-in scheduler** — Percona's own
+docs say it plainly: *"We recommend using `crond` or similar services to
+schedule backup snapshots"* (still true as of PBM 2.15.0). There is no
+`pbm config --set-schedule` and no `schedules:` config section; the
+cron-in-CR scheduled backups people sometimes attribute to PBM are a
+**Percona Operator for MongoDB** feature, implemented by the operator on
+top of PBM. Treat any claim to the contrary as misinformation.
+
+This gateway therefore owns the scheduling itself: **`pbm/schedule`**
+manages one aqsh-owned Kubernetes CronJob per namespace
+(`pbm-backup-schedule` by convention) that submits `pbm/backup`
+(`wait=false`) back into the aqsh API on the given cron expression, using
+a short-lived projected ServiceAccount token. Callers see only
+`schedule="0 2 * * *"` + `type` — the CronJob name and aqsh URL are
+internal config (`PBM_SCHEDULE_CRONJOB_DEFAULT`,
+`PBM_SCHEDULE_AQSH_URL_DEFAULT`), never inputs. Changing the cycle is one
+gated call, effective immediately; `enabled=false` suspends without losing
+the definition. With PITR enabled, a daily base backup is usually enough —
+the oplog chunks carry the fine-grained restore points between bases.
 
 ### Debug logging
 
@@ -299,6 +313,23 @@ Only the triad. dry-run shows the running op that would be aborted; confirm
 with nothing running fails `NO_RUNNING_OP`. The aborted backup shows as
 `cancelled` in `pbm/list`.
 
+### `pbm/schedule` — gated
+
+| Input | Required | Meaning |
+|---|---|---|
+| `schedule` | to create | Five-field cron expression, e.g. `0 2 * * *` |
+| `type` | no (`logical`) | Backup type for scheduled runs — `physical`/`incremental` prerequisites are re-checked by `pbm/backup` at every run |
+| `enabled` | no | `false` suspends the schedule (definition kept), `true` resumes |
+| `remove` | no (`false`) | Deletes the managed CronJob; exclusive with the other inputs |
+| `dry_run` / `confirm` | triad | dry-run shows the current schedule and the exact diff confirm would apply |
+
+Manages the aqsh-owned CronJob described in [Scheduling](#scheduling) —
+see there for why PBM itself cannot do this. Unset inputs inherit the live
+values (e.g. `enabled=false` alone suspends without touching the cron
+expression). Failure codes: `INVALID_INPUT`, `NO_PBM_AGENT` (a schedule
+without a PBM-capable deployment would just fail every tick),
+`SCHEDULE_APPLY_FAILED`.
+
 ### `pbm/config` — gated
 
 Only the triad. dry-run: current PBM storage vs the deployment-resolved
@@ -310,20 +341,20 @@ dry_run → confirm.
 
 ## Usage Scenarios
 
-情境速查表 (scenario quick reference):
+Scenario quick reference:
 
-| 情境 | 操作 |
+| Scenario | Operation |
 |---|---|
-| 例行備份（每日/每週循環） | CronJob → `pbm/backup`（下方範例）；改循環 = 改 CronJob schedule |
-| 資料遺失窗口縮到分鐘級 | `pbm/pitr enabled=true oplog_span_min=1` |
-| 誤刪/髒資料寫入於時刻 T | `pbm/restore time=T-1秒`（dry_run 先驗證覆蓋範圍） |
-| 髒資料只污染一個 collection | `pbm/restore time=T-1 ns=mydb.orders`（selective，其他 collection 不動） |
-| 還原到某次完整備份 | `pbm/restore backup_name=<name>` |
-| 搬家：換 MinIO endpoint/bucket | 改 internal config → `pbm/config` dry_run → confirm |
-| 清舊備份（保留 30 天） | `pbm/delete older_than=30d` dry_run → confirm |
-| 備份失敗查原因 | `pbm/logs event=backup/<name>` |
-| 資料量數百 GB、備份/還原時間是瓶頸 | `pbm/backup type=physical`（還原需維護窗口 — [takeover](#physical-restore)） |
-| 大資料量高頻備份、不想每次全量上傳 | `pbm/backup type=incremental`（首次自動成為 `--base`） |
+| Routine backup cycle (daily/weekly) | `pbm/schedule schedule="0 2 * * *"` (dry_run → confirm); change the cycle with another call |
+| Shrink the data-loss window to minutes | `pbm/pitr enabled=true oplog_span_min=1` |
+| Bad write / accidental drop at time T | `pbm/restore time=<T-1s>` (dry_run validates coverage first) |
+| Bad data confined to one collection | `pbm/restore time=<T-1s> ns=mydb.orders` (selective — other collections untouched) |
+| Roll back to a specific backup | `pbm/restore backup_name=<name>` |
+| Storage migration: new MinIO endpoint/bucket | update internal config → `pbm/config` dry_run → confirm |
+| Retention: keep 30 days | `pbm/delete older_than=30d` dry_run → confirm |
+| Diagnose a failed backup | `pbm/logs event=backup/<name>` |
+| Hundreds of GB — backup/restore duration is the bottleneck | `pbm/backup type=physical` (restore needs a maintenance window — [takeover](#physical-restore)) |
+| Large data backed up often, without full re-uploads | `pbm/backup type=incremental` (first call auto-becomes the `--base`) |
 
 **1. First backup on a fresh deployment** (storage auto-ensures itself):
 
@@ -332,43 +363,21 @@ POST /tasks/pbm%2Fbackup
 {"namespace": "mongo-1"}
 ```
 
-**2. Scheduled daily backup** — recurrence lives in a CronJob, not the API:
+**2. Scheduled daily backup** — one call; aqsh owns the CronJob plumbing
+(see [Scheduling](#scheduling) for why PBM itself has no scheduler):
 
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: mongo-1-pbm-backup
-spec:
-  schedule: "0 3 * * *"          # change the cycle by patching this line
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          restartPolicy: Never
-          containers:
-            - name: submit
-              image: curlimages/curl:8.7.1
-              command:
-                - sh
-                - -c
-                - >
-                  curl -sf -X POST
-                  -H "Authorization: Bearer $(cat /var/run/secrets/tokens/aqsh-token)"
-                  -H "Content-Type: application/json"
-                  -d '{"namespace":"mongo-1","wait":"false"}'
-                  http://aqsh-mongodb.kind-a.test:30080/tasks/pbm%2Fbackup
-              volumeMounts:
-                - name: aqsh-token
-                  mountPath: /var/run/secrets/tokens
-          volumes:
-            - name: aqsh-token
-              projected:
-                sources:
-                  - serviceAccountToken:
-                      path: aqsh-token
-                      expirationSeconds: 600
+```json
+POST /tasks/pbm%2Fschedule
+{"namespace": "mongo-1", "schedule": "0 3 * * *"}
+→ review the dry-run diff, then:
+{"namespace": "mongo-1", "schedule": "0 3 * * *",
+ "dry_run": "false", "confirm": "true"}
 ```
+
+Change the cycle by calling again with a new `schedule`; pause with
+`{"enabled": "false"}`; delete with `{"remove": "true"}`. Environments
+that already run their own scheduler can keep POSTing `pbm/backup`
+directly — the API is stateless either way.
 
 **3. Enable minute-level PITR** (after at least one base backup):
 
@@ -529,6 +538,8 @@ optional — auto-detect/convention defaults cover the standard layout.
 | `PBM_S3_PREFIX_DEFAULT` | `mongodb/<namespace>` | Per-namespace object prefix |
 | `PBM_S3_ENDPOINT_DEFAULT` | `MINIO_ENDPOINT` | S3 endpoint URL |
 | `PBM_S3_REGION_DEFAULT` | `us-east-1` | S3 region |
+| `PBM_SCHEDULE_CRONJOB_DEFAULT` | `pbm-backup-schedule` | Name of the CronJob `pbm/schedule` manages (RBAC-pinned — `mongodb.scheduleCronjob` chart value) |
+| `PBM_SCHEDULE_AQSH_URL_DEFAULT` | `http://aqsh.mongo-core.svc.cluster.local:4180` | In-cluster aqsh URL scheduled runs submit to |
 | `LOG_LEVEL_DEFAULT` | `INFO` | Baseline task log verbosity (`log_level` input overrides per call) |
 
 ## RBAC Requirements
@@ -542,6 +553,7 @@ except one addition: `get` on the S3 credentials secret, pinned by name.
 | `statefulsets` get, **patch** *(existing, pinned)* | agent auto-detect; the physical-restore takeover patch/revert |
 | `pods` get/list/**delete** *(existing)* | probe-pod selection; takeover pod recreation |
 | `secrets` get pinned to **`minio`** *(new — `mongodb.backupSecret` chart value)* | rendering `pbm config` credentials, bucket pre-creation, storage-side restore progress |
+| `batch/cronjobs` get/patch/delete pinned to **`pbm-backup-schedule`** + namespace-wide create *(new — `mongodb.scheduleCronjob` chart value; create can't be pinned, same as configmaps)* | the `pbm/schedule` managed CronJob |
 
 The physical-restore takeover introduces **no new RBAC**: the patch/delete
 verbs were already granted for the recovery/* self-heal machinery.
@@ -568,8 +580,9 @@ The MongoDB credentials secret is *not* needed by these tasks.
   credentials in the `minio` secret with a scoped access key. For
   TLS-fronted object storage, note PBM's `insecureSkipTLSVerify` exists for
   lab use only — front production storage with a real certificate.
-- **Retention automation**: pair the backup CronJob with a
-  `pbm/delete older_than=30d` CronJob (dry-run it manually first).
+- **Retention automation**: `pbm/schedule` covers backups only — pair it
+  with your own recurring `pbm/delete older_than=30d` call (dry-run it
+  manually first).
 - **Physical restore = maintenance window**: rehearse the takeover restore
   in staging and time it — the whole cluster is down from step 4 to step 8
   of the [takeover flow](#physical-restore).

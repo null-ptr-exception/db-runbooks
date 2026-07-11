@@ -183,6 +183,68 @@ setup() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "BACKUP_NOT_FOUND"
 }
 
+@test "pbm/schedule input validation: remove is exclusive; enabled alone cannot create" {
+  run_pbm_task "schedule" \
+    "{\"namespace\":\"${SNS}\",\"remove\":\"true\",\"schedule\":\"0 2 * * *\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
+
+  run_pbm_task "schedule" "{\"namespace\":\"${SNS}\",\"enabled\":\"true\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
+}
+
+@test "pbm/schedule lifecycle: create fires a real scheduled backup, suspend, remove" {
+  local baseline
+  run_pbm_task "list" "{\"namespace\":\"${SNS}\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  baseline=$(echo "$RESULT_DATA" | jq -r '[.snapshots[]?] | length')
+
+  # dry-run previews the create
+  run_pbm_task "schedule" "{\"namespace\":\"${SNS}\",\"schedule\":\"*/1 * * * *\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.action')" "create"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.desired.schedule')" "*/1 * * * *"
+  # dry-run changed nothing
+  run kubectl --context "$CTX_A" -n "$SNS" get cronjob pbm-backup-schedule
+  assert_failure
+
+  # confirm creates the managed CronJob
+  run_pbm_task "schedule" \
+    "{\"namespace\":\"${SNS}\",\"schedule\":\"*/1 * * * *\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.applied')" "true"
+  local cj
+  cj=$(kubectl --context "$CTX_A" -n "$SNS" get cronjob pbm-backup-schedule -o json)
+  assert_equal "$(jq -r '.spec.schedule' <<< "$cj")" "*/1 * * * *"
+  assert_equal "$(jq -r '.spec.suspend // false' <<< "$cj")" "false"
+  assert_equal "$(jq -r '.metadata.annotations["pbm-schedule/backup-type"]' <<< "$cj")" "logical"
+
+  # a scheduled run must fire a REAL backup through the aqsh API
+  local elapsed=0 count
+  while (( elapsed < 240 )); do
+    run_pbm_task "list" "{\"namespace\":\"${SNS}\"}"
+    count=$(echo "$RESULT_DATA" | jq -r '[.snapshots[]?] | length')
+    (( count > baseline )) && break
+    sleep 15; elapsed=$((elapsed + 15))
+  done
+  echo "snapshots: baseline=${baseline} now=${count} after ${elapsed}s"
+  (( count > baseline ))
+
+  # suspend
+  run_pbm_task "schedule" \
+    "{\"namespace\":\"${SNS}\",\"enabled\":\"false\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(kubectl --context "$CTX_A" -n "$SNS" get cronjob pbm-backup-schedule -o jsonpath='{.spec.suspend}')" "true"
+
+  # remove
+  run_pbm_task "schedule" \
+    "{\"namespace\":\"${SNS}\",\"remove\":\"true\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  run kubectl --context "$CTX_A" -n "$SNS" get cronjob pbm-backup-schedule
+  assert_failure
+}
+
 @test "namespace without a pbm-agent sidecar fails NO_PBM_AGENT with actionable guidance" {
   # mongo-1 is the chart's plain mongo deployment — no sidecar, read-only use.
   run_pbm_task "status" '{"namespace":"mongo-1"}'

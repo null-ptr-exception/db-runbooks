@@ -46,6 +46,18 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get"]
+  # pbm/schedule's managed CronJob (docs/mongodb/pbm.md#scheduling) — same
+  # name PBM_SCHEDULE_CRONJOB_DEFAULT resolves; change them together.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: [{{ .Values.mongodb.scheduleCronjob | default "pbm-backup-schedule" | quote }}]
+    verbs: ["get", "patch", "delete"]
+  # create cannot be scoped by resourceNames (same reason as configmaps
+  # above) — namespace-wide by necessity, used only for the first
+  # pbm/schedule apply.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

@@ -781,3 +781,150 @@ pbm_cancel_backup() {
   printf '%s' "$out"
   return 0
 }
+
+# =============================================================================
+# Backup scheduling — PBM itself has NO built-in scheduler (Percona's own
+# docs: "We recommend using crond or similar services to schedule backup
+# snapshots"; the cron-in-CR scheduling people remember is the Percona
+# OPERATOR's feature, not PBM's). The pbm/schedule task manages the house
+# equivalent: one aqsh-owned Kubernetes CronJob per DB namespace that
+# periodically POSTs pbm/backup back into the aqsh API. Callers only ever
+# see a cron expression + backup type — never the CronJob plumbing.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_cronjob_name — internal config -> convention literal. Pinned
+# in RBAC (chart value mongodb.scheduleCronjob) — change them together.
+# ---------------------------------------------------------------------------
+pbm_schedule_cronjob_name() {
+  printf '%s' "${PBM_SCHEDULE_CRONJOB_DEFAULT:-pbm-backup-schedule}"
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_aqsh_url — where the scheduled job submits pbm/backup: the
+# in-cluster kube-auth-proxy service. Infra, so internal config only.
+# ---------------------------------------------------------------------------
+pbm_schedule_aqsh_url() {
+  printf '%s' "${PBM_SCHEDULE_AQSH_URL_DEFAULT:-http://aqsh.mongo-core.svc.cluster.local:4180}"
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_get_json <cronjob_name>
+# rc 1 = no schedule CronJob exists.
+# ---------------------------------------------------------------------------
+pbm_schedule_get_json() {
+  local name="${1:?}"
+  local out
+  out=$(_kubectl get cronjob "$name" -o json 2>/dev/null) || return 1
+  [[ -z "$out" ]] && return 1
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_summary <cronjob_json>
+# Compact caller-facing view of the managed CronJob.
+# ---------------------------------------------------------------------------
+pbm_schedule_summary() {
+  local cj_json="${1:?}"
+  printf '%s' "$cj_json" | jq -c '
+    {exists: true,
+     schedule: .spec.schedule,
+     suspended: (.spec.suspend // false),
+     backup_type: (.metadata.annotations["pbm-schedule/backup-type"] // "logical"),
+     last_schedule_time: (.status.lastScheduleTime // null),
+     last_successful_time: (.status.lastSuccessfulTime // null)}' 2>/dev/null \
+    || printf '{"exists":true}'
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_render <namespace> <cronjob_name> <cron> <type> <suspended>
+# The managed CronJob manifest: a curl pod with a short-lived projected
+# ServiceAccount token POSTs pbm/backup (wait=false — the fire-and-forget
+# contract; pbm/list is the follow-up) to the aqsh API. concurrencyPolicy
+# Forbid: PBM serializes backups anyway, stacking submissions helps nobody.
+# ---------------------------------------------------------------------------
+pbm_schedule_render() {
+  local namespace="${1:?}" name="${2:?}" cron="${3:?}" type="${4:?}" suspended="${5:?}"
+  local url
+  url=$(pbm_schedule_aqsh_url)
+  cat <<EOF
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ${name}
+  namespace: ${namespace}
+  annotations:
+    pbm-schedule/managed-by: "aqsh"
+    pbm-schedule/backup-type: "${type}"
+spec:
+  schedule: "${cron}"
+  suspend: ${suspended}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: submit
+              image: curlimages/curl:8.7.1
+              command: ["sh", "-c"]
+              args:
+                - >
+                  curl -sf -X POST
+                  -H "Authorization: Bearer \$(cat /var/run/secrets/tokens/aqsh-token)"
+                  -H "Content-Type: application/json"
+                  -d '{"namespace":"${namespace}","type":"${type}","wait":"false"}'
+                  "${url}/tasks/pbm%2Fbackup"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: {drop: ["ALL"]}
+              volumeMounts:
+                - name: aqsh-token
+                  mountPath: /var/run/secrets/tokens
+                  readOnly: true
+          volumes:
+            - name: aqsh-token
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      path: aqsh-token
+                      expirationSeconds: 600
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_apply <namespace> <cronjob_name> <cron> <type> <suspended>
+# Idempotent create-or-update via server-side apply of the rendered
+# manifest. rc 1 with raw output on failure.
+# ---------------------------------------------------------------------------
+pbm_schedule_apply() {
+  local namespace="${1:?}" name="${2:?}" cron="${3:?}" type="${4:?}" suspended="${5:?}"
+  local manifest out
+  manifest=$(pbm_schedule_render "$namespace" "$name" "$cron" "$type" "$suspended")
+  if ! out=$(printf '%s' "$manifest" | _kubectl apply -f - 2>&1); then
+    printf '%s' "$out"
+    return 1
+  fi
+  log_info "mongo-pbm" "schedule CronJob ${name} applied: schedule='${cron}' type=${type} suspended=${suspended}"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# pbm_schedule_delete <cronjob_name>
+# rc 1 with raw output on failure; deleting an absent CronJob is rc 0.
+# ---------------------------------------------------------------------------
+pbm_schedule_delete() {
+  local name="${1:?}"
+  local out
+  if ! out=$(_kubectl delete cronjob "$name" --ignore-not-found 2>&1); then
+    printf '%s' "$out"
+    return 1
+  fi
+  log_info "mongo-pbm" "schedule CronJob ${name} removed"
+  return 0
+}

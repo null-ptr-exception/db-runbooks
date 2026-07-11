@@ -1067,6 +1067,57 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pbm/schedule:
+    script: mongodb/pbm/schedule.sh
+    description: "Manage the recurring-backup schedule (dry_run -> confirm): PBM has no built-in scheduler, so aqsh owns one CronJob per namespace that submits pbm/backup on the given cron expression; enabled toggles suspend, remove deletes it"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: schedule
+        env: PBM_SCHEDULE_CRON
+        required: false
+        type: string
+        default: ""
+        # five whitespace-separated cron fields (digits and * , - /)
+        pattern: '^([0-9*,/-]+[ ]+[0-9*,/-]+[ ]+[0-9*,/-]+[ ]+[0-9*,/-]+[ ]+[0-9*,/-]+)?$'
+      - name: type
+        env: PBM_SCHEDULE_TYPE
+        required: false
+        type: string
+        default: ""
+        pattern: '^(logical|physical|incremental)?$'
+      - name: enabled
+        env: PBM_SCHEDULE_ENABLED
+        required: false
+        type: string
+        default: ""
+        pattern: '^(true|false)?$'
+      - name: remove
+        env: PBM_SCHEDULE_REMOVE
+        required: false
+        type: string
+        default: "false"
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   pbm/config:
     script: mongodb/pbm/config.sh
     description: "Storage config gateway (dry_run -> confirm): diff current PBM storage vs the deployment-resolved location; confirm applies it + force-resync (the sanctioned path for endpoint/bucket migrations)"

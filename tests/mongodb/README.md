@@ -24,7 +24,9 @@ and FCV.
   the artifact verified inside MinIO, list/describe, config in-sync no-op,
   drop → dry-run → confirm restore round trip, XOR/gate validation, delete
   dry-run/confirm, NO_PBM_AGENT error path, PSMDB_REQUIRED on the
-  community engine (`pbm.bats`, separate `mongo-pbm` namespace); PITR
+  community engine, and the pbm/schedule lifecycle — a managed CronJob
+  that fires a real scheduled backup through the aqsh API, then
+  suspend/remove (`pbm.bats`, separate `mongo-pbm` namespace); PITR
   lifecycle — NO_BASE_BACKUP guard, 1-minute oplog span, point-in-time
   restore keeping the pre-T1 marker and dropping the post-T1 one,
   PITR-disabled-after-restore contract, re-arm with a fresh base

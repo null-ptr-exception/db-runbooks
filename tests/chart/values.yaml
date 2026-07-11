@@ -80,6 +80,9 @@ mongodb:
   # access-key-id / secret-access-key — same shape the MariaDB operator flow
   # uses). Pairs with PBM_S3_CREDENTIALS_SECRET_DEFAULT in mongodb.env.
   backupSecret: minio
+  # The CronJob pbm/schedule manages in the DB namespace. Pairs with
+  # PBM_SCHEDULE_CRONJOB_DEFAULT in mongodb.env.
+  scheduleCronjob: pbm-backup-schedule
 
 # --- mongodb RBAC ---
 mongodbRbac:

@@ -1,9 +1,12 @@
 # MongoDB PBM Gateway (`pbm/*`)
 
-Percona Backup for MongoDB (PBM) task family: restorable **logical backups**,
-**selective backup/restore**, and **point-in-time recovery (PITR)** for
-replica-set deployments, driven entirely through the aqsh API. Supersedes the
-legacy `backup` task (mongodump tarball — kept but deprecated).
+Percona Backup for MongoDB (PBM) task family: restorable **logical,
+physical and incremental backups**, **selective (logical) backup/restore**,
+and **point-in-time recovery (PITR)** for replica-set deployments, driven
+entirely through the aqsh API. Physical restores run a **full-downtime
+StatefulSet takeover** orchestrated by the task itself — no operator
+required. Supersedes the legacy `backup` task (mongodump tarball — kept but
+deprecated).
 
 Deployment naming, the agent sidecar container, the storage location, and the
 S3 credentials are **not task inputs** (see CLAUDE.md "Configuration
@@ -19,28 +22,30 @@ per-call operational decisions.
 4. [How It Works](#how-it-works)
 5. [API Reference](#api-reference)
 6. [Usage Scenarios](#usage-scenarios)
-7. [Logical vs Physical (and why physical is refused)](#logical-vs-physical-and-why-physical-is-refused)
-8. [Deployment Settings (Internal Config)](#deployment-settings-internal-config)
-9. [RBAC Requirements](#rbac-requirements)
-10. [Production Hardening](#production-hardening)
-11. [Future Work](#future-work)
+7. [Choosing a Backup Type: Logical vs Physical/Incremental](#choosing-a-backup-type-logical-vs-physicalincremental)
+8. [Physical Restore: the Takeover](#physical-restore)
+9. [Deployment Settings (Internal Config)](#deployment-settings-internal-config)
+10. [RBAC Requirements](#rbac-requirements)
+11. [Production Hardening](#production-hardening)
+12. [Future Work](#future-work)
 
 ## When To Use What
 
 | Situation | Use |
 |---|---|
 | Routine restorable backup (scheduled or ad-hoc) | `pbm/backup` |
-| Minute-level RPO / continuous protection | `pbm/pitr enabled=true` (+ small `oplog_span_min`) |
+| Very large data sets — dump/insert too slow | `pbm/backup type=physical` (needs PSMDB, see [requirements](#deployment-requirements)) |
+| Large data + frequent backups without re-uploading everything | `pbm/backup type=incremental` (chain auto-anchors its `--base`) |
+| Minute-level RPO / continuous protection | `pbm/pitr enabled=true` (+ small `oplog_span_min`) — works on logical AND physical bases |
 | Bad write / accidental drop at time T | `pbm/restore time=<T-1s>` |
-| Bad data in one collection, good writes elsewhere continue | `pbm/restore time=<T-1s> ns=<db.coll>` (selective) |
-| Roll back to a known-good snapshot | `pbm/restore backup_name=<name>` |
-| What backups exist? Is PBM healthy? | `pbm/list`, `pbm/status` |
+| Bad data in one collection, good writes elsewhere continue | `pbm/restore time=<T-1s> ns=<db.coll>` (selective — logical bases only) |
+| Roll back to a known-good snapshot | `pbm/restore backup_name=<name>` (physical/incremental = **full-cluster downtime**, see [takeover](#physical-restore)) |
+| What backups exist? Is PBM healthy? Physical-ready? | `pbm/list`, `pbm/status` |
 | Why did a backup/restore fail? | `pbm/logs event=backup/<name>` |
-| Retention: drop artifacts older than N days | `pbm/delete older_than=<Nd>` |
+| Retention: drop artifacts older than N days | `pbm/delete older_than=<Nd>` (PBM protects live chains/PITR anchors) |
 | A backup is hammering the cluster right now | `pbm/cancel-backup` |
 | MinIO endpoint/bucket moved | update internal config → `pbm/config` (dry_run → confirm) |
 | One-off throwaway dump, no restore story needed | legacy `backup` (deprecated) |
-| Physical/incremental backup of very large data sets | Percona Operator deployment — out of scope here, see [below](#logical-vs-physical-and-why-physical-is-refused) |
 | A pod's data files are corrupt (no backup involved) | `recovery/*` (see docs/mongodb/recovery.md) |
 
 ## Deployment Requirements
@@ -60,6 +65,27 @@ A namespace without the sidecar fails every `pbm/*` task with
 `tests/mongodb/pbm_helpers.bash` (`_pbm_apply_fixture`) for a complete
 working StatefulSet example, including the retry wrapper that keeps the
 agent container from crash-looping before `rs.initiate`.
+
+**Physical/incremental backups add two more prerequisites** (both
+live-detected per call, never guessed):
+
+3. **The mongod engine must be Percona Server for MongoDB (PSMDB)** — the
+   `$backupCursor` aggregation physical backups are built on is a PSMDB
+   extension; vanilla MongoDB Community fails with `PSMDB_REQUIRED` (the
+   engine is read from `buildInfo`, which runs pre-auth, so aqsh stays
+   credential-free). PSMDB is a drop-in replacement image.
+4. **The agent sidecar must mount the data volume at the same path as
+   mongod** — `$backupCursor` returns absolute file paths the agent reads
+   straight off the volume. Missing mounts fail `AGENT_NO_DATA_VOLUME`
+   with the exact list; this is a deployment change, deliberately never
+   auto-patched by a backup task (it would restart every pod).
+
+Physical **restores** need no extra deployment wiring — the takeover
+injects everything it needs and removes it afterwards
+(see [Physical Restore](#physical-restore)); the mongod container must
+however declare an explicit `command` (`PHYSICAL_UNSUPPORTED_SPEC`
+otherwise), since the takeover supervisor reproduces its exact command
+line.
 
 ## Architecture: What Happens On This Deployment
 
@@ -176,24 +202,30 @@ is rejected.
 
 No further inputs. Returns agent health per node, storage state
 (`configured`, `in_sync` vs the resolved location, current + resolved
-locations), PITR state + covered chunk ranges, the running op, and a
-snapshot summary.
+locations), PITR state + covered chunk ranges, the running op, a snapshot
+summary, `physical_ready` (`engine` from live `buildInfo`, `psmdb` flag,
+`agent_data_volume`) and `physical_restore_in_progress` (a takeover
+annotation is on the StatefulSet).
 
 ### `pbm/backup`
 
 | Input | Required | Meaning |
 |---|---|---|
-| `type` | no (`logical`) | Only `logical` executes; `physical`/`incremental`/`external` fail `UNSUPPORTED_BACKUP_TYPE` with the rationale |
-| `ns` | no | Selective backup filter, e.g. `app.orders` or `app.*` (comma list allowed) |
+| `type` | no (`logical`) | `logical` \| `physical` \| `incremental` — the latter two gate on the live-detected PSMDB engine + agent data volume; `external` fails `UNSUPPORTED_BACKUP_TYPE` (snapshot tooling is infra-owned) |
+| `ns` | no | Selective backup filter, e.g. `app.orders` or `app.*` (comma list; **logical only** — PBM restriction) |
 | `wait` | no (`true`) | `false` = fire-and-forget; follow up via `pbm/list name=` |
 | `wait_timeout` | no (`1200`) | Poll budget in seconds |
 
-Ungated: a backup adds an artifact and mutates no database state. Failure
-codes: `UNSUPPORTED_BACKUP_TYPE`, `NO_PBM_AGENT`, `NO_READY_POD`,
+An incremental backup with no completed chain automatically becomes the
+`--base` (reported as `incremental_base: true` — no extra input). Ungated:
+a backup adds an artifact and mutates no database state. Failure codes:
+`UNSUPPORTED_BACKUP_TYPE`, `PSMDB_REQUIRED`, `AGENT_NO_DATA_VOLUME`,
+`PHYSICAL_UNSUPPORTED_SPEC`, `NO_PBM_AGENT`, `NO_READY_POD`,
 `STORAGE_CONFIG_MISMATCH`, `STORAGE_CONFIG_FAILED`, `BACKUP_START_FAILED`,
-`BACKUP_FAILED`, `WAIT_TIMEOUT`. Result includes `backup_name`, final
-`status`, `size_bytes`, the storage location, and a ready-to-send
-`restorable_by` block.
+`BACKUP_FAILED`, `WAIT_TIMEOUT`. Result includes `backup_name`, `type`,
+final `status`, `size_bytes`, the storage location, and a ready-to-send
+`restorable_by` block; non-logical results carry a `restore_note` naming
+the downtime cost.
 
 ### `pbm/list` — read-only
 
@@ -208,19 +240,25 @@ Failure codes: `BACKUP_NOT_FOUND`, `PBM_CLI_ERROR`.
 
 | Input | Required | Meaning |
 |---|---|---|
-| `backup_name` | XOR `time` | Snapshot restore |
-| `time` | XOR `backup_name` | PITR restore, `YYYY-MM-DDTHH:MM:SS` UTC, any second inside the covered window |
-| `ns` | no | Selective restore, e.g. `app.orders` — other collections untouched |
+| `backup_name` | XOR `time` | Snapshot restore — the flow follows the backup's own type: logical = online, physical/incremental = [takeover](#physical-restore) |
+| `time` | XOR `backup_name` | PITR restore, `YYYY-MM-DDTHH:MM:SS` UTC (no `Z` — PBM rejects it), any second inside the covered window; the newest done base at/before T is picked and pinned with `--base-snapshot` — a physical base runs the takeover |
+| `ns` | no | Selective restore, e.g. `app.orders` — other collections untouched (**logical bases only**) |
 | `wait_timeout` | no (`1500`) | Poll budget in seconds |
-| `dry_run` / `confirm` | triad | dry-run validates the target and previews side effects |
+| `dry_run` / `confirm` | triad | dry-run validates the target and previews side effects — for a physical flavor that includes `downtime: true`, the step `plan`, and any `takeover_leftover` warning |
 
-dry-run verifies the snapshot exists/`done`/logical, or that `time` falls in
-a covered chunk (`TIME_NOT_COVERED` otherwise), and reports whether PITR
-will be disabled. Confirm disables PITR when needed, restores, and returns
-`pitr_was_enabled` / `pitr_enabled_now:false` / `post_restore_required`.
+dry-run verifies the snapshot exists/`done`, or that `time` falls in a
+covered chunk (`TIME_NOT_COVERED` otherwise; note the first chunk after
+enabling PITR can take ~2 minutes to flush), and reports the resolved
+`restore_flavor` plus whether PITR will be disabled. Confirm disables PITR
+when needed, restores, and returns `pitr_was_enabled` /
+`pitr_enabled_now:false` / `post_restore_required`; physical results add
+`downtime: true`, `takeover_reverted` and `metadata_resynced`.
 Failure codes: `INVALID_INPUT`, `BACKUP_NOT_FOUND`, `BACKUP_NOT_RESTORABLE`,
 `UNSUPPORTED_BACKUP_TYPE`, `TIME_NOT_COVERED`, `PITR_DISABLE_FAILED`,
-`RESTORE_START_FAILED`, `RESTORE_FAILED`, `WAIT_TIMEOUT`.
+`PSMDB_REQUIRED`, `PHYSICAL_UNSUPPORTED_SPEC`, `TAKEOVER_PATCH_FAILED`,
+`TAKEOVER_PODS_NOT_READY`, `RESTORE_START_FAILED`, `RESTORE_FAILED`,
+`WAIT_TIMEOUT` (physical: takeover deliberately left in place),
+`REVERT_FAILED`, `POST_RESTORE_UNHEALTHY`.
 
 ### `pbm/delete` — gated
 
@@ -284,7 +322,8 @@ dry_run → confirm.
 | 搬家：換 MinIO endpoint/bucket | 改 internal config → `pbm/config` dry_run → confirm |
 | 清舊備份（保留 30 天） | `pbm/delete older_than=30d` dry_run → confirm |
 | 備份失敗查原因 | `pbm/logs event=backup/<name>` |
-| 資料量數百 GB、要 physical | 本環境拒絕 — 見 [Logical vs Physical](#logical-vs-physical-and-why-physical-is-refused) |
+| 資料量數百 GB、備份/還原時間是瓶頸 | `pbm/backup type=physical`（還原需維護窗口 — [takeover](#physical-restore)） |
+| 大資料量高頻備份、不想每次全量上傳 | `pbm/backup type=incremental`（首次自動成為 `--base`） |
 
 **1. First backup on a fresh deployment** (storage auto-ensures itself):
 
@@ -384,7 +423,29 @@ POST /tasks/pbm%2Flogs
 {"namespace": "mongo-1", "event": "backup/2026-07-10T03:00:12Z", "severity": "E"}
 ```
 
-**8. MinIO endpoint migration:**
+**8. Large data set — physical base + incremental chain + PITR:**
+
+```json
+POST /tasks/pbm%2Fbackup   {"namespace": "mongo-1", "type": "physical"}
+POST /tasks/pbm%2Fbackup   {"namespace": "mongo-1", "type": "incremental"}   ← auto --base on first call
+POST /tasks/pbm%2Fpitr     {"namespace": "mongo-1", "enabled": "true", ...}  ← chunks slice on top
+```
+
+Restore (full-cluster downtime — plan a maintenance window):
+
+```json
+POST /tasks/pbm%2Frestore
+{"namespace": "mongo-1", "backup_name": "2026-07-11T03:00:12Z"}
+→ dry-run shows restore_flavor=physical, downtime:true and the step plan;
+{"namespace": "mongo-1", "backup_name": "2026-07-11T03:00:12Z",
+ "dry_run": "false", "confirm": "true", "wait_timeout": "2400"}
+```
+
+A `time=` restore whose picked base is physical runs the same takeover and
+replays the oplog on top; the result names the base
+(`restored.base_snapshot` / `base_type`).
+
+**9. MinIO endpoint migration:**
 
 1. Update `PBM_S3_ENDPOINT_DEFAULT` (or `MINIO_ENDPOINT`) in the
    internal-config ConfigMap — propagates to the mounted file in ~1 minute,
@@ -393,24 +454,67 @@ POST /tasks/pbm%2Flogs
 3. `pbm/config` confirm → applies + force-resync; backups already under the
    new location become visible to `pbm/list`.
 
-## Logical vs Physical (and why physical is refused)
+## Choosing a Backup Type: Logical vs Physical/Incremental
 
-| | Logical | Physical |
-|---|---|---|
-| Mechanism | dump/insert over MongoDB connections | data-file copy |
-| Sweet spot | small–medium data (tens of GB) | very large data (100GB–TB): much faster, no index rebuild on restore |
-| Restore impact | mongod keeps running | **all mongod processes stop**, agents run a temporary mongod, then everything restarts with original config |
-| Selective (`ns`) | ✅ | ❌ |
-| PITR | ✅ | ✅ (restore still needs the stop/start dance) |
+| | Logical | Physical | Incremental |
+|---|---|---|---|
+| Mechanism | dump/insert over MongoDB connections | data-file copy via `$backupCursor` | physical, changed blocks only |
+| Engine | any | **PSMDB only** | **PSMDB only** |
+| Sweet spot | small–medium data (tens of GB) | very large data (100GB–TB): much faster, no index rebuild on restore | large data backed up often — tiny uploads after the base |
+| Backup impact | dump load on mongod | file streaming, cluster stays online | file streaming, cluster stays online |
+| Restore impact | mongod keeps running | **full-cluster downtime** ([takeover](#physical-restore)) | same — PBM reconstructs base + increments itself |
+| Selective (`ns`) | ✅ | ❌ | ❌ |
+| PITR | ✅ | ✅ (point-in-time restore also runs the takeover) | ✅ (ditto) |
 
-The stop/start dance is the blocker here: in a plain StatefulSet, mongod is
-the container's PID 1 — a sidecar can't stop it, and if the pod dies the
-kubelet restarts mongod with its *original* arguments, exactly what a
-physical restore must prevent. Something with Kubernetes API authority has
-to take over the StatefulSet during the restore; the Percona Operator is the
-off-the-shelf incarnation of that "something". This is an environment
-decision, not an API flag — hence `UNSUPPORTED_BACKUP_TYPE` instead of a
-backup that could never be restored where it was taken.
+Rule of thumb: start logical; switch the base to physical/incremental when
+backup or restore duration becomes the bottleneck — and budget the
+maintenance window physical restores need.
+
+## Physical Restore
+
+<a id="physical-restore"></a>PBM's physical restore protocol requires
+pbm-agent to stop mongod, replace the data files, and spawn temporary
+mongod processes (Percona's container guidance: PBM and mongod binaries in
+the same container). In a plain StatefulSet mongod is the container's
+PID 1: a sidecar can't stop it, and if it exits the kubelet restarts it
+with its *original* arguments — exactly what the restore must prevent. The
+Percona Operator solves this by taking over the StatefulSet; **this gateway
+does the same takeover itself**, with the annotation-tracked surgical
+patch/revert pattern the recovery library pioneered:
+
+```text
+pbm/restore (physical/incremental target, confirm=true)
+  1  disable PITR if enabled (shared contract)
+  2  snapshot the original shape → pbm-restore/original annotation
+  3  strategic-patch the StatefulSet into TAKEOVER mode:
+       • initContainer copies pbm/pbm-agent (static Go binaries) from the
+         agent sidecar's image into an emptyDir → /opt/pbm-bin
+       • mongod container command → supervisor: original mongod command
+         line as a background child + pbm-agent in a foreground retry loop
+         (agent can now stop/start mongod freely inside the container)
+       • PBM_MONGODB_URI env copied verbatim from the sidecar spec
+         (dependency closure of $(VAR) refs — read live, never guessed)
+       • probes removed; the normal agent sidecar parked on sleep
+  4  force-recreate all pods on the takeover template; wait agents ok
+  5  pbm restore <name>   (or --time T --base-snapshot <base>)
+  6  poll progress ON THE S3 STORAGE (describe-restore -c … — the
+     database is down; the config is piped via stdin, never on an argv)
+  7  surgical revert (original command/args/probes back, injected
+     env/volume/initContainer $patch:delete'd, annotations cleared)
+  8  force-recreate all pods → mongod boots on the RESTORED data
+  9  pbm config --force-resync  → result carries post_restore_required
+```
+
+Failure handling: every step before the restore starts rolls the takeover
+back automatically. A **wait timeout does NOT roll back** (agents may still
+be copying — reverting mid-flight would corrupt the restore): the takeover
+is left in place, `pbm/status` shows `physical_restore_in_progress: true`,
+and the next `pbm/restore` confirm reverts the leftover first — only do
+that after verifying the previous restore actually finished or died
+(`pbm/logs`). If the post-restore revert itself fails (`REVERT_FAILED`),
+the `pbm-restore/original` annotation still holds the original shape for a
+manual or retried revert — the restored data is already on disk at that
+point.
 
 ## Deployment Settings (Internal Config)
 
@@ -434,10 +538,13 @@ except one addition: `get` on the S3 credentials secret, pinned by name.
 
 | Permission | Used for |
 |---|---|
-| `pods/exec` create *(existing)* | running `pbm` inside the agent sidecar |
-| `statefulsets` get *(existing, pinned)* | agent auto-detect from the pod template |
-| `pods` get/list *(existing)* | probe-pod selection |
-| `secrets` get pinned to **`minio`** *(new — `mongodb.backupSecret` chart value)* | rendering `pbm config` credentials, bucket pre-creation |
+| `pods/exec` create *(existing)* | running `pbm` inside the agent sidecar / takeover container |
+| `statefulsets` get, **patch** *(existing, pinned)* | agent auto-detect; the physical-restore takeover patch/revert |
+| `pods` get/list/**delete** *(existing)* | probe-pod selection; takeover pod recreation |
+| `secrets` get pinned to **`minio`** *(new — `mongodb.backupSecret` chart value)* | rendering `pbm config` credentials, bucket pre-creation, storage-side restore progress |
+
+The physical-restore takeover introduces **no new RBAC**: the patch/delete
+verbs were already granted for the recovery/* self-heal machinery.
 
 The MongoDB credentials secret is *not* needed by these tasks.
 
@@ -448,15 +555,27 @@ The MongoDB credentials secret is *not* needed by these tasks.
   (`readWrite` on `admin.pbmRoles` etc. via a custom `pbmAnyAction` role)
   and wire its secret into the sidecar. The tasks are agnostic — they never
   see the URI.
+- **Percent-encode URI credentials**: when composing `PBM_MONGODB_URI` from
+  secret-backed env vars (`mongodb://$(USER):$(PASS)@localhost:27017`), a
+  password containing `@ : / %` breaks URI parsing — encode those characters
+  (`@` → `%40`, …) in the secret value or the composition. A field-tested
+  gotcha, not a theoretical one.
+- **keyFile hygiene** (auth-enabled replica sets): mongod rejects keyFiles
+  with stray whitespace or too-open permissions — copy from the Secret via
+  an initContainer with `chmod 400` under mongod's own runAsUser (see
+  `tests/mongodb/pbm_helpers.bash` for a working example).
 - **Per-deployment S3 credentials**: replace the sandbox's MinIO root
-  credentials in the `minio` secret with a scoped access key.
+  credentials in the `minio` secret with a scoped access key. For
+  TLS-fronted object storage, note PBM's `insecureSkipTLSVerify` exists for
+  lab use only — front production storage with a real certificate.
 - **Retention automation**: pair the backup CronJob with a
   `pbm/delete older_than=30d` CronJob (dry-run it manually first).
+- **Physical restore = maintenance window**: rehearse the takeover restore
+  in staging and time it — the whole cluster is down from step 4 to step 8
+  of the [takeover flow](#physical-restore).
 
 ## Future Work
 
-- **Physical/incremental backups** on operator-managed deployments, or
-  hand-rolled mongod lifecycle coordination reusing the recovery library's
-  StatefulSet patch/partition machinery (`aqsh-tasks/lib/mongodb-recovery.sh`)
-  — a separate feature with its own gating story.
+- **`external` backups** (storage-level snapshots coordinated by PBM) —
+  needs infra-owned snapshot tooling.
 - Restore-into-a-new-cluster (side-by-side) flows for surgical data salvage.

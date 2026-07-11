@@ -486,13 +486,16 @@ pbm_wait_agents_ready() {
 }
 
 # ---------------------------------------------------------------------------
-# pbm_start_backup <pod> <container> [ns_filter]
-# Start a logical backup; prints the backup name (a UTC timestamp). rc 1
-# with raw output on failure.
+# pbm_start_backup <pod> <container> <type> [ns_filter] [with_base]
+# Start a backup of the given type (logical|physical|incremental); prints
+# the backup name (a UTC timestamp). with_base="true" adds --base — the
+# anchor an incremental chain grows from. rc 1 with raw output on failure.
 # ---------------------------------------------------------------------------
 pbm_start_backup() {
-  local pod="${1:?}" container="${2:?}" ns_filter="${3:-}"
-  local args=(backup -t logical)
+  local pod="${1:?}" container="${2:?}" type="${3:?type is required}"
+  local ns_filter="${4:-}" with_base="${5:-false}"
+  local args=(backup -t "$type")
+  [[ "$with_base" == "true" ]] && args+=(--base)
   [[ -n "$ns_filter" ]] && args+=(--ns "$ns_filter")
   local out name
   if ! out=$(_pbm_exec_json "$pod" "$container" "${args[@]}"); then
@@ -504,7 +507,7 @@ pbm_start_backup() {
     printf '%s' "$out"
     return 1
   fi
-  log_info "mongo-pbm" "backup started: ${name}${ns_filter:+ (ns=${ns_filter})}"
+  log_info "mongo-pbm" "backup started: ${name} (type=${type}${with_base:+, base=${with_base}}${ns_filter:+, ns=${ns_filter}})"
   printf '%s' "$name"
 }
 

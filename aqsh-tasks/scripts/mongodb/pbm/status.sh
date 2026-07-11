@@ -26,6 +26,7 @@ source "${LIB_DIR}/mongodb.sh"
 source "${LIB_DIR}/mongodb-recovery.sh"
 source "${LIB_DIR}/mongodb-account.sh"
 source "${LIB_DIR}/mongodb-pbm.sh"
+source "${LIB_DIR}/mongodb-pbm-physical.sh"
 
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
@@ -53,6 +54,20 @@ _RUNNING=$(pbm_current_op "$_STATUS_JSON")
 _PITR_ENABLED=false
 pbm_pitr_enabled "$_STATUS_JSON" && _PITR_ENABLED=true
 
+# Physical-readiness report (every probe fails SOFT — status stays
+# read-only and must never fail because a prerequisite is absent).
+_ENGINE="unknown"
+_AGENT_VOLUME=false
+_TAKEOVER_LEFTOVER=false
+if _STS_JSON=$(_pbm_phys_get_sts_json "$PBM_STS"); then
+  if _MONGOD_C=$(pbm_phys_detect_mongod_container "$_STS_JSON" "$PBM_AGENT_CONTAINER"); then
+    _ENGINE=$(pbm_phys_detect_engine "$PBM_POD" "$_MONGOD_C") || _ENGINE="unknown"
+    pbm_phys_agent_volume_ok "$_STS_JSON" "$PBM_AGENT_CONTAINER" "$_MONGOD_C" >/dev/null && _AGENT_VOLUME=true
+  fi
+  pbm_phys_in_progress "$_STS_JSON" && _TAKEOVER_LEFTOVER=true
+fi
+log_debug "pbm-status" "physical readiness: engine=${_ENGINE} agent_data_volume=${_AGENT_VOLUME} takeover_leftover=${_TAKEOVER_LEFTOVER}"
+
 log_info "pbm-status" "storage configured=${_CONFIGURED} pitr=${_PITR_ENABLED} running_op=$(jq -r 'if .==null then "none" else (.type // "unknown") end' <<< "$_RUNNING")"
 
 jq -n \
@@ -66,7 +81,12 @@ jq -n \
   --arg endpoint "$PBM_ENDPOINT" --arg bucket "$PBM_BUCKET" --arg prefix "$PBM_PREFIX" \
   --argjson pitr_enabled "$_PITR_ENABLED" \
   --argjson running "$_RUNNING" \
+  --arg engine "$_ENGINE" \
+  --argjson agent_volume "$_AGENT_VOLUME" \
+  --argjson takeover_leftover "$_TAKEOVER_LEFTOVER" \
   '{namespace: $namespace, sts: $sts, agent_container: $agent_container,
+    physical_ready: {engine: $engine, psmdb: ($engine | startswith("psmdb:")), agent_data_volume: $agent_volume},
+    physical_restore_in_progress: $takeover_leftover,
     agents: ($status.cluster // []),
     storage: {
       configured: $configured,

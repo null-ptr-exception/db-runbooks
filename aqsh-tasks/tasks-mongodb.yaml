@@ -782,8 +782,9 @@ tasks:
         required: false
         type: string
         default: "false"
-  # PBM gateway — Percona Backup for MongoDB, logical + PITR only (see
-  # docs/mongodb/pbm.md). Deployment-naming fields (sts_name, agent
+  # PBM gateway — Percona Backup for MongoDB: logical/physical/incremental
+  # backups + PITR; physical restore runs a full-downtime StatefulSet
+  # takeover (see docs/mongodb/pbm.md). Deployment-naming fields (sts_name, agent
   # container, storage location, S3 credentials) are deliberately NOT task
   # inputs — same auto-detect tier as recovery/* (CLAUDE.md "Configuration
   # Layers"). log_level IS a task input: per-call debug verbosity is a
@@ -807,7 +808,7 @@ tasks:
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   pbm/backup:
     script: mongodb/pbm/backup.sh
-    description: "Start a PBM logical backup (storage auto-ensured on first use) and wait for completion; physical/incremental are rejected with the reason"
+    description: "Start a PBM backup (logical | physical | incremental — the latter two need PSMDB + a data-volume-sharing agent, live-checked) and wait for completion; storage auto-ensured on first use"
     timeout: 25m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -878,8 +879,8 @@ tasks:
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   pbm/restore:
     script: mongodb/pbm/restore.sh
-    description: "Logical restore from a snapshot (backup_name) or to a point in time (time), dry_run -> confirm; PITR is disabled for the restore and stays off until a fresh base backup"
-    timeout: 30m
+    description: "Restore from a snapshot (backup_name) or to a point in time (time), dry_run -> confirm; logical runs online, physical/incremental take the FULL CLUSTER OFFLINE via a StatefulSet takeover; PITR is disabled for the restore and stays off until a fresh base backup"
+    timeout: 45m
     allowed_groups: ["system:serviceaccounts"]
     input:
       - name: namespace

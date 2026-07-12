@@ -192,6 +192,40 @@ tasks:
         required: false
         type: string
         default: "true"
+  get-db-env:
+    script: mariadb/migration/get-db-env.sh
+    description: "Read named environment variable values from a MariaDB pod"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: envs
+        env: ENVS_STR
+        required: true
+        type: string
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"
@@ -669,6 +703,169 @@ tasks:
         required: false
         type: string
         default: 5m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  migration-preflight:
+    script: mariadb/migration/migration-preflight.sh
+    description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: false
+        type: string
+        default: ""
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: ""
+  check-connection:
+    script: mariadb/migration/check-connection.sh
+    description: "Check if a MariaDB pod can connect to a given host IP using root credentials"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: ip
+        env: TARGET_IP
+        required: true
+        type: string
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: port
+        env: TARGET_PORT
+        required: false
+        type: string
+        default: "3306"
+  setup-replication:
+    script: mariadb/migration/setup-replication.sh
+    description: "Configure a MariaDB GTID replication channel using root credentials"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: host
+        env: REPL_HOST
+        required: true
+        type: string
+      - name: channel
+        env: REPL_CHANNEL
+        required: false
+        type: string
+        default: ""
+      - name: port
+        env: REPL_PORT
+        required: false
+        type: string
+        default: "3306"
+      - name: delay
+        env: REPL_DELAY
+        required: false
+        type: string
+        default: ""
+      - name: async
+        env: REPL_ASYNC
+        required: false
+        type: string
+        default: "false"
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      - name: repl_password_secret
+        env: REPL_PASSWORD_SECRET
+        required: false
+        type: string
+        default: ""
+      - name: repl_password_key
+        env: REPL_PASSWORD_KEY
+        required: false
+        type: string
+        default: password
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
       - name: confirm
         env: CONFIRM
         required: false

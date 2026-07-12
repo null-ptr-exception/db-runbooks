@@ -6,8 +6,10 @@ set -euo pipefail
 # aqsh task: remove backup artifacts, gated dry_run -> confirm. Two modes,
 # mutually exclusive: backup_name (single snapshot, pbm delete-backup) or
 # older_than (retention sweep of snapshots + PITR chunks, pbm cleanup).
-# dry-run lists exactly what would go; PBM itself still refuses deletions
-# that would break a PITR chain — that refusal is surfaced verbatim.
+# dry-run lists exactly what would go. Two PBM semantics surface here:
+# deleting an incremental BASE cascades to its whole chain (chains are
+# only ever removed as a whole), and deletions PBM refuses (e.g. the
+# snapshot anchoring live PITR coverage) are surfaced verbatim.
 # See docs/mongodb/pbm.md.
 #
 # Inputs (injected from tasks.yaml):
@@ -82,7 +84,8 @@ if bool_enabled "$DRY_RUN"; then
     '{dry_run: true, namespace: $namespace, sts: $sts,
       mode: (if $backup_name != "" then "single" else "retention" end),
       would_delete: $preview}
-     + (if $older_than == "" then {} else {older_than: $older_than, note: "pbm cleanup also trims PITR oplog chunks before the cutoff; PBM refuses removals that would break a restorable chain"} end)' \
+     + (if $older_than == "" then {} else {older_than: $older_than, note: "pbm cleanup also trims PITR oplog chunks before the cutoff"} end)
+     + (if ($preview | any(.type == "incremental")) then {note: "deleting an incremental base cascades to every increment built on it — the chain is only ever removed as a whole"} else {} end)' \
     > "$AQSH_RESULT_FILE"
   exit 0
 fi

@@ -97,6 +97,9 @@ run_pbm_task() {
   wait_for_task_any "$AQSH_URL" "$task_id" "$max_wait" || return 1
   RESULT_DATA=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   export RESULT_DATA
+  # Free diagnostics: bats prints captured output only when a test fails,
+  # so every failed assertion carries the task's actual result with it.
+  echo "pbm/${endpoint} -> ${TASK_STATUS}: ${RESULT_DATA:0:1500}"
 }
 
 # ---------------------------------------------------------------------------

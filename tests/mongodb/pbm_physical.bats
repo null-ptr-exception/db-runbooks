@@ -116,17 +116,6 @@ _assert_sts_reverted() {
     '[.snapshots[] | select(.type == "incremental" and .status == "done")] | length >= 2'
 }
 
-@test "pbm/delete refuses to remove the incremental base while the chain depends on it" {
-  local base
-  base=$(cat "${BATS_FILE_TMPDIR}/incr_base")
-  run_pbm_task "delete" \
-    "{\"namespace\":\"${SNS}\",\"backup_name\":\"${base}\",\"dry_run\":\"false\",\"confirm\":\"true\"}" 600
-  assert_equal "$TASK_STATUS" "failed"
-  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "DELETE_FAILED"
-  # PBM's own refusal must be surfaced verbatim
-  [[ -n "$(echo "$RESULT_DATA" | jq -r '.details.raw_output')" ]]
-}
-
 @test "physical restore round trip: takeover, full-cluster restore, surgical revert" {
   local base
   base=$(cat "${BATS_FILE_TMPDIR}/phys_base")
@@ -175,6 +164,28 @@ _assert_sts_reverted() {
   assert_equal "$(_count orders)" "3"
   assert_equal "$(_count incr)" "2"
   _assert_sts_reverted
+}
+
+@test "deleting the incremental base cascades to the whole chain (documented PBM semantics)" {
+  local base tip
+  base=$(cat "${BATS_FILE_TMPDIR}/incr_base")
+  tip=$(cat "${BATS_FILE_TMPDIR}/incr_tip")
+
+  run_pbm_task "delete" "{\"namespace\":\"${SNS}\",\"backup_name\":\"${base}\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.dry_run')" "true"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.would_delete[0].name')" "$base"
+
+  run_pbm_task "delete" \
+    "{\"namespace\":\"${SNS}\",\"backup_name\":\"${base}\",\"dry_run\":\"false\",\"confirm\":\"true\"}" 600
+  assert_equal "$TASK_STATUS" "completed"
+
+  # PBM removes the base AND every increment built on it — the chain is
+  # only ever deleted as a whole.
+  run_pbm_task "list" "{\"namespace\":\"${SNS}\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  echo "$RESULT_DATA" | jq -e --arg b "$base" --arg t "$tip" \
+    '[.snapshots[]? | select(.name == $b or .name == $t)] | length == 0'
 }
 
 @test "PITR on a physical base: point-in-time takeover restore keeps A, drops B" {

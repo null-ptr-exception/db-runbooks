@@ -179,8 +179,8 @@ if bool_enabled "$DRY_RUN"; then
     --argjson target "$_TARGET_DESC" \
     '{dry_run: true, namespace: $namespace, sts: $sts,
       restore_flavor: $flavor,
-      would_restore: (if $backup_name != "" then {mode: "snapshot", backup_name: $backup_name} else {mode: "pitr", time: $time, base_snapshot: $base_name, base_type: $base_type} end)
-        + (if $ns_filter == "" then {} else {ns_filter: $ns_filter} end),
+      would_restore: ((if $backup_name != "" then {mode: "snapshot", backup_name: $backup_name} else {mode: "pitr", time: $time, base_snapshot: $base_name, base_type: $base_type} end)
+        + (if $ns_filter == "" then {} else {ns_filter: $ns_filter} end)),
       target_backup: $target,
       pitr_enabled: $pitr_enabled,
       pitr_will_be_disabled: $pitr_enabled,
@@ -249,8 +249,8 @@ if [[ "$_FLAVOR" == "logical" ]]; then
     --argjson final "$_FINAL" \
     '{namespace: $namespace, sts: $sts, status: "done", restore_flavor: "logical",
       restore_name: $restore_name,
-      restored: (if $backup_name != "" then {mode: "snapshot", backup_name: $backup_name} else {mode: "pitr", time: $time} end)
-        + (if $ns_filter == "" then {} else {ns_filter: $ns_filter} end),
+      restored: ((if $backup_name != "" then {mode: "snapshot", backup_name: $backup_name} else {mode: "pitr", time: $time} end)
+        + (if $ns_filter == "" then {} else {ns_filter: $ns_filter} end)),
       detail: $final,
       pitr_was_enabled: $pitr_was_enabled,
       pitr_enabled_now: false,

@@ -43,7 +43,7 @@ per-call operational decisions.
 | Roll back to a known-good snapshot | `pbm/restore backup_name=<name>` (physical/incremental = **full-cluster downtime**, see [takeover](#physical-restore)) |
 | What backups exist? Is PBM healthy? Physical-ready? | `pbm/list`, `pbm/status` |
 | Why did a backup/restore fail? | `pbm/logs event=backup/<name>` |
-| Retention: drop artifacts older than N days | `pbm/delete older_than=<Nd>` (PBM protects live chains/PITR anchors) |
+| Retention: drop artifacts older than N days | `pbm/delete older_than=<Nd>` (an incremental base cascades to its whole chain; PITR anchors are refused) |
 | A backup is hammering the cluster right now | `pbm/cancel-backup` |
 | MinIO endpoint/bucket moved | update internal config → `pbm/config` (dry_run → confirm) |
 | One-off throwaway dump, no restore story needed | legacy `backup` (deprecated) |
@@ -292,10 +292,12 @@ Failure codes: `INVALID_INPUT`, `BACKUP_NOT_FOUND`, `BACKUP_NOT_RESTORABLE`,
 | `older_than` | XOR `backup_name` | Retention sweep: `30d` or a UTC timestamp (`pbm cleanup`, also trims PITR chunks) |
 | `dry_run` / `confirm` | triad | dry-run lists exactly what would be removed |
 
-PBM refuses removals that would break a restorable chain (e.g. the base
-snapshot anchoring live PITR); that refusal surfaces verbatim in
-`DELETE_FAILED`/`CLEANUP_FAILED`. Other codes: `INVALID_INPUT`,
-`BACKUP_NOT_FOUND`.
+Two PBM semantics to know (both CI-verified): deleting an **incremental
+base cascades** to every increment built on it — chains are only ever
+removed as a whole (the dry-run notes this when the preview contains
+incrementals); and deletions PBM refuses (e.g. the snapshot anchoring live
+PITR coverage) surface verbatim in `DELETE_FAILED`/`CLEANUP_FAILED`.
+Other codes: `INVALID_INPUT`, `BACKUP_NOT_FOUND`.
 
 ### `pbm/pitr` — gated
 

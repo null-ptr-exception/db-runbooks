@@ -192,7 +192,7 @@ tasks:
         required: false
         type: string
         default: "true"
-  get-db-env:
+  migration/get-db-env:
     script: mariadb/migration/get-db-env.sh
     description: "Read named environment variable values from a MariaDB pod"
     timeout: 2m
@@ -208,20 +208,20 @@ tasks:
         required: false
         type: string
         default: ""
-      - name: resource
-        env: MARIADB_RESOURCE
-        required: false
-        type: string
-        default: mariadb
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: mdb
         env: MARIADB_NAME
         required: false
         type: string
-      - name: container
-        env: MARIADB_CONTAINER
-        required: false
-        type: string
-        default: mariadb
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: envs
         env: ENVS_STR
         required: true
@@ -708,7 +708,7 @@ tasks:
         required: false
         type: string
         default: "false"
-  migration-preflight:
+  migration/preflight:
     script: mariadb/migration/migration-preflight.sh
     description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"
     timeout: 3m
@@ -758,7 +758,7 @@ tasks:
         required: false
         type: string
         default: ""
-  check-connection:
+  migration/check-connection:
     script: mariadb/migration/check-connection.sh
     description: "Check if a MariaDB pod can connect to a given host IP using root credentials"
     timeout: 2m
@@ -778,26 +778,26 @@ tasks:
         required: false
         type: string
         default: ""
-      - name: resource
-        env: MARIADB_RESOURCE
-        required: false
-        type: string
-        default: mariadb
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: mdb
         env: MARIADB_NAME
         required: false
         type: string
-      - name: container
-        env: MARIADB_CONTAINER
-        required: false
-        type: string
-        default: mariadb
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: port
         env: TARGET_PORT
         required: false
         type: string
         default: "3306"
-  setup-replication:
+  migration/setup-replication:
     script: mariadb/migration/setup-replication.sh
     description: "Configure a MariaDB GTID replication channel using root credentials"
     timeout: 5m
@@ -837,20 +837,20 @@ tasks:
         required: false
         type: string
         default: ""
-      - name: resource
-        env: MARIADB_RESOURCE
-        required: false
-        type: string
-        default: mariadb
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: mdb
         env: MARIADB_NAME
         required: false
         type: string
-      - name: container
-        env: MARIADB_CONTAINER
-        required: false
-        type: string
-        default: mariadb
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
       - name: repl_password_secret
         env: REPL_PASSWORD_SECRET
         required: false
@@ -866,6 +866,153 @@ tasks:
         required: false
         type: string
         default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  migration/restore:
+    script: mariadb/migration/restore.sh
+    description: "Restore a MariaDB instance from a specific physical backup at a caller-specified MinIO endpoint. backup_file is the S3 prefix path to the exact backup directory (sets bootstrapFrom.s3.prefix directly). Fails clearly if the backup cannot be found in MinIO before applying anything. The minio_secret_key is written to a temporary Kubernetes Secret and never logged or returned. image and storage_size are auto-detected from any existing instance in the namespace; required inputs for a fresh migration-destination namespace."
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # backup_file is the S3 prefix path to the exact backup directory, e.g.
+      # mariadb/source-ns/mariadb-migration-20260712143022. Used directly as
+      # bootstrapFrom.s3.prefix — the operator restores that specific backup.
+      - name: backup_file
+        env: BACKUP_FILE
+        required: true
+        type: string
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: true
+        type: string
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: true
+        type: string
+      # minio_secret_key is sensitive: the script writes it to a temporary
+      # Kubernetes Secret and unsets the env var before any CR is applied.
+      # The raw value never appears in logs or the result JSON.
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: true
+        type: string
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: true
+        type: string
+      # image and storage_size: auto-detected from the namespace's existing
+      # MariaDB CR when omitted. Required for a fresh destination namespace.
+      - name: image
+        env: RESTORE_IMAGE
+        required: false
+        type: string
+        default: ""
+      - name: storage_size
+        env: STORAGE_SIZE
+        required: false
+        type: string
+        default: ""
+      - name: target
+        env: RESTORE_TARGET
+        required: false
+        type: string
+        default: ""
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # wait_timeout doubles as the wait switch: "0" returns without waiting,
+      # any positive duration (e.g. 10m) waits up to that long for Ready.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  migration/sourcedb-backup:
+    script: mariadb/migration/sourcedb-backup.sh
+    description: "Physical (mariabackup) backup of a migration source MariaDB to a caller-specified external MinIO endpoint. Unlike physical-backup, all MinIO params are explicit task inputs. The minio_secret_key is written immediately to a temporary Kubernetes Secret and never logged or returned in the result."
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: true
+        type: string
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: true
+        type: string
+      # minio_secret_key is sensitive: the script writes it to a temporary
+      # Kubernetes Secret immediately and unsets the env var before any backup
+      # CR is applied. The raw value never appears in logs or the result JSON.
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: true
+        type: string
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: true
+        type: string
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: target
+        env: BACKUP_TARGET
+        required: false
+        type: string
+        default: PreferReplica
+      - name: compression
+        env: BACKUP_COMPRESSION
+        required: false
+        type: string
+        default: bzip2
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      - name: backup_name
+        env: BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # wait_timeout doubles as the wait switch: "0" returns without waiting,
+      # any positive duration (e.g. 10m) waits up to that long for Complete.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
       - name: confirm
         env: CONFIRM
         required: false

@@ -192,40 +192,6 @@ tasks:
         required: false
         type: string
         default: "true"
-  migration/get-db-env:
-    script: mariadb/migration/get-db-env.sh
-    description: "Read named environment variable values from a MariaDB pod"
-    timeout: 2m
-    allowed_groups: ["system:serviceaccounts"]
-    input:
-      - name: namespace
-        env: DB_NAMESPACE
-        required: true
-        type: string
-        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
-      # - name: resource
-      #   env: MARIADB_RESOURCE
-      #   required: false
-      #   type: string
-      #   default: mariadb
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      # - name: container
-      #   env: MARIADB_CONTAINER
-      #   required: false
-      #   type: string
-      #   default: mariadb
-      - name: envs
-        env: ENVS_STR
-        required: true
-        type: string
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"
@@ -708,6 +674,40 @@ tasks:
         required: false
         type: string
         default: "false"
+  migration/get-db-env:
+    script: mariadb/migration/get-db-env.sh
+    description: "Read named environment variable values from a MariaDB pod"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: context
+        env: K8S_CONTEXT
+        required: false
+        type: string
+        default: ""
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      - name: envs
+        env: ENVS_STR
+        required: true
+        type: string
   migration/preflight:
     script: mariadb/migration/migration-preflight.sh
     description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"

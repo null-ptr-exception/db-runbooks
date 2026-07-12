@@ -491,6 +491,33 @@ Rule of thumb: start logical; switch the base to physical/incremental when
 backup or restore duration becomes the bottleneck — and budget the
 maintenance window physical restores need.
 
+### Engine capability matrix: official `mongo` vs `percona/percona-server-mongodb`
+
+The engine is detected live per call (`buildInfo`, pre-auth) — nothing here
+is guessed from the image name. Both engines still need the pbm-agent
+sidecar (`NO_PBM_AGENT` otherwise); PSMDB is a drop-in replacement image,
+so switching engines is a rolling image change, not a migration.
+
+| Capability | Official `mongo` (Community) | `percona/percona-server-mongodb` (PSMDB) |
+|---|---|---|
+| `pbm/backup type=logical` | ✅ | ✅ |
+| Selective logical backup/restore (`ns`) | ✅ | ✅ |
+| Logical restore (online, no downtime) | ✅ | ✅ |
+| PITR slicing (`pbm/pitr enabled=true`) | ✅ (oplog chunks are logical) | ✅ |
+| PITR restore on a **logical** base | ✅ | ✅ |
+| `pbm/backup type=physical` | ❌ `PSMDB_REQUIRED` — `$backupCursor` is a PSMDB extension | ✅ (also needs the agent data-volume mount — `AGENT_NO_DATA_VOLUME` otherwise) |
+| `pbm/backup type=incremental` | ❌ `PSMDB_REQUIRED` (physical-family) | ✅ (first call auto-becomes the `--base`) |
+| Physical/incremental restore ([takeover](#physical-restore)) | ❌ — no such backups can exist here, and the engine gate refuses restoring one taken elsewhere | ✅ full-cluster-downtime takeover |
+| PITR restore on a **physical** base | ❌ | ✅ (takeover + oplog replay) |
+| `pbm/schedule` with `type=logical` | ✅ | ✅ |
+| `pbm/schedule` with `type=physical`/`incremental` | ⚠️ schedule is accepted, but **every scheduled run fails** `PSMDB_REQUIRED` (the gate re-runs per backup) | ✅ |
+| `pbm/status` / `list` / `logs` / `delete` / `config` / `cancel-backup` | ✅ | ✅ |
+
+In short: on the official image the **entire logical + PITR feature set
+works**; everything in the physical family needs PSMDB. `pbm/status`'s
+`physical_ready` block tells you which side of this table a live
+deployment is on.
+
 ## Physical Restore
 
 <a id="physical-restore"></a>PBM's physical restore protocol requires

@@ -24,16 +24,36 @@ BG_CONFIRM="${CONFIRM:-false}"
 # bg_require_bluegreen_capable [op]
 # Blue/green is built on the current-generation operator's ExternalMariaDB +
 # multiCluster + physical bootstrapFrom, NONE of which exist on the legacy
-# mmontes-era operator. Gate on the ExternalMariaDB CRD (the blue/green-specific,
-# current-generation-only kind) so a legacy cluster gets a clear "upgrade the
-# operator" message instead of a cryptic `no matches for kind "ExternalMariaDB"`
-# partway through bootstrap. Fails soft-detection's way: only blocks when the CRD
-# is confidently absent.
+# mmontes-era operator. Gate on the capabilities and on a confident operator
+# profile so API discovery errors cannot be misreported as a legacy upgrade.
 bg_require_bluegreen_capable() {
   local op="${1:-blue-green}"
-  mdb_has_crd externalmariadbs && return 0
-  bg_fail "$op" "blue-green requires the k8s.mariadb.com generation operator (ExternalMariaDB + multiCluster); this cluster's operator (group $(mdb_operator_group)) has no ExternalMariaDB CRD — upgrade the operator to use blue-green" \
-    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, required: ["externalmariadbs CRD", "multiCluster", "physical bootstrapFrom"]}')" 2
+  local confident_rc=0 ext_rc=0 physical_rc=0
+  mdb_operator_group_is_confident || confident_rc=$?
+  if [[ "$confident_rc" -eq 2 ]]; then
+    bg_fail "$op" "could not determine the mariadb-operator generation; refusing to run blue-green until Kubernetes API discovery is available" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, discovery: "unknown"}')" 2
+  fi
+  if [[ "$confident_rc" -ne 0 ]]; then
+    bg_fail "$op" "mariadb-operator generation is ambiguous; set MARIADB_OPERATOR_GROUP_DEFAULT before running blue-green" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, discovery: "ambiguous"}')" 2
+  fi
+
+  mdb_crd_status externalmariadbs || ext_rc=$?
+  mdb_crd_status physicalbackups || physical_rc=$?
+  if [[ "$ext_rc" -eq 2 || "$physical_rc" -eq 2 ]]; then
+    bg_fail "$op" "could not verify blue-green capabilities for mariadb-operator group $(mdb_operator_group); Kubernetes API discovery failed" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, discovery: "unknown", required: ["externalmariadbs CRD", "physicalbackups CRD", "multiCluster", "physical bootstrapFrom"]}')" 2
+  fi
+  if [[ "$(mdb_operator_group)" == "k8s.mariadb.com" && "$ext_rc" -eq 0 && "$physical_rc" -eq 0 ]]; then
+    return 0
+  fi
+  if mdb_is_legacy_operator; then
+    bg_fail "$op" "blue-green requires the k8s.mariadb.com generation operator (ExternalMariaDB + multiCluster); this cluster's operator (group $(mdb_operator_group)) has no ExternalMariaDB CRD — upgrade the operator to use blue-green" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, required: ["externalmariadbs CRD", "multiCluster", "physical bootstrapFrom"]}')" 2
+  fi
+  bg_fail "$op" "blue-green capabilities are incomplete for mariadb-operator group $(mdb_operator_group); install the ExternalMariaDB and PhysicalBackup CRDs" \
+    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, required: ["externalmariadbs CRD", "physicalbackups CRD", "multiCluster", "physical bootstrapFrom"]}')" 2
 }
 
 bg_init_target() {
@@ -43,7 +63,7 @@ bg_init_target() {
   mariadb_set_target "$BG_CONTEXT" "$BG_NAMESPACE" "$BG_RESOURCE" "$BG_MDB" "$BG_CONTAINER"
   # Every blue/green entry point routes through here, so this single gate covers
   # them all (create, bootstrap-green, switchover, status, …).
-  bg_require_bluegreen_capable
+  bg_require_bluegreen_capable "blue-green"
 }
 
 # --- Generic task helpers ---------------------------------------------------

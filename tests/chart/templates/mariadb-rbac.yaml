@@ -33,7 +33,7 @@ rules:
     resources: ["secrets"]
     # patch: tag the managed account password Secret with an owner annotation
     # (create-account collision guard).
-    verbs: ["get", "create", "patch"]
+    verbs: ["get", "create", "patch", "delete"]
   - apiGroups: [{{ .Values.mariadb.operatorGroup | quote }}, "mariadb.mmontes.io"]
     resources: ["mariadbs"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]

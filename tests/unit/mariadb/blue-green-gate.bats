@@ -20,9 +20,13 @@ setup() {
 #!/usr/bin/env bash
 args="$*"
 case "$args" in
-  *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n'; exit 0 ;;   # group detect
-  *externalmariadbs*) [[ "${MOCK_HAS_EXT:-1}" == "1" ]] && exit 0 || exit 1 ;;
-  *" crd "*|*"get crd "*) exit 0 ;;
+  *api-resources*)
+    if [[ "${MOCK_HAS_EXT:-1}" == "1" ]]; then
+      printf '%s\n' mariadbs.k8s.mariadb.com externalmariadbs.k8s.mariadb.com physicalbackups.k8s.mariadb.com
+    else
+      printf '%s\n' mariadbs.mariadb.mmontes.io backups.mariadb.mmontes.io restores.mariadb.mmontes.io
+    fi
+    exit 0 ;;
   *) exit 0 ;;
 esac
 MOCK

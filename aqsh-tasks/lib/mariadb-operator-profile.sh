@@ -45,14 +45,24 @@ MDB_OPERATOR_VERSION="${MDB_OPERATOR_VERSION:-v1alpha1}"
 # Tier-3 hardcoded fallback: the current generation's group.
 _MDB_OPERATOR_GROUP_FALLBACK="k8s.mariadb.com"
 
+# _mdb_discover_operator_groups
+# Print every group serving the MariaDB kind. Unlike the tiered resolver below,
+# this preserves API discovery failures so mutating capability routes can fail
+# closed rather than confusing "unknown" with "CRD absent".
+_mdb_discover_operator_groups() {
+  local resources
+  resources="$(_kubectl_global api-resources --cached=false -o name 2>/dev/null)" \
+    || return 2
+  sed -n 's/^mariadbs\.//p' <<<"$resources" | sed '/^$/d' | sort -u
+}
+
 # _mdb_detect_operator_group
-# Tier 2: return the CRD group serving the `mariadbs` kind (the one CRD both
+# Tier 2: return the CRD group serving the mariadbs kind (the one CRD both
 # generations share), but only when exactly one group serves it — otherwise
 # print nothing so resolution falls through. Never fails the caller.
 _mdb_detect_operator_group() {
   local groups
-  groups="$(_kubectl_global api-resources --cached=false -o name 2>/dev/null \
-    | sed -n 's/^mariadbs\.//p' | sed '/^$/d' | sort -u)" || return 0
+  groups="$(_mdb_discover_operator_groups)" || return 0
   [[ "$(printf '%s\n' "$groups" | grep -c .)" -eq 1 ]] && printf '%s' "$groups"
   return 0
 }
@@ -83,15 +93,74 @@ mdb_operator_apiversion() {
   printf '%s/%s' "$(mdb_operator_group)" "$MDB_OPERATOR_VERSION"
 }
 
-# mdb_has_crd <plural>
-# 0 if the CRD `<plural>.<group>` is served on the cluster, 1 otherwise. Uses the
-# resolved group so a legacy-group cluster is queried for its own CRD names.
-mdb_has_crd() {
+# mdb_operator_group_is_confident
+# 0 when the selected group is explicitly configured or is the single group
+# returned by live discovery. 1 means missing/ambiguous discovery; 2 means the
+# discovery request itself failed. Mutating fallbacks must require rc=0.
+mdb_operator_group_is_confident() {
+  local group groups count rc=0
+  group="$(mdb_operator_group)"
+  if [[ -n "${MARIADB_OPERATOR_GROUP_DEFAULT:-}" ]]; then
+    [[ "$MARIADB_OPERATOR_GROUP_DEFAULT" == "$group" ]]
+    return
+  fi
+  groups="$(_mdb_discover_operator_groups)" || rc=$?
+  [[ "$rc" -eq 0 ]] || return 2
+  count="$(printf '%s\n' "$groups" | grep -c . || true)"
+  [[ "$count" -eq 1 && "$groups" == "$group" ]]
+}
+
+# mdb_is_legacy_operator
+# The historical forks use mariadb[.<fork>].mmontes.io. Keep the predicate in
+# the profile layer so scripts never infer a generation from one missing CRD.
+mdb_is_legacy_operator() {
+  case "$(mdb_operator_group)" in
+    mariadb*.mmontes.io) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# mdb_crd_status <plural>
+# Tri-state capability query:
+#   0 = definitely present, 1 = definitely absent, 2 = discovery unavailable.
+# This is intentionally distinct from a plain boolean because absence enables
+# the hand-rolled legacy path, whereas "unknown" must never enable mutations.
+mdb_crd_status() {
   local plural="${1:?plural is required}" group resources
   group="$(mdb_operator_group)"
   resources="$(_kubectl_global api-resources --cached=false --api-group="$group" -o name 2>/dev/null)" \
-    || return 1
+    || return 2
   grep -Fxq "${plural}.${group}" <<<"$resources"
+}
+
+# mdb_has_crd <plural>
+# Compatibility boolean used by older callers. New mutating routes should call
+# mdb_crd_status so an API discovery error is not treated as confirmed absence.
+mdb_has_crd() {
+  mdb_crd_status "$1"
+}
+
+# mdb_physical_backup_mode
+# Print "operator" only for a confidently selected current group with the
+# PhysicalBackup CRD; print "hand-rolled" only for a confidently selected
+# legacy mmontes group where that CRD is confirmed absent.
+# rc 2 = discovery unknown/ambiguous, rc 3 = inconsistent/unsupported profile.
+mdb_physical_backup_mode() {
+  local group capability_rc=0
+  mdb_operator_group_is_confident || return 2
+  group="$(mdb_operator_group)"
+  mdb_crd_status physicalbackups || capability_rc=$?
+  [[ "$capability_rc" -ne 2 ]] || return 2
+
+  if [[ "$group" == "k8s.mariadb.com" && "$capability_rc" -eq 0 ]]; then
+    printf 'operator'
+    return 0
+  fi
+  if mdb_is_legacy_operator && [[ "$capability_rc" -eq 1 ]]; then
+    printf 'hand-rolled'
+    return 0
+  fi
+  return 3
 }
 
 # mdb_require_crd <plural> <op> [hint]
@@ -99,9 +168,15 @@ mdb_has_crd() {
 # is absent, turning `no matches for kind` into an actionable message. Returns
 # non-zero after writing the failure result so the caller can `|| exit`.
 mdb_require_crd() {
-  local plural="${1:?plural is required}" op="${2:?op is required}" hint="${3:-}"
-  mdb_has_crd "$plural" && return 0
+  local plural="${1:?plural is required}" op="${2:?op is required}" hint="${3:-}" rc=0
+  mdb_crd_status "$plural" || rc=$?
+  [[ "$rc" -ne 0 ]] || return 0
   local group; group="$(mdb_operator_group)"
+  if [[ "$rc" -eq 2 ]]; then
+    mdbt_fail "$op" \
+      "could not verify the '${plural}' capability for mariadb-operator group ${group}; Kubernetes API discovery failed" \
+      "$(jq -n --arg c "${plural}.${group}" '{capability: $c, discovery: "unknown"}')" 1
+  fi
   mdbt_fail "$op" \
     "this cluster's mariadb-operator (group ${group}) has no '${plural}' CRD${hint:+; ${hint}}" \
     "$(jq -n --arg c "${plural}.${group}" '{missingCrd: $c}')" 2

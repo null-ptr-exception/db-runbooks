@@ -24,6 +24,7 @@
 # not exercised here).
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   RESTORE_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/restore.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
@@ -44,13 +45,14 @@ setup() {
 args="$*"
 verb=""
 for a in "$@"; do
-  case "$a" in get|apply|wait) verb="$a"; break ;; esac
+  case "$a" in api-resources|get|apply|wait) verb="$a"; break ;; esac
 done
 case "$verb" in
+  api-resources)
+    printf '%s\n' mariadbs.k8s.mariadb.com physicalbackups.k8s.mariadb.com externalmariadbs.k8s.mariadb.com
+    exit 0 ;;
   get)
     case "$args" in
-      *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';  exit 0 ;;   # operator-group detect
-      *"get crd "*|*" crd "*) exit 0 ;;                                       # physicalbackups CRD present (operator path)
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";        exit 0 ;;   # resolve-name list (jsonpath)
       *items*spec.image*) printf '%s' "${MOCK_SOURCE_IMAGES:-}"; exit 0 ;; # distinct-image scan (jsonpath)
       *"-o json"*)  # single-source spec fetch

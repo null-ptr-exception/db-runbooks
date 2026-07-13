@@ -17,6 +17,7 @@
 # A live backup -> restore round-trip belongs in the e2e suite (#48).
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   BACKUP_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/physical-backup.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
@@ -35,9 +36,12 @@ setup() {
 args="$*"
 verb=""
 for a in "$@"; do
-  case "$a" in get|apply|wait) verb="$a"; break ;; esac
+  case "$a" in api-resources|get|apply|wait) verb="$a"; break ;; esac
 done
 case "$verb" in
+  api-resources)
+    printf '%s\n' mariadbs.k8s.mariadb.com physicalbackups.k8s.mariadb.com externalmariadbs.k8s.mariadb.com
+    exit 0 ;;
   get)
     case "$args" in
       *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';  exit 0 ;;   # operator-group detect

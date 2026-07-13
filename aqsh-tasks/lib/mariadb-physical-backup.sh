@@ -12,9 +12,9 @@
 # The artifact lands at s3://<bucket>/<prefix>/<name>.xb, a single xbstream — the
 # hand-rolled restore (Phase 2b) reads exactly that layout.
 #
-# ASSUMPTIONS (validated in the legacy-operator e2e, not here):
+# ASSUMPTIONS (validated in the legacy-operator e2e):
 #   - the mariadb image in the pod provides `mariabackup` + `mbstream`
-#   - the root password is in secret <ROOT_SECRET_NAME>/<ROOT_SECRET_KEY>
+#   - the operator injects MARIADB_ROOT_PASSWORD into the MariaDB container
 #   - streaming exec | mc pipe is acceptable (no resume/checkpoint); fine for the
 #     sandbox scale this runbook targets
 # =============================================================================
@@ -22,25 +22,37 @@
 [[ -n "${_MARIADB_PHYSICAL_BACKUP_LOADED:-}" ]] && return 0
 _MARIADB_PHYSICAL_BACKUP_LOADED=1
 
-# mdbt_pb_target_pod <mariadb> <target>
-# Resolve the pod to run mariabackup on. The operator names pods <mariadb>-0..N.
-# We back up from ordinal 0 by default; a Replica target prefers the highest
-# ordinal (a replica) to keep load off the primary. Best-effort — falls back to
-# <mariadb>-0 when the replica set can't be listed.
+# mdbt_pb_target_pod <mariadb> <target> <current_primary>
+# Resolve a Ready pod without assuming ordinal 0 is primary. Explicit Replica
+# fails when no Ready replica exists; only PreferReplica may fall back to the
+# Ready primary.
 mdbt_pb_target_pod() {
-  local mariadb="$1" target="${2:-PreferReplica}"
+  local mariadb="$1" target="${2:-PreferReplica}" primary="${3:-}"
+  local pod_json ready_pods replicas selected
+  pod_json="$(_kubectl get pods -l "app.kubernetes.io/instance=${mariadb}" -o json 2>/dev/null)" || return 4
+  ready_pods="$(jq -r '
+    .items[]
+    | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
+    | .metadata.name
+  ' <<<"$pod_json" | sed '/^$/d' | sort -V)"
+  [[ -n "$ready_pods" ]] || return 4
+  [[ -n "$primary" ]] || return 5
+
   if [[ "$target" == "Primary" ]]; then
-    printf '%s-0' "$mariadb"
+    grep -Fxq "$primary" <<<"$ready_pods" || return 5
+    printf '%s' "$primary"
     return 0
   fi
-  local pods
-  pods="$(_kubectl get pods -l "app.kubernetes.io/instance=${mariadb}" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | sed '/^$/d' | sort -V)"
-  if [[ -n "$pods" ]] && [[ "$(printf '%s\n' "$pods" | grep -c .)" -gt 1 ]]; then
-    printf '%s' "$pods" | tail -1        # highest ordinal → a replica
-  else
-    printf '%s-0' "$mariadb"
+
+  replicas="$(grep -Fxv "$primary" <<<"$ready_pods" || true)"
+  selected="$(printf '%s\n' "$replicas" | sed '/^$/d' | tail -1)"
+  if [[ -n "$selected" ]]; then
+    printf '%s' "$selected"
+    return 0
   fi
+  [[ "$target" == "PreferReplica" ]] || return 6
+  grep -Fxq "$primary" <<<"$ready_pods" || return 5
+  printf '%s' "$primary"
 }
 
 # mdbt_pb_handrolled_plan <pod> <object>
@@ -51,29 +63,23 @@ mdbt_pb_handrolled_plan() {
     '{mode: "hand-rolled", pod: $pod, command: "mariabackup --backup --stream=xbstream", object: $object}'
 }
 
-# mdbt_pb_handrolled_run <op> <pod> <root_secret> <root_key> <bucket> <object>
+# mdbt_pb_handrolled_run <pod> <container> <bucket> <object>
 # Stream a physical backup from <pod> to s3://<bucket>/<object>. Returns 0 on
 # success; on failure writes nothing (caller renders the error). Echoes nothing.
 mdbt_pb_handrolled_run() {
-  local op="$1" pod="$2" root_secret="$3" root_key="$4" bucket="$5" object="$6"
-
-  local pw
-  pw="$(_kubectl get secret "$root_secret" -o "jsonpath={.data.${root_key}}" 2>/dev/null | base64 -d 2>/dev/null || true)"
-  if [[ -z "$pw" ]]; then
-    return 3   # no credential — caller reports
-  fi
-
+  local pod="$1" container="$2" bucket="$3" object="$4"
   setup_minio_client >/dev/null 2>&1 || return 4
   ensure_bucket "$bucket" >/dev/null 2>&1 || return 4
 
-  # mariabackup reads MYSQL_PWD from the env (no password on the command line, so
-  # it never shows in the pod's process list). PIPESTATUS distinguishes a backup
-  # failure (mariabackup) from an upload failure (mc).
-  set -o pipefail
-  _kubectl exec "$pod" -- env MYSQL_PWD="$pw" \
-      mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1 2>/dev/null \
-    | mc pipe "minio/${bucket}/${object}"
-  local st=$?
-  set +o pipefail
-  return "$st"
+  # Resolve the password inside the database container from the operator-injected
+  # env. The secret value never appears in kubectl exec arguments/API audit data.
+  # A subshell keeps pipefail local while preserving either producer/upload error.
+  (
+    set -o pipefail
+    _kubectl exec "$pod" -c "$container" -- sh -ceu '
+      : "${MARIADB_ROOT_PASSWORD:?MARIADB_ROOT_PASSWORD is empty}"
+      export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"
+      exec mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1
+    ' | mc pipe "minio/${bucket}/${object}"
+  )
 }

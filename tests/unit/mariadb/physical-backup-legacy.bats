@@ -22,16 +22,16 @@ setup() {
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
-args="$*"
-verb=""
-for a in "$@"; do case "$a" in get|exec|apply|wait) verb="$a"; break ;; esac; done
+  args="$*"
+  verb=""
+  for a in "$@"; do case "$a" in api-resources|get|exec|apply|wait) verb="$a"; break ;; esac; done
 case "$verb" in
+  api-resources)
+    printf 'mariadbs.mariadb.mmontes.io\n'; exit 0 ;;
   get)
     case "$args" in
-      *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';   exit 0 ;;   # group detect
-      *physicalbackups*) exit 1 ;;                                             # PhysicalBackup CRD ABSENT (legacy)
-      *"get crd "*|*" crd "*) exit 0 ;;                                        # other CRDs present
-      *"get pods"*) for p in ${MOCK_PODS:-mariadb-0}; do printf '%s\n' "$p"; done; exit 0 ;;
+      *"get mariadb"*"-o json"*) jq -n '{spec:{rootPasswordSecretKeyRef:{name:"mariadb",key:"password"}},status:{conditions:[{type:"Ready",status:"True"}],currentPrimary:"mariadb-0"}}'; exit 0 ;;
+      *"get pods"*"-o json"*) jq -nc --arg pods "${MOCK_PODS:-mariadb-0}" '{items:($pods|split(" ")|map({metadata:{name:.},status:{conditions:[{type:"Ready",status:"True"}]}}))}'; exit 0 ;;
       *"get secret"*) printf '%s' "${MOCK_ROOT_PW-s3cret}" | base64;  exit 0 ;;
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";            exit 0 ;;
       *) exit 0 ;;
@@ -64,6 +64,7 @@ run_backup() {
     "LIB_DIR=${LIB_DIR_REAL}" \
     "AQSH_RESULT_FILE=${RESULT}" \
     "MOCK_PIPE_CAPTURE=${PIPE_CAPTURE}" \
+    BACKUP_COMPRESSION=none \
     "$@" \
     bash "${BACKUP_SH}"
 }
@@ -92,22 +93,16 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.target')" = "mariadb-2" ]
+  [ "$(result_field '.data.sourcePod')" = "mariadb-2" ]
 }
 
 @test "legacy Primary target backs up from ordinal 0" {
   run_backup DRY_RUN=true MARIADB_NAME=mariadb BACKUP_TARGET=Primary \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
-  [ "$(result_field '.data.target')" = "mariadb-0" ]
+  [ "$(result_field '.data.sourcePod')" = "mariadb-0" ]
 }
 
-@test "legacy fails when the root credential is missing" {
-  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_ROOT_PW=""
-  [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"no root credential"* ]]
-}
-
-@test "legacy fails when the mariabackup stream fails" {
+@test "legacy fails when the mariadb container cannot run mariabackup" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_EXEC_FAIL=1
   [ "$status" -ne 0 ]
   [[ "$(result_field '.message')" == *"hand-rolled physical backup failed"* ]]

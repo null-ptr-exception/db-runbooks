@@ -149,9 +149,17 @@ fi
 if [[ -n "$SOURCE_NAME" ]]; then
   SOURCE_JSON="$(_kubectl get mariadb "$SOURCE_NAME" -o json 2>/dev/null || true)"
   if [[ -n "$SOURCE_JSON" ]]; then
-    [[ -z "$IMAGE" ]]        && IMAGE="$(jq -r '.spec.image // empty' <<<"$SOURCE_JSON")"
-    [[ -z "$STORAGE_SIZE" ]] && STORAGE_SIZE="$(jq -r '.spec.storage.size // empty' <<<"$SOURCE_JSON")"
+    [[ -z "$IMAGE" ]] && IMAGE="$(jq -r '.spec.image // empty' <<<"$SOURCE_JSON")"
+    # Current generation: spec.storage.size.  Legacy mmontes generation:
+    # spec.volumeClaimTemplate.resources.requests.storage (required by its CRD).
+    [[ -z "$STORAGE_SIZE" ]] && STORAGE_SIZE="$(jq -r '
+      .spec.storage.size //
+      .spec.volumeClaimTemplate.resources.requests.storage //
+      empty
+    ' <<<"$SOURCE_JSON")"
     SOURCE_RESOURCES_JSON="$(jq -c '.spec.resources // null' <<<"$SOURCE_JSON")"
+    ROOT_SECRET_NAME="$(jq -r '.spec.rootPasswordSecretKeyRef.name // "mariadb"' <<<"$SOURCE_JSON")"
+    ROOT_SECRET_KEY="$(jq -r '.spec.rootPasswordSecretKeyRef.key // "password"' <<<"$SOURCE_JSON")"
   fi
 fi
 
@@ -286,32 +294,54 @@ restore_result() {
 }
 
 # --- Route by operator capability: legacy has no physical bootstrapFrom -------
-# When the operator lacks the PhysicalBackup CRD it also lacks physical
-# bootstrapFrom (both are current-generation only). Take the hand-rolled path:
-# pre-populate the datadir PVC from the .xb via a Job and let the new instance
-# adopt it. Fail-closed verify keeps a bad restore from reporting success.
-if ! mdb_has_crd physicalbackups; then
+# When a confidently detected legacy operator lacks the PhysicalBackup CRD it
+# also lacks physical bootstrapFrom. Take the hand-rolled path: pre-populate the
+# datadir PVC from the .xb via a Job and let the new instance adopt it.
+PHYSICAL_MODE=""
+mode_rc=0
+PHYSICAL_MODE="$(mdb_physical_backup_mode)" || mode_rc=$?
+if [[ "$mode_rc" -ne 0 ]]; then
+  trap - ERR
+  if [[ "$mode_rc" -eq 2 ]]; then
+    mdbt_fail "$OP" "could not determine the mariadb-operator generation or PhysicalBackup capability; refusing to choose a restore implementation" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups", discovery: "unknown"}')" 2
+  fi
+  mdbt_fail "$OP" "operator group $(mdb_operator_group) does not provide a supported physical restore path; install the current-generation PhysicalBackup CRD or use a legacy mmontes operator" \
+    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups"}')" 2
+fi
+
+if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
   if [[ -n "$TARGET_TIME" ]]; then
     trap - ERR
     mdbt_fail "$OP" "point-in-time recovery is not supported on the legacy operator's hand-rolled physical restore (omit target_time, or use logical-restore)" \
       "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
   fi
 
-  setup_minio_client >/dev/null 2>&1 || true
-  PR_OBJECT="$(mdbt_pr_source_object "$BACKUP_BUCKET" "$BACKUP_PREFIX" "${RESTORE_BACKUP_OBJECT:-}")"
+  if ! setup_minio_client >/dev/null 2>&1; then
+    trap - ERR
+    mdbt_fail "$OP" "could not configure the S3/MinIO client for s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}" \
+      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p, discovery: "unknown"}')" 1
+  fi
+  PR_OBJECT="$(mdbt_pr_source_object "$BACKUP_BUCKET" "$BACKUP_PREFIX" "${RESTORE_BACKUP_OBJECT:-}")" || {
+    trap - ERR
+    mdbt_fail "$OP" "could not list physical backups under s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}" \
+      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p}')" 1
+  }
   PR_PVC="$(mdbt_pr_pvc_name "$TARGET")"
 
   pr_result() {  # <restored:bool> <dryRun:bool>
     jq -n \
       --arg namespace "$NAMESPACE" --arg target "$TARGET" --arg image "$IMAGE" \
-      --arg bucket "$BACKUP_BUCKET" --arg object "$PR_OBJECT" \
+      --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" --arg object "$PR_OBJECT" \
       --arg host "$CONNECTION_HOST" --arg pvc "$PR_PVC" \
       --arg secretName "$ROOT_SECRET_NAME" --arg secretKey "$ROOT_SECRET_KEY" \
       --argjson restored "$1" --argjson dry "$2" \
       --argjson plan "$(mdbt_pr_plan "$BACKUP_BUCKET" "$PR_OBJECT" "$PR_PVC" "$TARGET")" \
       '{
         namespace: $namespace, target: $target, image: $image,
-        backup: {bucket: $bucket, object: $object, contentType: "Physical", mode: "hand-rolled"},
+        source: (if $object == "" then null else $object end),
+        backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, object: $object, contentType: "Physical", mode: "hand-rolled"},
+        pointInTimeRecovery: {enabled: false, targetRecoveryTime: null},
         connection: {host: $host, port: 3306},
         credentialsRef: {secretName: $secretName, secretKey: $secretKey},
         dryRun: $dry, restored: $restored
@@ -329,6 +359,12 @@ if ! mdb_has_crd physicalbackups; then
       "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p}')" 2
   fi
 
+  if [[ "$WAIT_TIMEOUT" == "0" ]]; then
+    trap - ERR
+    mdbt_fail "$OP" "wait_timeout=0 is not supported by the hand-rolled restore because PVC/prepare/Ready verification is required before reporting success" \
+      "$(jq -n --arg t "$TARGET" '{target: $t, waitTimeout: 0}')" 2
+  fi
+
   if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
     trap - ERR
     mdbt_fail "$OP" "target MariaDB '${TARGET}' already exists; restore provisions a NEW instance and never overwrites in place (choose a different target name)" \
@@ -336,8 +372,10 @@ if ! mdb_has_crd physicalbackups; then
   fi
 
   rc=0
+  # The prepare Job invokes `mc alias set`, which requires the original URL
+  # including its scheme. OPERATOR_BACKUP_ENDPOINT is only for operator CRs.
   mdbt_pr_orchestrate "$TARGET" "$NAMESPACE" "$IMAGE" "$STORAGE_SIZE" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" \
-    "$BACKUP_BUCKET" "$PR_OBJECT" "$OPERATOR_BACKUP_ENDPOINT" \
+    "$BACKUP_BUCKET" "$PR_OBJECT" "$BACKUP_ENDPOINT" \
     "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" \
     "$(mdb_operator_apiversion)" "$WAIT_TIMEOUT" || rc=$?
   if [[ "$rc" -eq 0 ]]; then
@@ -375,8 +413,9 @@ fi
 # emit a partial result (with the connection endpoint + credential ref) so the
 # caller can still reach the not-yet-Ready instance, then exit non-zero.
 if [[ "$WAIT_TIMEOUT" != "0" ]]; then
-  if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
-    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" "$(restore_result true false)" 1)"
+  if ! mdbt_wait_mariadb_backup_restored "$TARGET" "$WAIT_TIMEOUT" >/dev/null 2>&1 \
+      || ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
+    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready or finish restoring its backup within ${WAIT_TIMEOUT}" "$(restore_result true false)" 1)"
     exit 1
   fi
 fi

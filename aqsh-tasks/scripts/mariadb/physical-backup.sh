@@ -154,25 +154,53 @@ backup_status_result() {
 # --- Route by operator capability --------------------------------------------
 # The current operator drives a PhysicalBackup CR (the path below). A legacy
 # operator without that CRD takes the hand-rolled mariabackup path, which streams
-# from the source pod straight to S3 via mc. Detection fails soft; when the CRD
-# is present nothing changes.
-if ! mdb_has_crd physicalbackups; then
-  ROOT_SECRET_NAME="${ROOT_SECRET_NAME:-mariadb}"
-  ROOT_SECRET_KEY="${ROOT_SECRET_KEY:-password}"
-  PB_POD="$(mdbt_pb_target_pod "$MARIADB_NAME" "$TARGET")"
+# from the source pod straight to S3 via mc. Unknown or inconsistent discovery
+# is always a hard error; it must never turn into a mutating fallback.
+PHYSICAL_MODE=""
+mode_rc=0
+PHYSICAL_MODE="$(mdb_physical_backup_mode)" || mode_rc=$?
+if [[ "$mode_rc" -ne 0 ]]; then
+  if [[ "$mode_rc" -eq 2 ]]; then
+    mdbt_fail "$OP" "could not determine the mariadb-operator generation or PhysicalBackup capability; refusing to choose a physical-backup implementation" \
+      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups", discovery: "unknown"}')" 2
+  fi
+  mdbt_fail "$OP" "operator group $(mdb_operator_group) does not provide a supported PhysicalBackup path; install the current-generation PhysicalBackup CRD or use a legacy mmontes operator" \
+    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups"}')" 2
+fi
+
+if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
+  if [[ "$COMPRESSION" != "none" ]]; then
+    mdbt_fail "$OP" "legacy hand-rolled physical backup supports compression=none only (the raw xbstream is restored byte-for-byte)" \
+      "$(jq -n --arg requested "$COMPRESSION" '{requestedCompression: $requested, supportedCompression: "none"}')" 2
+  fi
+  # Resolve the source once and require a Ready CR before any stream/upload.
+  if ! SOURCE_JSON="$(_kubectl get mariadb "$MARIADB_NAME" -o json 2>&1)"; then
+    mdbt_fail "$OP" "failed to query source MariaDB '${MARIADB_NAME}': ${SOURCE_JSON}" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace: $ns, mariadb: $mdb}')" 1
+  fi
+  READY="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' <<<"$SOURCE_JSON" | tail -1)"
+  [[ "$READY" == "True" ]] || mdbt_fail "$OP" "source MariaDB '${MARIADB_NAME}' must be Ready before a physical backup" \
+    "$(jq -n --arg mdb "$MARIADB_NAME" --arg r "${READY:-Unknown}" '{mariadb: $mdb, ready: $r}')" 2
+  PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$SOURCE_JSON")"
+  PB_POD="$(mdbt_pb_target_pod "$MARIADB_NAME" "$TARGET" "$PRIMARY_POD")" || {
+    mdbt_fail "$OP" "no Ready source pod satisfies target=${TARGET} for MariaDB '${MARIADB_NAME}'" \
+      "$(jq -n --arg mdb "$MARIADB_NAME" --arg target "$TARGET" '{mariadb: $mdb, target: $target}')" 2
+  }
   PB_OBJECT="${BACKUP_PREFIX}/${BACKUP_NAME}.xb"
 
   hr_result() {  # <created:bool> <dryRun:bool>
     jq -n \
       --arg namespace "$NAMESPACE" --arg mariadb "$MARIADB_NAME" \
       --arg backupName "$BACKUP_NAME" --arg bucket "$BACKUP_BUCKET" \
-      --arg object "$PB_OBJECT" --arg pod "$PB_POD" \
+      --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" \
+      --arg object "$PB_OBJECT" --arg pod "$PB_POD" --arg target "$TARGET" \
       --argjson created "$1" --argjson dry "$2" \
       --argjson plan "$(mdbt_pb_handrolled_plan "$PB_POD" "$PB_OBJECT")" \
       '{
         namespace: $namespace, mariadb: $mariadb, backupName: $backupName,
-        backup: {bucket: $bucket, object: $object, contentType: "Physical", mode: "hand-rolled"},
-        target: $pod, restorableBy: {task: "restore", namespace: $namespace},
+        backup: {bucket: $bucket, prefix: $prefix, object: $object,
+          endpoint: $endpoint, contentType: "Physical", mode: "hand-rolled", compression: "none"},
+        target: $target, sourcePod: $pod, restorableBy: {task: "restore", namespace: $namespace},
         dryRun: $dry, created: $created
       } + (if $dry then {plan: $plan} else {} end)'
   }
@@ -183,7 +211,7 @@ if ! mdb_has_crd physicalbackups; then
   fi
 
   rc=0
-  mdbt_pb_handrolled_run "$OP" "$PB_POD" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" "$BACKUP_BUCKET" "$PB_OBJECT" || rc=$?
+  mdbt_pb_handrolled_run "$PB_POD" "${MARIADB_CONTAINER:-mariadb}" "$BACKUP_BUCKET" "$PB_OBJECT" || rc=$?
   if [[ "$rc" -eq 0 ]]; then
     mdbt_write_result "$(response_ok "$OP" "hand-rolled physical backup ${BACKUP_NAME} streamed for ${MARIADB_NAME}" "$(hr_result true false)")"
     exit 0

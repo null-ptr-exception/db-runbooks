@@ -246,6 +246,14 @@ mdbt_wait_mariadb_ready() {
   _kubectl wait --for=condition=Ready "${resource}/${name}" --timeout="$timeout"
 }
 
+# Operator bootstrap is asynchronous and Ready may briefly reflect the newly
+# created instance before backup reconciliation starts. Wait for the explicit
+# restore condition first so callers cannot report success during that window.
+mdbt_wait_mariadb_backup_restored() {
+  local name="$1" timeout="${2:-10m}" resource="${3:-${MARIADB_RESOURCE:-mariadb}}"
+  _kubectl wait --for=condition=BackupRestored "${resource}/${name}" --timeout="$timeout"
+}
+
 # mdbt_physical_backup_manifest <name> <namespace> <mariadb_ref>
 # Emit a mariadb-operator PhysicalBackup CR as JSON (kubectl apply accepts JSON,
 # so there is no YAML-interpolation surface). The single source of truth for the

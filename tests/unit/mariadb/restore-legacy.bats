@@ -27,13 +27,13 @@ setup() {
 #!/usr/bin/env bash
 args="$*"
 verb=""
-for a in "$@"; do case "$a" in get|apply|wait|exec) verb="$a"; break ;; esac; done
+for a in "$@"; do case "$a" in api-resources|get|create|apply|wait|exec) verb="$a"; break ;; esac; done
 case "$verb" in
+  api-resources) printf 'mariadbs.mariadb.mmontes.io backups.mariadb.mmontes.io restores.mariadb.mmontes.io\n'; exit 0 ;;
   get)
     case "$args" in
-      *crd*jsonpath*|*jsonpath*crd*) printf 'k8s.mariadb.com\n';   exit 0 ;;   # group detect
-      *physicalbackups*) exit 1 ;;                                             # PhysicalBackup CRD ABSENT (legacy)
-      *"get crd "*|*" crd "*) exit 0 ;;                                        # other CRDs present
+      *"get pvc"*|*"get job"*) exit 1 ;;
+      *"get mariadb"*"-o json"*) jq -n '{spec:{image:"mariadb:10.6",rootPasswordSecretKeyRef:{name:"mariadb",key:"password"},volumeClaimTemplate:{resources:{requests:{storage:"1Gi"}}}},status:{conditions:[{type:"Ready",status:"True"}]}}'; exit 0 ;;
       *persistentVolumeClaim*|*"get pod "*)                                    # verify: which PVC is the pod bound to
         pod="$(printf '%s' "$args" | sed -n 's/.*get pod \([^ ]*\).*/\1/p')"
         [[ "${MOCK_NOT_ADOPTED:-0}" == "1" ]] && { printf 'some-other-pvc'; exit 0; }
@@ -43,7 +43,7 @@ case "$verb" in
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";            exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  apply)
+  create|apply)
     body="$(cat)"; kind="$(printf '%s' "$body" | jq -r '.kind // "unknown"')"
     printf '%s' "$body" > "${MOCK_CAP_DIR}/${kind}.json"; exit 0 ;;
   wait)

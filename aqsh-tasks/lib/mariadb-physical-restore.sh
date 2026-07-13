@@ -22,10 +22,8 @@
 #      that is reported as a failure — never a false success.
 #
 # SAFETY NOTE: this restores into a fresh instance and never touches the source.
-# But the whole flow is UNVALIDATED without a live legacy operator (PVC adoption,
-# prepare/version compat, ownership). Treat as "implemented, pending live
-# validation"; the verify step is what keeps a broken restore from reporting
-# success. See docs — kept internal.
+# The dedicated legacy-operator e2e validates PVC adoption, prepare/version
+# compatibility, ownership, Ready reconciliation, and the restored row set.
 # =============================================================================
 
 [[ -n "${_MARIADB_PHYSICAL_RESTORE_LOADED:-}" ]] && return 0
@@ -34,7 +32,7 @@ _MARIADB_PHYSICAL_RESTORE_LOADED=1
 # Deploy-tunable knobs (internal config, not task inputs).
 MARIADB_PVC_TEMPLATE="${MARIADB_PVC_TEMPLATE:-storage}"   # operator volumeClaimTemplate name
 MARIADB_RUN_AS_USER="${MARIADB_RUN_AS_USER:-999}"          # mysqld uid to chown the datadir to
-MC_IMAGE="${MC_IMAGE:-minio/mc:latest}"                    # image providing `mc` for the download initContainer
+MC_IMAGE="${MC_IMAGE:-minio/mc:RELEASE.2024-11-21T17-21-54Z}" # pinned image providing `mc`
 
 # mdbt_pr_pvc_name <target>
 # The PVC name the operator StatefulSet will use for ordinal 0.
@@ -52,19 +50,39 @@ mdbt_pr_source_object() {
     printf '%s/%s' "$prefix" "$name"
     return 0
   fi
-  local latest
-  # `|| true`: an empty prefix makes grep exit non-zero, which under the caller's
-  # set -e/pipefail would abort instead of yielding "no backup found".
-  latest="$(mc ls "minio/${bucket}/${prefix}/" 2>/dev/null | awk '{print $NF}' | grep '\.xb$' | sort | tail -1 || true)"
+  local latest listing
+  listing="$(mc ls "minio/${bucket}/${prefix}/" 2>/dev/null)" || return 2
+  latest="$(printf '%s\n' "$listing" | awk '{print $NF}' | grep '\.xb$' | sort | tail -1 || true)"
   [[ -n "$latest" ]] && printf '%s/%s' "$prefix" "$latest"
   return 0
+}
+
+# mdbt_pr_s3_secret_manifest creates a short-lived MC_HOST secret. The mc image
+# is intentionally shell-free, so the composed endpoint must be materialized
+# before the Job starts.
+mdbt_pr_s3_secret_manifest() {
+  local name="$1" namespace="$2" endpoint="$3" access="$4" secret="$5"
+  local scheme="http://" host="$endpoint"
+  if [[ "$endpoint" == *://* ]]; then
+    scheme="${endpoint%%://*}://"
+    host="${endpoint#*://}"
+  fi
+  host="${host%%/*}"
+  access="$(jq -rn --arg value "$access" '$value | @uri')"
+  secret="$(jq -rn --arg value "$secret" '$value | @uri')"
+  jq -n --arg name "$name" --arg namespace "$namespace" \
+    --arg scheme "$scheme" --arg host "$host" --arg access "$access" --arg secret "$secret" \
+    '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:$namespace,
+      labels:{"app.kubernetes.io/managed-by":"aqsh-mariadb-restore"}},
+      type:"Opaque",stringData:{MC_HOST_s3:($scheme + $access + ":" + $secret + "@" + $host)}}'
 }
 
 # mdbt_pr_pvc_manifest <name> <namespace> <size>
 mdbt_pr_pvc_manifest() {
   jq -n --arg name "$1" --arg namespace "$2" --arg size "$3" \
     '{apiVersion: "v1", kind: "PersistentVolumeClaim",
-      metadata: {name: $name, namespace: $namespace},
+      metadata: {name: $name, namespace: $namespace,
+        labels: {"app.kubernetes.io/managed-by": "aqsh-mariadb-restore"}},
       spec: {accessModes: ["ReadWriteOnce"], resources: {requests: {storage: $size}}}}'
 }
 
@@ -81,11 +99,13 @@ mdbt_pr_job_manifest() {
     --arg image "$image" --arg mcImage "$MC_IMAGE" --argjson uid "$MARIADB_RUN_AS_USER" \
     '{
       apiVersion: "batch/v1", kind: "Job",
-      metadata: {name: $jobname, namespace: $namespace},
+      metadata: {name: $jobname, namespace: $namespace,
+        labels: {"app.kubernetes.io/managed-by": "aqsh-mariadb-restore"}},
       spec: {
-        backoffLimit: 1,
+        backoffLimit: 0,
         template: {spec: {
           restartPolicy: "Never",
+          automountServiceAccountToken: false,
           securityContext: {runAsUser: $uid, fsGroup: $uid},
           volumes: [
             {name: "datadir", persistentVolumeClaim: {claimName: $pvc}},
@@ -93,18 +113,19 @@ mdbt_pr_job_manifest() {
           ],
           initContainers: [{
             name: "download", image: $mcImage,
-            command: ["sh","-c","mc alias set s3 \"$MC_ENDPOINT\" \"$MC_ACCESS\" \"$MC_SECRET\" --api S3v4 && mc cp \"s3/\"$MC_OBJECT /work/backup.xb"],
+            command: ["/usr/bin/mc"],
+            args: ["cp", ("s3/" + $bucket + "/" + $object), "/work/backup.xb"],
             env: [
-              {name: "MC_ENDPOINT", value: $endpoint},
-              {name: "MC_OBJECT", value: ($bucket + "/" + $object)},
-              {name: "MC_ACCESS", valueFrom: {secretKeyRef: {name: $accessSecret, key: $accessKey}}},
-              {name: "MC_SECRET", valueFrom: {secretKeyRef: {name: $accessSecret, key: $secretKey}}}
+              {name: "HOME", value: "/work"},
+              {name: "MC_CONFIG_DIR", value: "/work/.mc"},
+              {name: "MC_HOST_s3", valueFrom: {secretKeyRef: {name: ($jobname + "-s3"), key: "MC_HOST_s3"}}}
             ],
             volumeMounts: [{name: "work", mountPath: "/work"}]
           }],
           containers: [{
             name: "prepare", image: $image,
-            command: ["sh","-c","set -e; mbstream -x -C /datadir < /work/backup.xb; mariabackup --prepare --target-dir=/datadir; chown -R $(id -u):$(id -g) /datadir"],
+            securityContext: {runAsUser: 0, allowPrivilegeEscalation: false},
+            command: ["sh","-c", ("set -e; mbstream -x -C /datadir < /work/backup.xb; mariabackup --prepare --target-dir=/datadir; chown -R " + ($uid|tostring) + ":" + ($uid|tostring) + " /datadir")],
             volumeMounts: [
               {name: "datadir", mountPath: "/datadir"},
               {name: "work", mountPath: "/work"}
@@ -116,16 +137,23 @@ mdbt_pr_job_manifest() {
 }
 
 # mdbt_pr_mariadb_manifest <target> <namespace> <image> <size> <secret> <key> <apiVersion>
-# The restored MariaDB — NO bootstrapFrom; it stands up on the adopted PVC.
+# The restored legacy MariaDB — NO bootstrapFrom; it stands up on the adopted
+# PVC.  The mmontes-era CRD requires volumeClaimTemplate (the current generation
+# renamed this surface to storage), so this manifest intentionally uses the
+# legacy schema.
 mdbt_pr_mariadb_manifest() {
   jq -n \
     --arg target "$1" --arg namespace "$2" --arg image "$3" --arg size "$4" \
     --arg secret "$5" --arg key "$6" --arg apiVersion "$7" \
     '{apiVersion: $apiVersion, kind: "MariaDB",
-      metadata: {name: $target, namespace: $namespace},
+      metadata: {name: $target, namespace: $namespace,
+        labels: {"app.kubernetes.io/managed-by": "aqsh-mariadb-restore"}},
       spec: {image: $image, replicas: 1,
         rootPasswordSecretKeyRef: {name: $secret, key: $key},
-        storage: {size: $size}}}'
+        volumeClaimTemplate: {
+          accessModes: ["ReadWriteOnce"],
+          resources: {requests: {storage: $size}}
+        }}}'
 }
 
 # mdbt_pr_verify <target> <namespace> <pvc> <root_secret> <root_key>
@@ -136,7 +164,7 @@ mdbt_pr_mariadb_manifest() {
 # Any query failure or a zero user-table count returns non-zero → caller reports
 # a failure, never a success.
 mdbt_pr_verify() {
-  local target="$1" namespace="$2" pvc="$3" root_secret="$4" root_key="$5"
+  local target="$1" namespace="$2" pvc="$3"
   local pod="${target}-0"
 
   local bound
@@ -148,11 +176,9 @@ mdbt_pr_verify() {
     [[ "$bound" == "$pvc" ]] || return 2   # our PVC was NOT adopted
   fi
 
-  local pw count
-  pw="$(_kubectl get secret "$root_secret" -o "jsonpath={.data.${root_key}}" 2>/dev/null | base64 -d 2>/dev/null || true)"
-  [[ -n "$pw" ]] || return 3
-  count="$(_kubectl exec "$pod" -- env MYSQL_PWD="$pw" mariadb -N -u root -e \
-    "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('mysql','information_schema','performance_schema','sys');" \
+  local count
+  count="$(_kubectl exec -c "${MARIADB_CONTAINER:-mariadb}" "$pod" -- sh -c \
+    'test -n "$MARIADB_ROOT_PASSWORD" && MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -N -u root -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema NOT IN ('"'"'mysql'"'"','"'"'information_schema'"'"','"'"'performance_schema'"'"','"'"'sys'"'"');"' \
     2>/dev/null | tr -dc '0-9')"
   [[ -n "$count" && "$count" -gt 0 ]] || return 4   # no user tables → empty/failed restore
   return 0
@@ -186,12 +212,34 @@ mdbt_pr_orchestrate() {
   pvc="$(mdbt_pr_pvc_name "$target")"
   jobname="${target}-prepare"
 
-  mdbt_pr_pvc_manifest "$pvc" "$namespace" "$size" | _kubectl apply -f - >/dev/null 2>&1 || return 10
+  # Refuse collisions: a retry must never unpack over an existing datadir or
+  # reuse an immutable/partially failed Job.
+  _kubectl get pvc "$pvc" >/dev/null 2>&1 && return 10
+  _kubectl get job "$jobname" >/dev/null 2>&1 && return 11
+  _kubectl get mariadb "$target" >/dev/null 2>&1 && return 12
+
+  local access secret
+  access="$(_kubectl get secret "$accessSecret" -o "jsonpath={.data.${accessKey}}" 2>/dev/null | base64 -d 2>/dev/null)" || return 10
+  secret="$(_kubectl get secret "$accessSecret" -o "jsonpath={.data.${secretKey}}" 2>/dev/null | base64 -d 2>/dev/null)" || return 10
+  [[ -n "$access" && -n "$secret" ]] || return 10
+  mdbt_pr_s3_secret_manifest "${jobname}-s3" "$namespace" "$endpoint" "$access" "$secret" \
+    | _kubectl create -f - >/dev/null 2>&1 || return 10
+  if ! mdbt_pr_pvc_manifest "$pvc" "$namespace" "$size" | _kubectl create -f - >/dev/null 2>&1; then
+    _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
+    return 10
+  fi
   mdbt_pr_job_manifest "$jobname" "$namespace" "$pvc" "$bucket" "$object" "$endpoint" \
-    "$accessSecret" "$accessKey" "$secretKey" "$image" | _kubectl apply -f - >/dev/null 2>&1 || return 11
-  _kubectl wait --for=condition=complete "job/${jobname}" --timeout="$wait_timeout" >/dev/null 2>&1 || return 11
+    "$accessSecret" "$accessKey" "$secretKey" "$image" | _kubectl create -f - >/dev/null 2>&1 || {
+      _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
+      return 11
+    }
+  if ! _kubectl wait --for=condition=complete "job/${jobname}" --timeout="$wait_timeout" >/dev/null 2>&1; then
+    _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
+    return 11
+  fi
+  _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || return 11
   mdbt_pr_mariadb_manifest "$target" "$namespace" "$image" "$size" "$root_secret" "$root_key" "$apiVersion" \
-    | _kubectl apply -f - >/dev/null 2>&1 || return 12
+    | _kubectl create -f - >/dev/null 2>&1 || return 12
   mdbt_wait_mariadb_ready "$target" "$wait_timeout" >/dev/null 2>&1 || return 13
   mdbt_pr_verify "$target" "$namespace" "$pvc" "$root_secret" "$root_key" || return 14
   return 0

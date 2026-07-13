@@ -1,9 +1,13 @@
 #!/usr/bin/env bats
 #
-# Contract tests for backup/list-backups-mariadb.sh — run against a mock `mc`,
+# Contract tests for backup/list-backups-mariadb.sh — run against a mock `s5cmd`,
 # no MinIO. Lock down: namespace is the only input; the location is resolved
-# internally; `mc ls --json` output is normalised into a {name,size,lastModified}
-# array; an empty prefix returns an empty list, not an error.
+# internally; `s5cmd --json ls` output (full s3:// keys, snake_case
+# last_modified) is normalised into a {name,size,lastModified} array; and the
+# s5cmd empty-prefix semantic (exit 1 + 'no object found') maps to an EMPTY
+# LIST, while any other failure (auth/bucket) stays an error.
+#
+# The mock reproduces s5cmd v2.3.0 behavior as verified against a live MinIO.
 
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
@@ -12,16 +16,32 @@ setup() {
   MOCK_DIR="$(mktemp -d)"
   RESULT="${MOCK_DIR}/result.json"
 
-  cat > "${MOCK_DIR}/mc" <<'MOCK'
+  cat > "${MOCK_DIR}/s5cmd" <<'MOCK'
 #!/usr/bin/env bash
-case "$1" in
-  alias) exit 0 ;;
-  ls)    [[ "${MOCK_MC_LS_FAIL:-0}" == "1" ]] && { echo "mc: <ERROR> Unable to list folder: AccessDenied." >&2; exit 1; }
-         printf '%s' "${MOCK_MC_LS:-}"; exit 0 ;;
-  *)     exit 0 ;;
+# skip global flags (--json, --endpoint-url URL) to find the subcommand
+args=("$@"); cmd=""; target=""
+i=0
+while (( i < ${#args[@]} )); do
+  a="${args[$i]}"
+  case "$a" in
+    --endpoint-url) i=$((i+2)); continue ;;
+    --*) i=$((i+1)); continue ;;
+    *) cmd="$a"; target="${args[$((i+1))]:-}"; break ;;
+  esac
+done
+case "$cmd" in
+  ls)
+    if [[ "${MOCK_S5_AUTH_FAIL:-0}" == "1" ]]; then
+      echo 'ERROR session: fetching region failed: Forbidden: Forbidden status code: 403' >&2; exit 1
+    fi
+    if [[ -z "${MOCK_S5_LS:-}" ]]; then
+      echo "ERROR \"ls ${target}\": no object found" >&2; exit 1
+    fi
+    printf '%s\n' "${MOCK_S5_LS}"; exit 0 ;;
+  *) exit 0 ;;
 esac
 MOCK
-  chmod +x "${MOCK_DIR}/mc"
+  chmod +x "${MOCK_DIR}/s5cmd"
   export DB_NAMESPACE="mariadb-1"
   export MDBT_CONFIG_FILE="${MOCK_DIR}/nonexistent.env"
 }
@@ -35,36 +55,33 @@ run_list() {
 field() { jq -r "$1" "${RESULT}"; }
 
 @test "list-backups returns a normalised backup list" {
-  local l1='{"key":"mariadb-1-20260101.sql.gz","size":123,"lastModified":"2026-01-01T00:00:00Z"}'
-  local l2='{"key":"physicalbackup-blue/","size":0,"lastModified":"2026-01-02T00:00:00Z"}'
-  run_list MOCK_MC_LS="$(printf '%s\n%s' "$l1" "$l2")"
+  # real s5cmd --json ls shapes: file has size + last_modified; directory has neither
+  local l1='{"key":"s3://db-backups/mariadb/mariadb-1/mariadb-1-20260101.sql.gz","last_modified":"2026-01-01T00:00:00.000Z","type":"file","size":123}'
+  local l2='{"key":"s3://db-backups/mariadb/mariadb-1/physicalbackup-blue/","type":"directory"}'
+  run_list MOCK_S5_LS="$(printf '%s\n%s' "$l1" "$l2")"
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.count')" = "2" ]
+  # full s3:// prefix is stripped down to the entry name
   [ "$(field '.data.backups[0].name')" = "mariadb-1-20260101.sql.gz" ]
+  [ "$(field '.data.backups[0].lastModified')" = "2026-01-01T00:00:00.000Z" ]
   # trailing slash on a "directory" entry is trimmed
   [ "$(field '.data.backups[1].name')" = "physicalbackup-blue" ]
+  [ "$(field '.data.backups[1].size')" = "0" ]
   [ "$(field '.data.location.bucket')" = "db-backups" ]
   [ "$(field '.data.location.prefix')" = "mariadb/mariadb-1" ]
 }
 
-@test "list-backups returns an empty list (not an error) when there are no backups" {
-  run_list MOCK_MC_LS=""
+@test "list-backups maps s5cmd 'no object found' (empty prefix) to an empty list, not an error" {
+  run_list   # mock emits exit 1 + 'no object found' when MOCK_S5_LS is empty
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.count')" = "0" ]
   [ "$(field '.data.backups')" = "[]" ]
 }
 
-@test "list-backups surfaces an mc failure instead of reporting zero backups" {
-  run_list MOCK_MC_LS_FAIL=1
-  [ "$status" -ne 0 ]
-  [ "$(field '.status')" = "error" ]
-  [[ "$(field '.message')" == *"failed to list backups"* ]]
-}
-
-@test "list-backups treats an in-band mc error line as a failure" {
-  run_list MOCK_MC_LS='{"status":"error","error":{"message":"AccessDenied"}}'
+@test "list-backups surfaces a real s5cmd failure (auth) instead of reporting zero backups" {
+  run_list MOCK_S5_AUTH_FAIL=1
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
   [[ "$(field '.message')" == *"failed to list backups"* ]]
@@ -82,7 +99,7 @@ field() { jq -r "$1" "${RESULT}"; }
 MINIO_BUCKET=other-bucket
 MINIO_ENDPOINT=http://minio.kind-b.test:30080
 EOF
-  run_list MOCK_MC_LS="" MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
+  run_list MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
   [ "$status" -eq 0 ]
   [ "$(field '.data.location.bucket')" = "other-bucket" ]
   [ "$(field '.data.location.endpoint')" = "http://minio.kind-b.test:30080" ]

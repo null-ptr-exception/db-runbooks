@@ -22,7 +22,7 @@ fi
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
 # shellcheck source=../../lib/minio-client.sh
-source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, mc
+source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, s5 (s5cmd)
 
 # Deploy-time S3/MinIO settings (MINIO_ENDPOINT, MINIO_BUCKET, ...).
 mdbt_load_config
@@ -38,26 +38,32 @@ mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
 mdbt_resolve_backup_location "$NAMESPACE"
 
 if ! setup_minio_client >/dev/null 2>&1; then
-  mdbt_fail "$OP" "failed to configure the MinIO client (check MINIO_ENDPOINT / credentials)" \
+  mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
 fi
 
-# `mc ls --json` emits one JSON object per entry. A real failure (auth / network
-# / missing bucket) must NOT be collapsed into an empty list: mc signals it either
-# by a non-zero exit or by an in-band {"status":"error",...} line. Only a truly
-# empty successful listing means "no backups yet".
-if ! LISTING="$(mc ls --json "minio/${BACKUP_BUCKET}/${BACKUP_PREFIX}/" 2>&1)"; then
-  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}': ${LISTING}" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+# `s5cmd --json ls` emits one JSON object per entry (key = full s3:// URL,
+# type = file|directory, last_modified). Two failure semantics matter:
+#   - an EMPTY prefix is exit 1 + 'no object found' — that is "no backups yet",
+#     NOT an error (unlike mc, which returned an empty success);
+#   - any other non-zero exit (auth / network / missing bucket) must NOT be
+#     collapsed into an empty list.
+S3_PREFIX="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/"
+if ! LISTING="$(s5 --json ls "$S3_PREFIX" 2>&1)"; then
+  if grep -q "no object found" <<<"$LISTING"; then
+    LISTING=""
+  else
+    mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}': ${LISTING}" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+  fi
 fi
-if ! BACKUPS="$(printf '%s' "$LISTING" | jq -sc '
-    if any(.[]?; .status? == "error") then error("mc reported an error")
-    else [ .[] | select(.key != null) | {
-      name: (.key | sub("/$"; "")),
+if ! BACKUPS="$(printf '%s' "$LISTING" | jq -sc --arg pfx "$S3_PREFIX" '
+    [ .[] | select(.key != null) | {
+      name: (.key | ltrimstr($pfx) | sub("/$"; "")),
       size: (.size // 0),
-      lastModified: (.lastModified // null)
-    } ] end' 2>/dev/null)"; then
-  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}' (mc reported an error)" \
+      lastModified: (.last_modified // null)
+    } ]' 2>/dev/null)"; then
+  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}' (unparseable listing)" \
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
 fi
 COUNT="$(jq -n --argjson b "$BACKUPS" '$b | length')"

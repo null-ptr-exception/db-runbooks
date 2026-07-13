@@ -241,7 +241,9 @@ reserved for a status failure while a config exists.
 | `wait_timeout` | no (`1200`) | Poll budget in seconds |
 
 An incremental backup with no completed chain automatically becomes the
-`--base` (reported as `incremental_base: true` — no extra input). Ungated:
+`--base` (reported as `incremental_base: true` — no extra input); once a
+chain exists every further incremental extends it, so plan a re-base
+cadence — see [Incremental chain management](#incremental-chain-management-re-base-cadence-and-chain-length). Ungated:
 a backup adds an artifact and mutates no database state. Failure codes:
 `UNSUPPORTED_BACKUP_TYPE`, `PSMDB_REQUIRED`, `AGENT_NO_DATA_VOLUME`,
 `PHYSICAL_UNSUPPORTED_SPEC`, `NO_PBM_AGENT`, `NO_READY_POD`,
@@ -452,6 +454,10 @@ POST /tasks/pbm%2Fbackup   {"namespace": "mongo-1", "type": "incremental"}   ←
 POST /tasks/pbm%2Fpitr     {"namespace": "mongo-1", "enabled": "true", ...}  ← chunks slice on top
 ```
 
+Daily increments then extend the chain; re-base weekly — cadence numbers
+and the safe re-base order in
+[Incremental chain management](#incremental-chain-management-re-base-cadence-and-chain-length).
+
 Restore (full-cluster downtime — plan a maintenance window):
 
 ```json
@@ -490,6 +496,38 @@ replays the oplog on top; the result names the base
 Rule of thumb: start logical; switch the base to physical/incremental when
 backup or restore duration becomes the bottleneck — and budget the
 maintenance window physical restores need.
+
+### Incremental chain management: re-base cadence and chain length
+
+An incremental chain has exactly one base; **every restore from a chain
+member reconstructs the base plus every increment up to it**, and one
+missing/corrupt link strands everything after it. The gateway only
+auto-creates a base when *no completed chain exists* (`incremental_base:
+true` on that first call) — after that, every `type=incremental` run
+(scheduled ones included) **extends the same chain forever**. Chains do not
+re-base themselves; that is a runbook decision:
+
+| Question | Recommendation |
+|---|---|
+| How often to re-base? | **Weekly** with daily increments as the default. High-churn data (increments arriving big) → every 3–4 days. Never let a production chain span more than 2 weeks. |
+| How many increments is too many? | Keep chains at **≤ 7–14 links**. Past ~15, restore reconstruction time and the one-broken-link blast radius outweigh the upload savings. |
+| When is incremental the wrong tool? | When a single increment regularly exceeds **~30–50% of the base size** — the churn is too high for block-level deltas to pay off; just schedule `type=physical`. |
+| When to re-base immediately, off-cadence? | After **every restore** (PBM requires a fresh base for PITR anyway — `post_restore_required` says so), and after any increment ends in `error` (the chain tail is no longer trustworthy). |
+
+Re-base procedure with this gateway (order matters — the old chain is your
+only restore point until the new base is `done`):
+
+```text
+1  POST pbm/backup {"type": "physical"}          ← standalone safety anchor, restorable on its own
+2  POST pbm/delete {"backup_name": "<old-base>", ...confirm}   ← cascades the WHOLE old chain
+3  POST pbm/backup {"type": "incremental"}       ← no chain exists now → auto-becomes the new base
+```
+
+Retention nuance: `pbm/delete older_than=` (PBM `cleanup`) only removes a
+chain **as a whole** once *every* link is older than the cutoff — a chain
+that keeps growing never ages out, which is exactly why the explicit
+re-base above exists. `pbm/schedule` manages a single CronJob per
+deployment, so the weekly re-base is a runbook step, not a second schedule.
 
 ### Engine capability matrix: official `mongo` vs `percona/percona-server-mongodb`
 
@@ -539,17 +577,25 @@ pbm/restore (physical/incremental target, confirm=true)
          agent sidecar's image into an emptyDir → /opt/pbm-bin
        • mongod container command → supervisor: original mongod command
          line as a background child + pbm-agent in a foreground retry loop
-         (agent can now stop/start mongod freely inside the container)
+         (agent can now stop/start mongod freely inside the container).
+         mongod retries on ABNORMAL exit only — a clean shutdown (rc 0,
+         which is how pbm-agent stops it for the file-copy phase) ends the
+         loop, so the supervisor never fights the agent for the data files
        • PBM_MONGODB_URI env copied verbatim from the sidecar spec
          (dependency closure of $(VAR) refs — read live, never guessed)
        • probes removed; the normal agent sidecar parked on sleep
-  4  force-recreate all pods on the takeover template; wait agents ok
-  5  pbm restore <name>   (or --time T --base-snapshot <base>)
+  4  recreate all pods on the takeover template; wait agents ok
+     (GRACEFUL deletes — a force-delete frees the pod name before the old
+     containers die, and the replacement mongod then loses the dbPath
+     flock race against its own predecessor: DBPathInUse)
+  5  pbm restore --yes <name>   (or --time T --base-snapshot <base>;
+     --yes because PBM ≥ 2.14 interactively confirms restores — over
+     kubectl exec stdin is EOF and the restore would silently cancel)
   6  poll progress ON THE S3 STORAGE (describe-restore -c … — the
      database is down; the config is piped via stdin, never on an argv)
   7  surgical revert (original command/args/probes back, injected
      env/volume/initContainer $patch:delete'd, annotations cleared)
-  8  force-recreate all pods → mongod boots on the RESTORED data
+  8  recreate all pods (graceful, as in 4) → mongod boots on the RESTORED data
   9  pbm config --force-resync  → result carries post_restore_required
 ```
 

@@ -169,6 +169,7 @@ wait_for_task() {
 
   # and the listing must no longer contain it
   http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-1"}'
+  assert_equal "$HTTP_CODE" "202"
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   wait_for_task "$AQSH_URL" "$task_id"
   data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')

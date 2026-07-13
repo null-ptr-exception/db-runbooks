@@ -77,17 +77,31 @@ if ! setup_minio_client >/dev/null 2>&1; then
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
 fi
 
-# Existence check + TYPE detection in one `--json ls` of the exact name: it
-# matches a flat object (type=file, logical backup) and/or a directory entry
-# (type=directory, physical backup). Missing => 'no object found', exit 1 —
-# refuse so a typo reports clearly instead of a silent no-op.
-if ! ENTRIES="$(s5 --json ls "$TARGET" 2>&1)"; then
-  if grep -q "no object found" <<<"$ENTRIES"; then
-    mdbt_fail "$OP" "backup '${BACKUP_NAME}' not found for namespace '${NAMESPACE}'" \
-      "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2
+# `s5cmd ls <name>` matches by PREFIX, so "backup-1" also returns a sibling
+# "backup-10". Every presence decision below therefore filters the JSON entries
+# down to an EXACT match first: key == name (flat object) or key == name + "/"
+# (directory). Emits the matching entries, one per line; exits 1 if none.
+_exact_entries() {
+  local raw
+  raw="$(s5 --json ls "$TARGET" 2>/dev/null)" || return 1
+  raw="$(jq -c --arg t "$TARGET" 'select(.key == $t or .key == ($t + "/"))' <<<"$raw")"
+  [[ -n "$raw" ]] || return 1
+  printf '%s' "$raw"
+}
+
+# Existence check + TYPE detection in one exact-filtered `--json ls`. Missing
+# (either 'no object found' or only prefix-siblings) => refuse, so a typo
+# reports clearly instead of a silent no-op. Other ls failures (auth / network)
+# must not masquerade as not-found.
+if ! LS_RAW="$(s5 --json ls "$TARGET" 2>&1)"; then
+  if ! grep -q "no object found" <<<"$LS_RAW"; then
+    mdbt_fail "$OP" "failed to check backup '${BACKUP_NAME}': ${LS_RAW}" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 1
   fi
-  mdbt_fail "$OP" "failed to check backup '${BACKUP_NAME}': ${ENTRIES}" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 1
+fi
+if ! ENTRIES="$(_exact_entries)"; then
+  mdbt_fail "$OP" "backup '${BACKUP_NAME}' not found for namespace '${NAMESPACE}'" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2
 fi
 
 # Delete by detected type. This must NOT be a bare `s5 rm "$TARGET"` for a
@@ -104,9 +118,10 @@ while IFS= read -r entry; do
   fi
 done <<<"$ENTRIES"
 
-# Verify-after: the exact name must now resolve to nothing. This is the real
-# success signal (rm's own exit code cannot be trusted for prefixes, above).
-if s5 ls "$TARGET" >/dev/null 2>&1; then
+# Verify-after on the same exact match: the name must now resolve to nothing —
+# rm's own exit code cannot be trusted for prefixes (above), and a surviving
+# prefix-sibling like "backup-10" must NOT count as "still present".
+if _exact_entries >/dev/null; then
   mdbt_fail "$OP" "failed to delete backup '${BACKUP_NAME}' from ${NAMESPACE} (still present after delete)" \
     "$(delete_result false false)" 1
 fi

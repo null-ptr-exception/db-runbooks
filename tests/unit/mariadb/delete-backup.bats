@@ -33,15 +33,23 @@ while (( i < ${#args[@]} )); do
 done
 case "$cmd" in
   ls)
-    if [[ -f "${MOCK_DELETED_FLAG}" || "${MOCK_S5_TYPE:-file}" == "none" ]]; then
+    # s5cmd ls matches by PREFIX: with MOCK_S5_SIBLING=1 a sibling whose name
+    # extends the target's (e.g. snap-1 -> snap-10) is always in the listing.
+    out=""
+    if [[ "${MOCK_S5_SIBLING:-0}" == "1" ]]; then
+      out+="$(printf '{"key":"%s0","last_modified":"2026-01-01T00:00:00.000Z","type":"file","size":9}' "$target")"$'\n'
+    fi
+    if [[ ! -f "${MOCK_DELETED_FLAG}" && "${MOCK_S5_TYPE:-file}" != "none" ]]; then
+      if [[ "${MOCK_S5_TYPE:-file}" == "directory" ]]; then
+        out+="$(printf '{"key":"%s/","type":"directory"}' "$target")"$'\n'
+      else
+        out+="$(printf '{"key":"%s","last_modified":"2026-01-01T00:00:00.000Z","type":"file","size":123}' "$target")"$'\n'
+      fi
+    fi
+    if [[ -z "$out" ]]; then
       echo "ERROR \"ls ${target}\": no object found" >&2; exit 1
     fi
-    if [[ "${MOCK_S5_TYPE:-file}" == "directory" ]]; then
-      printf '{"key":"%s/","type":"directory"}\n' "$target"
-    else
-      printf '{"key":"%s","last_modified":"2026-01-01T00:00:00.000Z","type":"file","size":123}\n' "$target"
-    fi
-    exit 0 ;;
+    printf '%s' "$out"; exit 0 ;;
   rm)
     printf '%s' "$target" > "${MOCK_RM_CAPTURE}"
     # silent-no-op mode: exit 0 but delete nothing (real s5cmd does this for a
@@ -129,4 +137,23 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
   [[ "$(field '.message')" == *"still present"* ]]
+}
+
+@test "delete-backup reports not-found when only a prefix-sibling exists" {
+  # snap-1 is absent; snap-10 matches the prefix listing but not the exact key
+  run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=snap-1 MOCK_S5_TYPE=none MOCK_S5_SIBLING=1
+  [ "$status" -ne 0 ]
+  [ "$(field '.status')" = "error" ]
+  [[ "$(field '.message')" == *"not found"* ]]
+  [ ! -f "${RM_CAPTURE}" ]
+}
+
+@test "delete-backup succeeds although a prefix-sibling survives the delete" {
+  # snap-10 remains in the prefix listing after snap-1 is deleted — the
+  # verify-after must not misread it as "still present"
+  run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=snap-1 MOCK_S5_TYPE=file MOCK_S5_SIBLING=1
+  [ "$status" -eq 0 ]
+  [ "$(field '.status')" = "success" ]
+  [ "$(field '.data.deleted')" = "true" ]
+  [ "$(cat "${RM_CAPTURE}")" = "s3://db-backups/mariadb/mariadb-1/snap-1" ]
 }

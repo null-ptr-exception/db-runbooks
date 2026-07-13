@@ -55,11 +55,16 @@ PBM has two hard prerequisites the tasks can check but not create:
 
 1. **A replica set.** Even single-node: mongod must run with `--replSet` and
    the set must be initiated. Standalone mongod is not supported by PBM.
-2. **A `pbm-agent` sidecar in every mongod pod** (image
-   `percona/percona-backup-mongodb`), with `PBM_MONGODB_URI` in its env
-   pointing at its local mongod (`mongodb://<user>:<pass>@localhost:27017`,
+2. **A `pbm-agent` sidecar, version 2.14 or newer, in every mongod pod**
+   (image `percona/percona-backup-mongodb`), with `PBM_MONGODB_URI` in its
+   env pointing at its local mongod (`mongodb://<user>:<pass>@localhost:27017`,
    credentials via `secretKeyRef` composition). The agent is the component
-   that reads/writes the S3 storage; aqsh only drives it.
+   that reads/writes the S3 storage; aqsh only drives it. **2.14+ is a hard
+   requirement, not just a recommendation**: that release made `pbm restore`
+   interactively confirm ("Are you sure...? [y/N]") unless `-y`/`--yes` is
+   passed, and every restore this gateway issues passes `--yes` — an older
+   agent CLI does not recognize the flag (`unknown long flag '--yes'`) and
+   every restore fails outright.
 
 A namespace without the sidecar fails every `pbm/*` task with
 `NO_PBM_AGENT` and the container list it inspected. See
@@ -526,8 +531,12 @@ only restore point until the new base is `done`):
 Retention nuance: `pbm/delete older_than=` (PBM `cleanup`) only removes a
 chain **as a whole** once *every* link is older than the cutoff — a chain
 that keeps growing never ages out, which is exactly why the explicit
-re-base above exists. `pbm/schedule` manages a single CronJob per
-deployment, so the weekly re-base is a runbook step, not a second schedule.
+re-base above exists. Its dry-run preview lists individual snapshots past
+the cutoff regardless of chain membership (`pbm cleanup`'s own retention
+math, the source of truth, only runs at confirm time) — don't read the
+preview as "these exact names will go" for a chain still being extended.
+`pbm/schedule` manages a single CronJob per deployment, so the weekly
+re-base is a runbook step, not a second schedule.
 
 ### Engine capability matrix: official `mongo` vs `percona/percona-server-mongodb`
 

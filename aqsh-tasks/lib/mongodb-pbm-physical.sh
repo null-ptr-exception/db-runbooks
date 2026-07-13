@@ -199,7 +199,8 @@ pbm_phys_patch_takeover() {
                 livenessProbe: ($mc.livenessProbe // null),
                 startupProbe: ($mc.startupProbe // null)},
        agent: {command: ($ac.command // null), args: ($ac.args // null)},
-       added_env: $added}' 2>/dev/null) || return 1
+       added_env: $added,
+       termination_grace_period: (.spec.template.spec.terminationGracePeriodSeconds // 30)}' 2>/dev/null) || return 1
 
   local agent_image
   agent_image=$(printf '%s' "$sts_json" | jq -r --arg a "$agent_c" '
@@ -210,22 +211,21 @@ pbm_phys_patch_takeover() {
   # child of the supervisor: pbm-agent can shut it down (db.shutdownServer)
   # without the container dying, and spawns its own temporary mongods
   # (from PATH — the mongod image) during the restore phases.
+  #
+  # One-shot on purpose — NOT retried. The dbPath-flock race this could
+  # otherwise hit (a recreated pod's mongod starting before its predecessor's
+  # container is actually dead) is closed one layer down, by
+  # pbm_phys_recreate_pods using a graceful delete: the replacement pod
+  # object cannot exist until the old container is gone, so the two mongods
+  # are never up at once. A retry loop here would instead risk relaunching
+  # mongod against a live pbm-agent restore in progress if it ever exited
+  # abnormally mid-restore for an unrelated reason (OOM, etc).
   local mongod_cmdline supervisor
   mongod_cmdline=$(printf '%s' "$snapshot" | jq -r \
     '((.mongod.command // []) + (.mongod.args // [])) | map(@sh) | join(" ")')
-  # mongod runs under an until-loop: retry on ABNORMAL exit only. A recreated
-  # pod can transiently lose the dbPath flock race against its own
-  # still-terminating predecessor (DBPathInUse, exit 100) — one-shot startup
-  # left the whole takeover agent-less. A clean shutdown (rc 0 — that is how
-  # pbm-agent stops mongod for the restore's file-copy phase) ends the loop,
-  # so the loop never fights the agent for the data files.
   supervisor=$(printf '%s\n' \
-    "echo '[pbm-takeover] starting mongod (background, retries on abnormal exit) + pbm-agent (foreground retry loop)'" \
-    "( until ${mongod_cmdline}; do" \
-    "    echo \"[pbm-takeover] mongod exited rc=\$?; retrying in 2s\"" \
-    "    sleep 2" \
-    "  done" \
-    "  echo '[pbm-takeover] mongod exited cleanly; leaving it down (pbm-agent owns the lifecycle now)' ) &" \
+    "echo '[pbm-takeover] starting mongod (background) + pbm-agent (foreground retry loop)'" \
+    "${mongod_cmdline} &" \
     "export PATH=\"${_PBM_PHYS_BIN_DIR}:\$PATH\"" \
     "while true; do" \
     "  ${_PBM_PHYS_BIN_DIR}/pbm-agent" \
@@ -233,6 +233,14 @@ pbm_phys_patch_takeover() {
     "  sleep 5" \
     "done")
 
+  # terminationGracePeriodSeconds is shortened for the takeover template
+  # only: takeover pods are never gracefully shut down from the inside
+  # (mongod is stopped over the wire by pbm-agent, not by a signal), and
+  # the /bin/sh -c supervisor that ends up as PID 1 has no TERM trap — the
+  # kernel does not apply the default SIGTERM action to an unhandled signal
+  # on PID 1, so without this every delete of a takeover pod (revert,
+  # rollback) would sit out the full original grace period before the
+  # kubelet SIGKILLs it. Reverted to the snapshotted original value below.
   local patch
   patch=$(jq -nc \
     --arg anno "$_PBM_PHYS_ANNOTATION" --arg orig_anno "$_PBM_PHYS_ORIGINAL_ANNOTATION" \
@@ -247,6 +255,7 @@ pbm_phys_patch_takeover() {
       spec: {
         updateStrategy: {rollingUpdate: {partition: 0}},
         template: {spec: {
+          terminationGracePeriodSeconds: 5,
           initContainers: [{name: $init_name, image: $image,
             command: ["sh", "-c",
               "cp /usr/bin/pbm /usr/bin/pbm-agent /pbm-bin/ && chmod 755 /pbm-bin/pbm /pbm-bin/pbm-agent"],
@@ -297,6 +306,7 @@ pbm_phys_revert_takeover() {
     --argjson o "$orig" \
     '{metadata: {annotations: {($anno): null, ($orig_anno): null}},
       spec: {template: {spec: {
+        terminationGracePeriodSeconds: ($o.termination_grace_period // 30),
         initContainers: [{name: $init_name, "$patch": "delete"}],
         volumes: [{name: $vol, "$patch": "delete"}],
         containers: [

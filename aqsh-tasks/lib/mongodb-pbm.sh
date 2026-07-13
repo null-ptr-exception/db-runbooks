@@ -568,7 +568,10 @@ pbm_wait_backup() {
 # ---------------------------------------------------------------------------
 pbm_start_restore() {
   local pod="${1:?}" container="${2:?}" backup_name="${3:-}" time="${4:-}" ns_filter="${5:-}"
-  local args=(restore)
+  # --yes: pbm restore interactively asks "Are you sure you want to start the
+  # restore? [y/N]" (observed on 2.15) — over kubectl exec stdin is EOF, so
+  # without the flag the restore silently cancels ({"msg":"canceled"}).
+  local args=(restore --yes)
   if [[ -n "$backup_name" ]]; then
     args+=("$backup_name")
   else

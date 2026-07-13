@@ -313,11 +313,13 @@ if ! pbm_phys_wait_agents "$PBM_POD" "$_MONGOD_C" "$_REPLICAS" 240; then
     '{"hint":"kubectl logs <pod> -c '"$_MONGOD_C"' shows the supervisor + pbm-agent output; the takeover was rolled back"}'
 fi
 
+# --yes for the same reason as pbm_start_restore: the interactive
+# confirmation prompt reads EOF over kubectl exec and cancels the restore.
 _RESTORE_ARGS=()
 if [[ -n "$_BACKUP_NAME" ]]; then
-  _RESTORE_ARGS=(restore "$_BACKUP_NAME")
+  _RESTORE_ARGS=(restore --yes "$_BACKUP_NAME")
 else
-  _RESTORE_ARGS=(restore --time "$_TIME" --base-snapshot "$_BASE_NAME")
+  _RESTORE_ARGS=(restore --yes --time "$_TIME" --base-snapshot "$_BASE_NAME")
 fi
 _START_OUT=$(_pbm_phys_exec_json "$PBM_POD" "$_MONGOD_C" "${_RESTORE_ARGS[@]}") || {
   _phys_rollback "pbm restore start"

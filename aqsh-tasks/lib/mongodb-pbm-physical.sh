@@ -213,9 +213,19 @@ pbm_phys_patch_takeover() {
   local mongod_cmdline supervisor
   mongod_cmdline=$(printf '%s' "$snapshot" | jq -r \
     '((.mongod.command // []) + (.mongod.args // [])) | map(@sh) | join(" ")')
+  # mongod runs under an until-loop: retry on ABNORMAL exit only. A recreated
+  # pod can transiently lose the dbPath flock race against its own
+  # still-terminating predecessor (DBPathInUse, exit 100) — one-shot startup
+  # left the whole takeover agent-less. A clean shutdown (rc 0 — that is how
+  # pbm-agent stops mongod for the restore's file-copy phase) ends the loop,
+  # so the loop never fights the agent for the data files.
   supervisor=$(printf '%s\n' \
-    "echo '[pbm-takeover] starting mongod (background) + pbm-agent (foreground retry loop)'" \
-    "${mongod_cmdline} &" \
+    "echo '[pbm-takeover] starting mongod (background, retries on abnormal exit) + pbm-agent (foreground retry loop)'" \
+    "( until ${mongod_cmdline}; do" \
+    "    echo \"[pbm-takeover] mongod exited rc=\$?; retrying in 2s\"" \
+    "    sleep 2" \
+    "  done" \
+    "  echo '[pbm-takeover] mongod exited cleanly; leaving it down (pbm-agent owns the lifecycle now)' ) &" \
     "export PATH=\"${_PBM_PHYS_BIN_DIR}:\$PATH\"" \
     "while true; do" \
     "  ${_PBM_PHYS_BIN_DIR}/pbm-agent" \
@@ -310,9 +320,14 @@ pbm_phys_revert_takeover() {
 
 # ---------------------------------------------------------------------------
 # pbm_phys_recreate_pods <sts_name> <timeout_seconds>
-# Force-delete every pod of the StatefulSet so they re-create with the
-# current template (takeover or reverted), then wait until spec.replicas
-# pods are Ready again. OrderedReady handles the recreation sequence.
+# Delete every pod of the StatefulSet so they re-create with the current
+# template (takeover or reverted), then wait until spec.replicas pods are
+# Ready again. GRACEFUL delete on purpose: --force removes the pod object
+# from the API before the old containers are actually dead, so the
+# replacement's mongod races its own still-running predecessor for the
+# dbPath flock and loses (DBPathInUse — field-hit in CI). A normal delete
+# only releases the name once the containers are gone. --wait=false keeps
+# the deletes concurrent; the Ready poll below is the real barrier.
 # ---------------------------------------------------------------------------
 pbm_phys_recreate_pods() {
   local sts_name="${1:?}" timeout="${2:-420}"
@@ -329,8 +344,8 @@ pbm_phys_recreate_pods() {
   pods=$(_recovery_list_pods "$sts_name") || true
   while IFS= read -r pod; do
     [[ -z "$pod" ]] && continue
-    log_debug "$_op" "force-deleting pod ${pod}"
-    _kubectl delete pod "$pod" --grace-period=0 --force >/dev/null 2>&1 || true
+    log_debug "$_op" "deleting pod ${pod} (graceful)"
+    _kubectl delete pod "$pod" --wait=false >/dev/null 2>&1 || true
   done <<< "$pods"
 
   local start now ready

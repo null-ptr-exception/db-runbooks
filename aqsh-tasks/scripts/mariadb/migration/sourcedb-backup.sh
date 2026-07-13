@@ -192,8 +192,13 @@ _kubectl create secret generic "$TEMP_SECRET_NAME" \
 unset MINIO_SECRET_KEY
 
 # Wire credential references for the manifest builder.
+# BACKUP_ACCESS_SECRET/KEY/SECRET_KEY are read by mdbt_physical_backup_manifest
+# in mariadb-task-common.sh, not referenced again in this file.
+# shellcheck disable=SC2034
 BACKUP_ACCESS_SECRET="$TEMP_SECRET_NAME"
+# shellcheck disable=SC2034
 BACKUP_ACCESS_KEY="$_CRED_ACCESS_KEY_NAME"
+# shellcheck disable=SC2034
 BACKUP_SECRET_KEY="$_CRED_SECRET_KEY_NAME"
 
 # --- Build and apply PhysicalBackup CR ---------------------------------------

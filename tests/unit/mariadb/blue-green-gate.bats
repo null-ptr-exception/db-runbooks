@@ -11,6 +11,7 @@
 #   MOCK_HAS_EXT=0  it does not (legacy operator)
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
   MOCK_DIR="$(mktemp -d)"

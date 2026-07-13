@@ -15,6 +15,7 @@
 #   MOCK_TABLE_COUNT   user-table count the verify query returns (default 5)
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   RESTORE_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/restore.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"

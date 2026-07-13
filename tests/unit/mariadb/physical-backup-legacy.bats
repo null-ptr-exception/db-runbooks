@@ -12,6 +12,7 @@
 #   MOCK_PIPE_FAIL=1  mc pipe (upload) fails
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   BACKUP_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/physical-backup.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
@@ -19,6 +20,7 @@ setup() {
   MOCK_DIR="$(mktemp -d)"
   RESULT="${MOCK_DIR}/result.json"
   PIPE_CAPTURE="${MOCK_DIR}/streamed.xb"
+  EXEC_CAPTURE="${MOCK_DIR}/exec.args"
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
@@ -36,7 +38,10 @@ case "$verb" in
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";            exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  exec) [[ "${MOCK_EXEC_FAIL:-0}" == "1" ]] && exit 1 || { printf 'XBSTREAM_BYTES'; exit 0; } ;;
+  exec)
+    printf '%s' "$args" > "${MOCK_EXEC_CAPTURE:-/dev/null}"
+    [[ "${MOCK_ROOT_PW-s3cret}" == "" ]] && exit 3
+    [[ "${MOCK_EXEC_FAIL:-0}" == "1" ]] && exit 1 || { printf 'XBSTREAM_BYTES'; exit 0; } ;;
   *) exit 0 ;;
 esac
 MOCK
@@ -64,6 +69,7 @@ run_backup() {
     "LIB_DIR=${LIB_DIR_REAL}" \
     "AQSH_RESULT_FILE=${RESULT}" \
     "MOCK_PIPE_CAPTURE=${PIPE_CAPTURE}" \
+    "MOCK_EXEC_CAPTURE=${EXEC_CAPTURE}" \
     BACKUP_COMPRESSION=none \
     "$@" \
     bash "${BACKUP_SH}"
@@ -89,6 +95,13 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(cat "${PIPE_CAPTURE}")" = "XBSTREAM_BYTES" ]   # the stream reached mc pipe
 }
 
+@test "legacy bounds the remote mariabackup stream with a configurable timeout" {
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MDBT_PB_STREAM_TIMEOUT=17
+  [ "$status" -eq 0 ]
+  [[ "$(cat "${EXEC_CAPTURE}")" == *"MDBT_PB_STREAM_TIMEOUT=17"* ]]
+  [[ "$(cat "${EXEC_CAPTURE}")" == *'timeout "$MDBT_PB_STREAM_TIMEOUT" mariabackup'* ]]
+}
+
 @test "legacy apply prefers a replica pod when several exist" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
@@ -99,7 +112,14 @@ result_field() { jq -r "$1" "${RESULT}"; }
 @test "legacy Primary target backs up from ordinal 0" {
   run_backup DRY_RUN=true MARIADB_NAME=mariadb BACKUP_TARGET=Primary \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
+  [ "$status" -eq 0 ]
   [ "$(result_field '.data.sourcePod')" = "mariadb-0" ]
+}
+
+@test "legacy fails closed when the container has no root credential" {
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_ROOT_PW=""
+  [ "$status" -ne 0 ]
+  [[ "$(result_field '.message')" == *"3=no root credential"* ]]
 }
 
 @test "legacy fails when the mariadb container cannot run mariabackup" {

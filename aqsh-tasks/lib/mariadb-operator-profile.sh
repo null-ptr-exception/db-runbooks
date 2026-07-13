@@ -50,10 +50,14 @@ _MDB_OPERATOR_GROUP_FALLBACK="k8s.mariadb.com"
 # this preserves API discovery failures so mutating capability routes can fail
 # closed rather than confusing "unknown" with "CRD absent".
 _mdb_discover_operator_groups() {
-  local resources
-  resources="$(_kubectl_global api-resources --cached=false -o name 2>/dev/null)" \
-    || return 2
-  sed -n 's/^mariadbs\.//p' <<<"$resources" | sed '/^$/d' | sort -u
+  local resources groups rc=0
+  resources="$(_kubectl_global api-resources --cached=false -o name 2>/dev/null)" || rc=$?
+  groups="$(sed -n 's/^mariadbs\.//p' <<<"$resources" | sed '/^$/d' | sort -u)"
+  if [[ -n "$groups" ]]; then
+    printf '%s\n' "$groups"
+    return 0
+  fi
+  [[ "$rc" -eq 0 ]] || return 2
 }
 
 # _mdb_detect_operator_group
@@ -126,11 +130,14 @@ mdb_is_legacy_operator() {
 # This is intentionally distinct from a plain boolean because absence enables
 # the hand-rolled legacy path, whereas "unknown" must never enable mutations.
 mdb_crd_status() {
-  local plural="${1:?plural is required}" group resources
+  local plural="${1:?plural is required}" group resources rc=0
   group="$(mdb_operator_group)"
-  resources="$(_kubectl_global api-resources --cached=false --api-group="$group" -o name 2>/dev/null)" \
-    || return 2
-  grep -Fxq "${plural}.${group}" <<<"$resources"
+  resources="$(_kubectl_global api-resources --cached=false --api-group="$group" -o name 2>/dev/null)" || rc=$?
+  grep -Fxq "${plural}.${group}" <<<"$resources" && return 0
+  # A partial result for the requested group proves that its discovery worked;
+  # a non-zero kubectl status may only describe an unrelated broken APIService.
+  [[ "$rc" -eq 0 || "$resources" == *".${group}"* ]] && return 1
+  return 2
 }
 
 # mdb_has_crd <plural>

@@ -68,6 +68,8 @@ mdbt_pb_handrolled_plan() {
 # success; on failure writes nothing (caller renders the error). Echoes nothing.
 mdbt_pb_handrolled_run() {
   local pod="$1" container="$2" bucket="$3" object="$4"
+  local stream_timeout="${MDBT_PB_STREAM_TIMEOUT:-3600}"
+  [[ "$stream_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
   setup_minio_client >/dev/null 2>&1 || return 4
   ensure_bucket "$bucket" >/dev/null 2>&1 || return 4
 
@@ -76,10 +78,13 @@ mdbt_pb_handrolled_run() {
   # A subshell keeps pipefail local while preserving either producer/upload error.
   (
     set -o pipefail
-    _kubectl exec "$pod" -c "$container" -- sh -ceu '
-      : "${MARIADB_ROOT_PASSWORD:?MARIADB_ROOT_PASSWORD is empty}"
+    _kubectl exec "$pod" -c "$container" -- env "MDBT_PB_STREAM_TIMEOUT=${stream_timeout}" sh -ceu '
+      if [ -z "${MARIADB_ROOT_PASSWORD:-}" ]; then
+        echo "MARIADB_ROOT_PASSWORD is empty" >&2
+        exit 3
+      fi
       export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"
-      exec mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1
+      exec timeout "$MDBT_PB_STREAM_TIMEOUT" mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1
     ' | mc pipe "minio/${bucket}/${object}"
   )
 }

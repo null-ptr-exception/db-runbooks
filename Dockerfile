@@ -1,6 +1,7 @@
 FROM ghcr.io/null-ptr-exception/aqsh:0.5.0
 
 ARG KUBECTL_VERSION=v1.30.0
+ARG S5CMD_VERSION=2.3.0
 
 # Install base tools + mongosh + mariadb-client
 RUN apt-get update \
@@ -22,9 +23,19 @@ RUN apt-get update \
     && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
     && chmod +x /usr/local/bin/kubectl \
     && rm -f /tmp/kubectl.sha256 \
-    # MinIO client (mc)
-    && curl -fsSLo /usr/local/bin/mc "https://dl.min.io/client/mc/release/linux-$(dpkg --print-architecture)/mc" \
-    && chmod +x /usr/local/bin/mc
+    # s5cmd — S3 client for the backup tasks (#57: replaced mc; pinned GitHub
+    # release + checksum, unlike the unpinned dl.min.io fetch that broke in #70)
+    && arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) s5_asset="Linux-64bit"; s5_sha256="de0fdbfa3aceae55e069ba81a0fc17b2026567637603734a387b2fca06c299b4" ;; \
+         arm64) s5_asset="Linux-arm64"; s5_sha256="1439f0d00ecedcd2a2f1f2c6749bbb0152b2257bf5086f29646ec8ae38798e24" ;; \
+         *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSLo /tmp/s5cmd.tar.gz "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_${s5_asset}.tar.gz" \
+    && echo "${s5_sha256}  /tmp/s5cmd.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/s5cmd.tar.gz -C /usr/local/bin s5cmd \
+    && chmod +x /usr/local/bin/s5cmd \
+    && rm -f /tmp/s5cmd.tar.gz
 
 # Both the main configs (task-*.yaml: defaults + include) and the included task
 # lists (tasks-*.yaml) land flat in /etc/aqsh so the relative include resolves.

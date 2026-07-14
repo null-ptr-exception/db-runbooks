@@ -59,16 +59,27 @@ esac
 MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
-  cat > "${MOCK_DIR}/mc" <<'MC'
+  cat > "${MOCK_DIR}/s5cmd" <<'S5CMD'
 #!/usr/bin/env bash
-case "$1" in
-  alias) exit 0 ;;
-  ls)    for n in ${MOCK_XB_LIST-mariadb-20260708120000.xb}; do printf '%s\n' "$n"; done; exit 0 ;;
-  cp)    exit 0 ;;
+args=("$@"); cmd=""; target=""; i=0
+while (( i < ${#args[@]} )); do
+  case "${args[$i]}" in
+    --endpoint-url) i=$((i+2)) ;;
+    --*) i=$((i+1)) ;;
+    *) cmd="${args[$i]}"; target="${args[$((i+1))]:-}"; break ;;
+  esac
+done
+case "$cmd" in
+  ls)
+    [[ -n "${MOCK_XB_LIST-mariadb-20260708120000.xb}" ]] || { echo 'no object found' >&2; exit 1; }
+    for n in ${MOCK_XB_LIST-mariadb-20260708120000.xb}; do
+      jq -nc --arg key "${target}${n}" '{key:$key,type:"file",size:123}'
+    done
+    exit 0 ;;
   *)     exit 0 ;;
 esac
-MC
-  chmod +x "${MOCK_DIR}/mc"
+S5CMD
+  chmod +x "${MOCK_DIR}/s5cmd"
 
   export DB_NAMESPACE="mariadb-1"
 }
@@ -105,6 +116,10 @@ result_field() { jq -r "$1" "${RESULT}"; }
   # all three objects were applied, and the MariaDB carries NO bootstrapFrom
   [ "$(jq -r '.kind' "${CAP_DIR}/PersistentVolumeClaim.json")" = "PersistentVolumeClaim" ]
   [ "$(jq -r '.kind' "${CAP_DIR}/Job.json")" = "Job" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].image' "${CAP_DIR}/Job.json")" = "peakcom/s5cmd:v2.3.0" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].command[0]' "${CAP_DIR}/Job.json")" = "/s5cmd" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].args[3]' "${CAP_DIR}/Job.json")" = "s3://db-backups/mariadb/mariadb-1/mariadb-20260708120000.xb" ]
+  [ "$(jq -r '.stringData | has("AWS_ACCESS_KEY_ID") and has("AWS_SECRET_ACCESS_KEY")' "${CAP_DIR}/Secret.json")" = "true" ]
   [ "$(jq -r '.spec | has("bootstrapFrom")' "${CAP_DIR}/MariaDB.json")" = "false" ]
 }
 

@@ -8,14 +8,14 @@
 #
 # Approach: run `mariabackup --backup --stream=xbstream` INSIDE the source pod
 # (that is where the datadir + running server live; the aqsh image ships only
-# mariadb-client, not mariabackup) and pipe its stdout straight to S3 via `mc`.
+# mariadb-client, not mariabackup) and pipe its stdout straight to S3 via s5cmd.
 # The artifact lands at s3://<bucket>/<prefix>/<name>.xb, a single xbstream — the
 # hand-rolled restore (Phase 2b) reads exactly that layout.
 #
 # ASSUMPTIONS (validated in the legacy-operator e2e):
 #   - the mariadb image in the pod provides `mariabackup` + `mbstream`
 #   - the operator injects MARIADB_ROOT_PASSWORD into the MariaDB container
-#   - streaming exec | mc pipe is acceptable (no resume/checkpoint); fine for the
+#   - streaming exec | s5 pipe is acceptable (no resume/checkpoint); fine for the
 #     sandbox scale this runbook targets
 # =============================================================================
 
@@ -85,6 +85,6 @@ mdbt_pb_handrolled_run() {
       fi
       export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"
       exec timeout "$MDBT_PB_STREAM_TIMEOUT" mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1
-    ' | mc pipe "minio/${bucket}/${object}"
+    ' | s5 pipe "s3://${bucket}/${object}"
   )
 }

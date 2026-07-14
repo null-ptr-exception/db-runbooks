@@ -109,12 +109,12 @@ sql() {
   object=$(echo "$result" | jq -r '.data.backup.object')
   [[ "$object" == mariadb/mariadb-1/*.xb ]]
   assert_equal "$(echo "$result" | jq -r '.data.backup.compression')" none
-  run kubectl --context "$CTX_B" -n minio run phase23-mc-stat \
-    --image=minio/mc:RELEASE.2024-11-21T17-21-54Z --restart=Never --rm -i \
-    --env=MC_HOST_local=http://minioadmin:minioadmin-changeme-prod@minio:9000 \
-    --command -- /usr/bin/mc stat "local/db-backups/${object}"
+  run kubectl --context "$CTX_B" -n minio run phase23-s5cmd-ls \
+    --image=peakcom/s5cmd:v2.3.0 --restart=Never --rm -i \
+    --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin-changeme-prod \
+    --command -- /s5cmd --json --endpoint-url http://minio:9000 ls "s3://db-backups/${object}"
   assert_success
-  assert_output --partial "Size"
+  assert_output --partial '"size"'
 
   # The backup completed before this mutation, so a successful restore must not
   # contain the later row.

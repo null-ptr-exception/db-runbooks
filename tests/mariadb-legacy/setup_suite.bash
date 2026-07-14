@@ -71,12 +71,9 @@ setup_suite() {
   wait_deployment_rollout kind-cluster-b db-ops test-client 180s
   wait_deployment_rollout kind-cluster-b minio minio 180s
 
-  kubectl --context kind-cluster-b -n minio run mc-init --image=minio/mc:RELEASE.2024-11-21T17-21-54Z \
-    --restart=Never --rm -i --command -- /usr/bin/mc alias set local \
-    http://minio:9000 minioadmin minioadmin-changeme-prod --api S3v4
-  kubectl --context kind-cluster-b -n minio run mc-bucket --image=minio/mc:RELEASE.2024-11-21T17-21-54Z \
-    --restart=Never --rm -i --env=MC_HOST_local=http://minioadmin:minioadmin-changeme-prod@minio:9000 \
-    --command -- /usr/bin/mc mb --ignore-existing local/db-backups
+  kubectl --context kind-cluster-b -n minio run s5cmd-bucket --image=peakcom/s5cmd:v2.3.0 \
+    --restart=Never --rm -i --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin-changeme-prod \
+    --command -- /s5cmd --endpoint-url http://minio:9000 mb s3://db-backups
 }
 
 teardown_suite() {

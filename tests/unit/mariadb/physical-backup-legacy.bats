@@ -3,13 +3,13 @@
 # Contract tests for the LEGACY (hand-rolled) path of mariadb/physical-backup.sh
 # — the branch taken when the operator has no `PhysicalBackup` CRD. It streams
 # `mariabackup --backup --stream=xbstream` from the source pod straight to S3 via
-# mc, instead of creating an operator CR.
+# s5cmd, instead of creating an operator CR.
 #
 # Mock control env vars:
 #   MOCK_PODS         space-separated pod names the StatefulSet lists (replica pick)
 #   MOCK_ROOT_PW      root password stored in the secret ("" → no credential)
 #   MOCK_EXEC_FAIL=1  mariabackup exec fails
-#   MOCK_PIPE_FAIL=1  mc pipe (upload) fails
+#   MOCK_PIPE_FAIL=1  s5cmd pipe (upload) fails
 
 setup() {
   unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
@@ -47,17 +47,24 @@ esac
 MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
-  cat > "${MOCK_DIR}/mc" <<'MC'
+  cat > "${MOCK_DIR}/s5cmd" <<'S5CMD'
 #!/usr/bin/env bash
-case "$1" in
-  alias) exit 0 ;;
-  ls)    [[ "${MOCK_BUCKET_EXISTS:-1}" == "1" ]] && exit 0 || exit 1 ;;
-  mb)    exit 0 ;;
-  pipe)  cat > "${MOCK_PIPE_CAPTURE:-/dev/null}"; [[ "${MOCK_PIPE_FAIL:-0}" == "1" ]] && exit 1 || exit 0 ;;
+args=("$@"); cmd=""; i=0
+while (( i < ${#args[@]} )); do
+  case "${args[$i]}" in
+    --endpoint-url) i=$((i+2)) ;;
+    --*) i=$((i+1)) ;;
+    *) cmd="${args[$i]}"; break ;;
+  esac
+done
+case "$cmd" in
+  ls)   [[ "${MOCK_BUCKET_EXISTS:-1}" == "1" ]] && { echo 'no object found' >&2; exit 1; } || exit 1 ;;
+  mb)   exit 0 ;;
+  pipe) cat > "${MOCK_PIPE_CAPTURE:-/dev/null}"; [[ "${MOCK_PIPE_FAIL:-0}" == "1" ]] && exit 1 || exit 0 ;;
   *)     exit 0 ;;
 esac
-MC
-  chmod +x "${MOCK_DIR}/mc"
+S5CMD
+  chmod +x "${MOCK_DIR}/s5cmd"
 
   export DB_NAMESPACE="mariadb-1"
 }
@@ -92,7 +99,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.created')" = "true" ]
   [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
-  [ "$(cat "${PIPE_CAPTURE}")" = "XBSTREAM_BYTES" ]   # the stream reached mc pipe
+  [ "$(cat "${PIPE_CAPTURE}")" = "XBSTREAM_BYTES" ]   # the stream reached s5cmd pipe
 }
 
 @test "legacy bounds the remote mariabackup stream with a configurable timeout" {

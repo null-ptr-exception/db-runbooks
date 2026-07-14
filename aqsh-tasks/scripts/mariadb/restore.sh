@@ -46,7 +46,7 @@ source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + 
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"              # for mariadb_resolve_name (source auto-detect)
 # shellcheck source=../../lib/minio-client.sh
-source "${LIB_DIR}/minio-client.sh"         # mc helpers for the hand-rolled path
+source "${LIB_DIR}/minio-client.sh"         # s5cmd helpers for the hand-rolled path
 # shellcheck source=../../lib/mariadb-physical-restore.sh
 source "${LIB_DIR}/mariadb-physical-restore.sh"  # hand-rolled physical restore (legacy operator)
 
@@ -372,8 +372,8 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
   fi
 
   rc=0
-  # The prepare Job invokes `mc alias set`, which requires the original URL
-  # including its scheme. OPERATOR_BACKUP_ENDPOINT is only for operator CRs.
+  # The s5cmd prepare Job requires the original endpoint URL including scheme.
+  # OPERATOR_BACKUP_ENDPOINT is only for operator CRs.
   mdbt_pr_orchestrate "$TARGET" "$NAMESPACE" "$IMAGE" "$STORAGE_SIZE" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" \
     "$BACKUP_BUCKET" "$PR_OBJECT" "$BACKUP_ENDPOINT" \
     "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" \

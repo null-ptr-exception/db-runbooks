@@ -152,7 +152,7 @@ mdbt_validate_s3_prefix() {
 
 mdbt_validate_endpoint() {
   local name="$1" value="$2" op="$3"
-  # Accept either a scheme URL (mc-style, as carried in MINIO_ENDPOINT) e.g.
+  # Accept either a scheme URL (as carried in MINIO_ENDPOINT), e.g.
   # http://minio.kind-b.test:30080, or a bare host:port (operator-style) e.g.
   # minio.svc:9000. A bare host with no port (and no scheme) is rejected.
   if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9._-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?|[A-Za-z0-9._-]+:[0-9]+)$ ]]; then

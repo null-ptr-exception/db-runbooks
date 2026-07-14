@@ -33,7 +33,7 @@ source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic h
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"              # for mariadb_autodetect_target (source auto-detect)
 # shellcheck source=../../lib/minio-client.sh
-source "${LIB_DIR}/minio-client.sh"         # mc helpers for the hand-rolled path
+source "${LIB_DIR}/minio-client.sh"         # s5cmd helpers for the hand-rolled path
 # shellcheck source=../../lib/mariadb-physical-backup.sh
 source "${LIB_DIR}/mariadb-physical-backup.sh"  # hand-rolled mariabackup (legacy operator)
 
@@ -154,7 +154,7 @@ backup_status_result() {
 # --- Route by operator capability --------------------------------------------
 # The current operator drives a PhysicalBackup CR (the path below). A legacy
 # operator without that CRD takes the hand-rolled mariabackup path, which streams
-# from the source pod straight to S3 via mc. Unknown or inconsistent discovery
+# from the source pod straight to S3 via s5cmd. Unknown or inconsistent discovery
 # is always a hard error; it must never turn into a mutating fallback.
 PHYSICAL_MODE=""
 mode_rc=0

@@ -21,10 +21,6 @@ fi
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
-# shellcheck source=../../../lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"
-# shellcheck source=../../../lib/mariadb.sh
-source "${LIB_DIR}/mariadb.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -97,6 +93,11 @@ if ! [[ "$TARGET_PORT" =~ ^[0-9]+$ ]]; then
   echo "error: --port must be a positive integer" >&2
   exit 2
 fi
+
+# shellcheck source=../../../lib/k8s.sh
+source "${LIB_DIR}/k8s.sh"
+# shellcheck source=../../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
 
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 

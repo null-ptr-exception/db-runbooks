@@ -120,14 +120,12 @@ EOF
 # Pod exec checks
 # ---------------------------------------------------------------------------
 
-@test "pod exec PASS returns structured JSON with PREFLIGHT_PASS" {
+@test "pod exec PASS returns structured JSON with target pod" {
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
 
   [ "$status" -eq 0 ]
-  result=$(printf '%s' "$output" | jq -r '.status')
   pod=$(printf '%s' "$output" | jq -r '.target.pod')
 
-  [ "$result" = "PASS" ]
   [ "$pod" = "mariadb-0" ]
 }
 

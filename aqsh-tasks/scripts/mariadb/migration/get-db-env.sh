@@ -20,10 +20,6 @@ fi
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
-# shellcheck source=../../../lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"
-# shellcheck source=../../../lib/mariadb.sh
-source "${LIB_DIR}/mariadb.sh"
 
 CONTEXT="${K8S_CONTEXT:-${CONTEXT:-}}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
@@ -82,6 +78,11 @@ if [[ -z "$ENVS_STR" ]]; then
   usage
   exit 2
 fi
+
+# shellcheck source=../../../lib/k8s.sh
+source "${LIB_DIR}/k8s.sh"
+# shellcheck source=../../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
 
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 

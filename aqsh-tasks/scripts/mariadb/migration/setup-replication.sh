@@ -23,10 +23,6 @@ fi
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
-# shellcheck source=../../../lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"
-# shellcheck source=../../../lib/mariadb.sh
-source "${LIB_DIR}/mariadb.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -285,6 +281,11 @@ if ! bool_enabled "$CONFIRM"; then
 fi
 
 # ---------- k8s setup ----------
+# shellcheck source=../../../lib/k8s.sh
+source "${LIB_DIR}/k8s.sh"
+# shellcheck source=../../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
+
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 
 if ! k8s_check >/dev/null; then

@@ -124,8 +124,11 @@ EOF
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
 
   [ "$status" -eq 0 ]
+  result=$(printf '%s' "$output" | jq -r '.status')
   pod=$(printf '%s' "$output" | jq -r '.target.pod')
 
+  # Overall status is WARN, not PASS, because --minio-endpoint is omitted.
+  [ "$result" = "WARN" ]
   [ "$pod" = "mariadb-0" ]
 }
 

@@ -307,17 +307,17 @@ mdbt_physical_backup_manifest() {
     }'
 }
 
-# mdbt_logical_backup_manifest <name> <namespace> <mariadb_ref>
+# mdbt_logical_backup_manifest <name> <namespace> <mariadb_ref> <include_prefix>
 # Emit a mariadb-operator `Backup` CR as JSON (logical / mariadb-dump backup).
 # The single source of truth for the Backup shape, sibling to the PhysicalBackup
-# builder above. Kept to the fields required by BOTH operator generations —
-# mariaDbRef + storage.s3 are the only required fields, and neither `compression`
-# nor `databases` exists on the legacy mmontes-era CRD — so the same manifest
-# applies cleanly whether the cluster runs the current or the legacy operator.
+# builder above. The legacy mmontes-era S3 schema has no `prefix` field, so the
+# caller must pass include_prefix=false for that generation. Neither
+# `compression` nor `databases` is emitted because those fields are also absent
+# from the legacy CRD.
 # S3 location/credentials come from the BACKUP_* environment, identically to the
 # physical builder. A Backup with no schedule runs exactly once, immediately.
 mdbt_logical_backup_manifest() {
-  local name="$1" namespace="$2" mariadb="$3"
+  local name="$1" namespace="$2" mariadb="$3" include_prefix="${4:-true}"
   local operator_endpoint operator_tls
   operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
   operator_tls="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
@@ -334,6 +334,7 @@ mdbt_logical_backup_manifest() {
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
     --arg secretKey "$BACKUP_SECRET_KEY" \
+    --argjson includePrefix "$include_prefix" \
     '{
       apiVersion: $apiVersion,
       kind: "Backup",
@@ -341,15 +342,14 @@ mdbt_logical_backup_manifest() {
       spec: {
         mariaDbRef: {name: $mariadb},
         storage: {
-          s3: {
+          s3: ({
             bucket: $bucket,
-            prefix: $prefix,
             endpoint: $endpoint,
             region: $region,
             tls: {enabled: $tls},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
             secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
-          }
+          } + (if $includePrefix then {prefix: $prefix} else {} end))
         }
       }
     }'

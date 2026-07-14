@@ -91,6 +91,25 @@ sql() {
   assert_output --partial backups.mariadb.mmontes.io
 }
 
+@test "legacy logical Backup omits unsupported prefix and is accepted" {
+  submit logical-backup '{"namespace":"mariadb-1","dry_run":"true"}'
+  result=$(task_result)
+  assert_equal "$(echo "$result" | jq -r '.data.created')" false
+  assert_equal "$(echo "$result" | jq -r '.data.backup.prefixSupported')" false
+  assert_equal "$(echo "$result" | jq -r '.data.manifest | fromjson | .apiVersion')" mariadb.mmontes.io/v1alpha1
+  assert_equal "$(echo "$result" | jq -r '.data.manifest | fromjson | .spec.storage.s3 | has("prefix")')" false
+
+  submit logical-backup '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"0"}'
+  result=$(task_result)
+  backup=$(echo "$result" | jq -r '.data.backupName')
+  assert_equal "$(echo "$result" | jq -r '.data.created')" true
+  assert_equal "$(echo "$result" | jq -r '.data.backup.storageLayout')" bucket-root
+  assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup" -o jsonpath='{.apiVersion}')" mariadb.mmontes.io/v1alpha1
+  assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup" -o jsonpath='{.spec.storage.s3.prefix}')" ""
+  kubectl --context "$CTX_A" -n "$DB_NS" delete backup "$backup" --wait=false >/dev/null
+  kubectl --context "$CTX_A" -n "$DB_NS" delete job "$backup" --ignore-not-found --wait=false >/dev/null
+}
+
 @test "legacy physical backup and hand-rolled restore round-trip real rows" {
   sql mariadb "DROP DATABASE IF EXISTS phase23_e2e; CREATE DATABASE phase23_e2e; \
     CREATE TABLE phase23_e2e.marker (id INT PRIMARY KEY, value VARCHAR(64)); \

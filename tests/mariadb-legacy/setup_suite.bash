@@ -82,6 +82,15 @@ teardown_suite() {
   delete_namespace kind-cluster-a db-ops
   delete_namespace kind-cluster-b db-ops
   delete_namespace kind-cluster-b minio
+  # Helm intentionally retains CRDs on uninstall. Remove the legacy generation
+  # so a following current-generation suite does not see two MariaDB groups and
+  # correctly fail closed as ambiguous.
+  local ctx
+  for ctx in kind-cluster-a kind-cluster-b; do
+    kubectl --context "$ctx" get crd -o name 2>/dev/null \
+      | sed -n '/\.mariadb\.mmontes\.io$/p' \
+      | xargs -r kubectl --context "$ctx" delete >/dev/null 2>&1 || true
+  done
   if [[ "${TEARDOWN:-}" == true ]]; then
     kind delete cluster --name cluster-a >/dev/null 2>&1 || true
     kind delete cluster --name cluster-b >/dev/null 2>&1 || true

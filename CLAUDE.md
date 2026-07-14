@@ -97,7 +97,12 @@ clobber an explicit caller override, because it writes to a different name.
 plus the reconfig gateway tasks (`reconfig/plan`, `reconfig/apply`,
 `reconfig/force-dr`, `reconfig/freeze`; see `docs/mongodb/reconfig.md`,
 which also keeps its policy knobs `RECONFIG_*` internal-config only) and
-the FCV gateway tasks (`fcv/status`, `fcv/set`; see `docs/mongodb/fcv.md`) —
+the FCV gateway tasks (`fcv/status`, `fcv/set`; see `docs/mongodb/fcv.md`)
+and the PBM gateway tasks (`pbm/status`, `pbm/backup`, `pbm/list`,
+`pbm/restore`, `pbm/delete`, `pbm/pitr`, `pbm/logs`, `pbm/cancel-backup`,
+`pbm/schedule`, `pbm/config`; see `docs/mongodb/pbm.md` — these also keep the agent
+container name, storage location, and S3 credentials internal-config/
+auto-detect only, and never load MongoDB credentials at all) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as

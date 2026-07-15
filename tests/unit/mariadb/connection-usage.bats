@@ -60,7 +60,7 @@ if [[ " $args " == *" exec "* ]]; then
         cat <<'ROWS'
 100
 {"account": "app_a", "current_connections": 3, "active_connections": "2", "idle_connections": "1", "longest_active_seconds": 12}
-{"account": "app_b", "current_connections": 1, "active_connections": "0", "idle_connections": "1", "longest_active_seconds": 0}
+{"account": "app_b", "current_connections": 1, "active_connections": "0", "idle_connections": "1", "longest_active_seconds": null}
 ROWS
         ;;
       mariadb-1)
@@ -120,6 +120,13 @@ field() {
   [ "$(field '.accounts[0].share_percent')" = "50" ]
   [ "$(field '.accounts[0].pods | join(",")')" = "mariadb-0,mariadb-1" ]
   [ "$(field '.accounts[1].account')" = "report_user" ]
+}
+
+@test "connection-usage normalizes a null longest-active value to zero" {
+  run_usage TOP_ACCOUNTS=3
+
+  [ "$status" -eq 0 ]
+  [ "$(field '.accounts[] | select(.account=="app_b") | .longest_active_seconds')" = "0" ]
 }
 
 @test "connection-usage reports per-pod capacity without treating it as one global limit" {
@@ -194,7 +201,7 @@ field() {
 }
 
 @test "connection-usage output never contains credentials, SQL text, hosts, or connection ids" {
-  run_usage MARIADB_ROOT_PASSWORD=super-secret-value
+  run_usage MOCK_ROOT_PASSWORD=super-secret-value
 
   [ "$status" -eq 0 ]
   run grep -Fq 'super-secret-value' "${RESULT}"

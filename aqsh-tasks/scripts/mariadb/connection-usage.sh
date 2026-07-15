@@ -152,7 +152,7 @@ for pod in "${PODS[@]}"; do
       current_connections: (.current_connections | tonumber),
       active_connections: (.active_connections | tonumber),
       idle_connections: (.idle_connections | tonumber),
-      longest_active_seconds: (.longest_active_seconds | tonumber)
+      longest_active_seconds: (.longest_active_seconds // 0 | tonumber)
     })' <<<"$pod_rows"); then
     FAILED_PODS=$((FAILED_PODS + 1))
     POD_RESULTS=$(jq -c --arg pod "$pod" \

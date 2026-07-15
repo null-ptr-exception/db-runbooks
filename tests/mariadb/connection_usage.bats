@@ -1,9 +1,6 @@
 #!/usr/bin/env bats
 
 setup_file() {
-  load '../test_helper/bats-support/load'
-  load '../test_helper/bats-assert/load'
-
   CTX_A="kind-cluster-a"
   CTX_B="kind-cluster-b"
   NS="db-ops"

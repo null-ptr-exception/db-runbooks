@@ -227,6 +227,8 @@ _mdbt_s3_contract_from_container() {
 # storage policy fails closed.
 mdbt_s3_workload_contract() {
   local mariadb="$1" cr_json pods_json container candidate normalized baseline="" count=0 cr_found=false
+  # Public error state is consumed by task scripts that source this library.
+  # shellcheck disable=SC2034
   MDBT_S3_ERROR=""
   MDBT_S3_CONTRACT="{}"
 

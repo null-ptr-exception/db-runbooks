@@ -126,7 +126,9 @@ sql() {
   result=$(task_result)
   assert_equal "$(echo "$result" | jq -r '.data.created')" true
   object=$(echo "$result" | jq -r '.data.backup.object')
-  [[ "$object" == mariadb/mariadb-1/*.xb ]]
+  # The legacy direct-client path must honor the workload S3_SUBFOLDER even
+  # though the legacy operator-managed logical Backup CRD cannot carry prefix.
+  [[ "$object" == tenant-a/database/*.xb ]]
   assert_equal "$(echo "$result" | jq -r '.data.backup.compression')" none
   run kubectl --context "$CTX_B" -n minio run phase23-s5cmd-ls \
     --image=peakcom/s5cmd:v2.3.0 --restart=Never --rm -i \

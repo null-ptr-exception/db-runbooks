@@ -21,7 +21,7 @@ setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export K8S_NAMESPACE="mongo-1"
-  export _LOG_CURRENT_LEVEL=3
+  export _LOG_CURRENT_LEVEL=4
   LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   export LIB_DIR
 

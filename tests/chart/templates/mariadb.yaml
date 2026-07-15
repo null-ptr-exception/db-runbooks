@@ -42,14 +42,26 @@ spec:
         name: mariadb
         key: password
 {{- end }}
+{{- if eq .Values.mariadb.operatorGroup "k8s.mariadb.com" }}
   storage:
     size: {{ .Values.mariadb.storage }}
+{{- else }}
+  # The mmontes-era v0.0.24 CRD requires volumeClaimTemplate; spec.storage was
+  # introduced by the current k8s.mariadb.com generation.
+  volumeClaimTemplate:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: {{ .Values.mariadb.storage }}
+{{- end }}
   resources:
     requests:
       cpu: {{ .Values.mariadb.resources.requests.cpu | quote }}
       memory: {{ .Values.mariadb.resources.requests.memory | quote }}
     limits:
       memory: {{ .Values.mariadb.resources.limits.memory | quote }}
+{{- if eq .Values.mariadb.operatorGroup "k8s.mariadb.com" }}
   startupProbe:
     exec:
       command:
@@ -60,4 +72,5 @@ spec:
     periodSeconds: 10
     timeoutSeconds: 10
     failureThreshold: 90
+{{- end }}
 {{- end }}

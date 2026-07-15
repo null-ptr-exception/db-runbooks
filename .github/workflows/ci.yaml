@@ -82,8 +82,32 @@ jobs:
           kind delete cluster --name cluster-b 2>/dev/null || true
           docker rm -f registry 2>/dev/null || true
 
+  mariadb-legacy:
+    runs-on: [self-hosted, aws-runner]
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Tune kernel limits for Kind
+        run: |
+          sudo sysctl fs.inotify.max_user_watches=524288
+          sudo sysctl fs.inotify.max_user_instances=512
+
+      - name: Run legacy MariaDB operator e2e suite
+        run: bats tests/mariadb-legacy/
+
+      - name: Tear down legacy clusters
+        if: always()
+        run: |
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true
+
   publish-image:
-    needs: [lint, build-image, mariadb, mongodb]
+    needs: [lint, build-image, mariadb, mariadb-legacy, mongodb]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

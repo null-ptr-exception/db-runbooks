@@ -19,7 +19,12 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: [{{ .Values.mongodb.credentialSecret | default "mongodb-credentials" | quote }}]
+    resourceNames:
+      - {{ .Values.mongodb.credentialSecret | default "mongodb-credentials" | quote }}
+      # S3 credentials for the PBM gateway (pbm/* tasks render them into
+      # `pbm config` payloads) — same name PBM_S3_CREDENTIALS_SECRET_DEFAULT
+      # resolves; change them together (see values.yaml).
+      - {{ .Values.mongodb.backupSecret | default "minio" | quote }}
     verbs: ["get"]
   - apiGroups: [""]
     resources: ["events"]
@@ -41,6 +46,18 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["get"]
+  # pbm/schedule's managed CronJob (docs/mongodb/pbm.md#scheduling) — same
+  # name PBM_SCHEDULE_CRONJOB_DEFAULT resolves; change them together.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    resourceNames: [{{ .Values.mongodb.scheduleCronjob | default "pbm-backup-schedule" | quote }}]
+    verbs: ["get", "patch", "delete"]
+  # create cannot be scoped by resourceNames (same reason as configmaps
+  # above) — namespace-wide by necessity, used only for the first
+  # pbm/schedule apply.
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

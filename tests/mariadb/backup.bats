@@ -128,4 +128,50 @@ wait_for_task() {
   echo "size_bytes: $size_bytes, timestamp: $timestamp"
   [[ -n "$size_bytes" && "$size_bytes" -gt 0 ]]
   [[ "$timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]
+
+  # stash this backup's object name for the list/delete round-trip below
+  echo "$data" | jq -r '.path' | awk -F/ '{print $NF}' > "${BATS_FILE_TMPDIR:-/tmp}/backup_e2e_name"
+}
+
+# The two tests below complete the snapshot-lifecycle round-trip on the REAL
+# MinIO — they are what validates the s5cmd listing schema and the type-aware
+# delete (#57), which unit mocks can only approximate.
+
+@test "list-backups shows the uploaded backup (real s5cmd listing)" {
+  local name; name="$(cat "${BATS_FILE_TMPDIR:-/tmp}/backup_e2e_name")"
+  [[ -n "$name" ]]
+
+  http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-1"}'
+  assert_equal "$HTTP_CODE" "202"
+  local task_id; task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]]
+  wait_for_task "$AQSH_URL" "$task_id"
+
+  local data; data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
+  echo "list result: $(echo "$data" | jq -c '{count, names: [.backups[].name]}')"
+  # the backup created above must be listed, with a real lastModified
+  assert_equal "$(echo "$data" | jq --arg n "$name" '[.backups[] | select(.name == $n)] | length')" "1"
+  [[ "$(echo "$data" | jq -r --arg n "$name" '.backups[] | select(.name == $n) | .lastModified')" != "null" ]]
+}
+
+@test "delete-backup removes the backup and list no longer shows it" {
+  local name; name="$(cat "${BATS_FILE_TMPDIR:-/tmp}/backup_e2e_name")"
+  [[ -n "$name" ]]
+
+  http_post "${AQSH_URL}/tasks/delete-backup" \
+    "{\"namespace\":\"mariadb-1\",\"backup\":\"${name}\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$HTTP_CODE" "202"
+  local task_id; task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  [[ -n "$task_id" ]]
+  wait_for_task "$AQSH_URL" "$task_id"
+  local data; data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
+  assert_equal "$(echo "$data" | jq -r '.deleted')" "true"
+
+  # and the listing must no longer contain it
+  http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-1"}'
+  assert_equal "$HTTP_CODE" "202"
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  wait_for_task "$AQSH_URL" "$task_id"
+  data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
+  assert_equal "$(echo "$data" | jq --arg n "$name" '[.backups[] | select(.name == $n)] | length')" "0"
 }

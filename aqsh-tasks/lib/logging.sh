@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
 # scripts/lib/logging.sh
-# Logging library – levels: DEBUG < INFO < ERROR < CRIT
+# Logging library – levels: DEBUG < INFO < WARN < ERROR < CRIT
 #
 # Usage:
 #   source scripts/lib/logging.sh
 #   log_set_level "DEBUG"            # set minimum level (default: INFO)
 #   log_info  "operation" "message"
 #   log_debug "operation" "message"
+#   log_warn  "operation" "message"
 #   log_error "operation" "message"
 #   log_crit  "operation" "message"
 #
@@ -22,8 +23,9 @@ _LOGGING_LIB_LOADED=1
 # Numeric levels
 readonly _LOG_LEVEL_DEBUG=0
 readonly _LOG_LEVEL_INFO=1
-readonly _LOG_LEVEL_ERROR=2
-readonly _LOG_LEVEL_CRIT=3
+readonly _LOG_LEVEL_WARN=2
+readonly _LOG_LEVEL_ERROR=3
+readonly _LOG_LEVEL_CRIT=4
 
 # Current minimum level (default: INFO)
 _LOG_CURRENT_LEVEL=${_LOG_CURRENT_LEVEL:-$_LOG_LEVEL_INFO}
@@ -40,6 +42,7 @@ log_set_level() {
   case "$level" in
     DEBUG) _LOG_CURRENT_LEVEL=$_LOG_LEVEL_DEBUG ;;
     INFO)  _LOG_CURRENT_LEVEL=$_LOG_LEVEL_INFO  ;;
+    WARN)  _LOG_CURRENT_LEVEL=$_LOG_LEVEL_WARN  ;;
     ERROR) _LOG_CURRENT_LEVEL=$_LOG_LEVEL_ERROR ;;
     CRIT)  _LOG_CURRENT_LEVEL=$_LOG_LEVEL_CRIT  ;;
     *)
@@ -93,6 +96,11 @@ log_debug() {
 # log_info <operation> <message>
 log_info() {
   _log_write "$_LOG_LEVEL_INFO" "INFO " "\033[0;32m" "${1:-unknown}" "${2:-}"
+}
+
+# log_warn <operation> <message>
+log_warn() {
+  _log_write "$_LOG_LEVEL_WARN" "WARN " "\033[0;35m" "${1:-unknown}" "${2:-}"
 }
 
 # log_error <operation> <message>

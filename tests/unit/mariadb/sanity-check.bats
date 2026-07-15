@@ -8,7 +8,7 @@ setup() {
   # Most cases target a fixed "mariadb" CR; set it explicitly so the script uses
   # it directly instead of auto-detecting. Cases passing --mdb still override.
   export MARIADB_NAME=mariadb
-  export _LOG_CURRENT_LEVEL=3
+  export _LOG_CURRENT_LEVEL=4
   mkdir -p "${TEST_TMPDIR}/bin"
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'

@@ -21,7 +21,7 @@ fi
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
 # shellcheck source=../../lib/minio-client.sh
-source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, mc
+source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, s5 (s5cmd)
 
 mdbt_load_config
 
@@ -47,7 +47,7 @@ if [[ ! "$BACKUP_NAME" =~ ^[A-Za-z0-9._-]+$ || "$BACKUP_NAME" == "." || "$BACKUP
 fi
 
 mdbt_resolve_backup_location "$NAMESPACE"
-TARGET="minio/${BACKUP_BUCKET}/${BACKUP_PREFIX}/${BACKUP_NAME}"
+TARGET="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${BACKUP_NAME}"
 
 delete_result() {
   jq -n \
@@ -73,21 +73,56 @@ if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
 fi
 
 if ! setup_minio_client >/dev/null 2>&1; then
-  mdbt_fail "$OP" "failed to configure the MinIO client (check MINIO_ENDPOINT / credentials)" \
+  mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
 fi
 
-# Refuse if the backup does not exist, so a typo reports clearly instead of a
-# silent no-op.
-if ! mc stat "$TARGET" >/dev/null 2>&1; then
+# `s5cmd ls <name>` matches by PREFIX, so "backup-1" also returns a sibling
+# "backup-10". Every presence decision below therefore filters the JSON entries
+# down to an EXACT match first: key == name (flat object) or key == name + "/"
+# (directory). Emits the matching entries, one per line; exits 1 if none.
+_exact_entries() {
+  local raw
+  raw="$(s5 --json ls "$TARGET" 2>/dev/null)" || return 1
+  raw="$(jq -c --arg t "$TARGET" 'select(.key == $t or .key == ($t + "/"))' <<<"$raw")"
+  [[ -n "$raw" ]] || return 1
+  printf '%s' "$raw"
+}
+
+# Existence check + TYPE detection in one exact-filtered `--json ls`. Missing
+# (either 'no object found' or only prefix-siblings) => refuse, so a typo
+# reports clearly instead of a silent no-op. Other ls failures (auth / network)
+# must not masquerade as not-found.
+if ! LS_RAW="$(s5 --json ls "$TARGET" 2>&1)"; then
+  if ! grep -q "no object found" <<<"$LS_RAW"; then
+    mdbt_fail "$OP" "failed to check backup '${BACKUP_NAME}': ${LS_RAW}" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 1
+  fi
+fi
+if ! ENTRIES="$(_exact_entries)"; then
   mdbt_fail "$OP" "backup '${BACKUP_NAME}' not found for namespace '${NAMESPACE}'" \
     "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2
 fi
 
-# --recursive handles both a single object and a physical-backup directory; the
-# validated single-segment name keeps this scoped to the namespace prefix.
-if ! mc rm --recursive --force "$TARGET" >/dev/null 2>&1; then
-  mdbt_fail "$OP" "failed to delete backup '${BACKUP_NAME}' from ${NAMESPACE}" \
+# Delete by detected type. This must NOT be a bare `s5 rm "$TARGET"` for a
+# directory: s5cmd rm on a directory-style name without a wildcard is a silent
+# no-op that still exits 0 (verified against MinIO). The wildcard form
+# "name/*" cannot over-match a sibling like "name-2" the way "name*" would.
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+  etype="$(jq -r '.type // "file"' <<<"$entry")"
+  if [[ "$etype" == "directory" ]]; then
+    s5 rm "${TARGET}/*" >/dev/null 2>&1 || true
+  else
+    s5 rm "$TARGET" >/dev/null 2>&1 || true
+  fi
+done <<<"$ENTRIES"
+
+# Verify-after on the same exact match: the name must now resolve to nothing —
+# rm's own exit code cannot be trusted for prefixes (above), and a surviving
+# prefix-sibling like "backup-10" must NOT count as "still present".
+if _exact_entries >/dev/null; then
+  mdbt_fail "$OP" "failed to delete backup '${BACKUP_NAME}' from ${NAMESPACE} (still present after delete)" \
     "$(delete_result false false)" 1
 fi
 

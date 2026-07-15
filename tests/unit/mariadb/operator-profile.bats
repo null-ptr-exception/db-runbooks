@@ -7,6 +7,7 @@
 #   MOCK_API_RESOURCES  space-separated group-qualified resources returned by
 #                       `kubectl api-resources -o name`. `mariadbs.<group>` is
 #                       the tier-2 operator-generation detection signal.
+#   MOCK_API_RC         kubectl discovery exit status (default 0).
 # =============================================================================
 
 setup() {
@@ -47,7 +48,7 @@ if [[ "${args[0]:-}" == "api-resources" && "$flags" == *"-o name"* ]]; then
       printf '%s\n' "$resource"
     fi
   done
-  exit 0
+  exit "${MOCK_API_RC:-0}"
 fi
 
 echo "mock kubectl: unexpected command: $flags" >&2
@@ -119,4 +120,27 @@ KUBECTL_EOF
   export MOCK_API_RESOURCES="backups.mariadb.mmontes.io"
   run mdb_has_crd backups
   [ "$status" -eq 0 ]
+}
+
+@test "partial discovery still detects MariaDB when an unrelated APIService fails" {
+  export MOCK_API_RESOURCES="mariadbs.mariadb.mmontes.io backups.mariadb.mmontes.io"
+  export MOCK_API_RC=1
+  run mdb_operator_group_is_confident
+  [ "$status" -eq 0 ]
+}
+
+@test "partial discovery still confirms a requested MariaDB CRD" {
+  export MARIADB_OPERATOR_GROUP_DEFAULT="k8s.mariadb.com"
+  export MOCK_API_RESOURCES="mariadbs.k8s.mariadb.com physicalbackups.k8s.mariadb.com"
+  export MOCK_API_RC=1
+  run mdb_crd_status physicalbackups
+  [ "$status" -eq 0 ]
+}
+
+@test "discovery with no MariaDB evidence remains unknown on kubectl failure" {
+  export MARIADB_OPERATOR_GROUP_DEFAULT="k8s.mariadb.com"
+  export MOCK_API_RESOURCES=""
+  export MOCK_API_RC=1
+  run mdb_crd_status physicalbackups
+  [ "$status" -eq 2 ]
 }

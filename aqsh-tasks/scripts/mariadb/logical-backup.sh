@@ -76,6 +76,25 @@ fi
 # Wire the cluster/namespace target through the canonical entry point.
 mariadb_set_target "$K8S_CONTEXT" "$NAMESPACE" "$MARIADB_RESOURCE" "$MDB_INPUT"
 
+# Manifest shape differs by operator generation: the legacy v0.0.24 S3 type
+# rejects the current-generation `prefix` field during strict decoding. Never
+# guess a shape when discovery is unavailable or ambiguous, including dry-run.
+operator_confidence_rc=0
+mdb_operator_group_is_confident || operator_confidence_rc=$?
+if [[ "$operator_confidence_rc" -ne 0 ]]; then
+  mdbt_fail "$OP" "could not determine the mariadb-operator generation; refusing to render a logical Backup manifest" \
+    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, discovery: "unknown"}')" 2
+fi
+OPERATOR_GROUP="$(mdb_operator_group)"
+case "$OPERATOR_GROUP" in
+  k8s.mariadb.com) LOGICAL_PREFIX_SUPPORTED=true ;;
+  mariadb*.mmontes.io) LOGICAL_PREFIX_SUPPORTED=false ;;
+  *)
+    mdbt_fail "$OP" "operator group ${OPERATOR_GROUP} does not provide a supported logical Backup schema" \
+      "$(jq -n --arg g "$OPERATOR_GROUP" '{operatorGroup: $g}')" 2
+    ;;
+esac
+
 # Resolve which instance to back up: explicit 'mariadb' input, else the
 # namespace's single instance. Never guess across several.
 _on_ambiguous() {
@@ -110,7 +129,7 @@ mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
 mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
 
-MANIFEST="$(mdbt_logical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_NAME")"
+MANIFEST="$(mdbt_logical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_NAME" "$LOGICAL_PREFIX_SUPPORTED")"
 
 # backup_result <created:bool> <dryRun:bool>
 backup_result() {
@@ -121,6 +140,7 @@ backup_result() {
     --arg bucket "$BACKUP_BUCKET" \
     --arg prefix "$BACKUP_PREFIX" \
     --arg endpoint "$BACKUP_ENDPOINT" \
+    --argjson prefixSupported "$LOGICAL_PREFIX_SUPPORTED" \
     --arg manifest "$MANIFEST" \
     --argjson created "$1" \
     --argjson dry "$2" \
@@ -128,7 +148,14 @@ backup_result() {
       namespace: $namespace,
       mariadb: $mariadb,
       backupName: $backupName,
-      backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, contentType: "Logical"},
+      backup: {
+        bucket: $bucket,
+        prefix: (if $prefixSupported then $prefix else null end),
+        prefixSupported: $prefixSupported,
+        storageLayout: (if $prefixSupported then "namespace-prefix" else "bucket-root" end),
+        endpoint: $endpoint,
+        contentType: "Logical"
+      },
       restorableBy: {task: "logical-restore", namespace: $namespace},
       dryRun: $dry,
       created: $created
@@ -143,7 +170,9 @@ backup_status_result() {
 }
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-  mdbt_write_result "$(response_ok "$OP" "dry run: Backup manifest rendered for ${MARIADB_NAME}" "$(backup_result false true)")"
+  layout_note=""
+  [[ "$LOGICAL_PREFIX_SUPPORTED" == "true" ]] || layout_note=" (legacy bucket-root layout; no prefix isolation)"
+  mdbt_write_result "$(response_ok "$OP" "dry run: Backup manifest rendered for ${MARIADB_NAME}${layout_note}" "$(backup_result false true)")"
   exit 0
 fi
 
@@ -181,4 +210,6 @@ if [[ "$WAIT_TIMEOUT" != "0" ]]; then
   fi
 fi
 
-mdbt_write_result "$(response_ok "$OP" "logical backup ${BACKUP_NAME} completed for ${MARIADB_NAME}" "$(backup_result true false)")"
+layout_note=""
+[[ "$LOGICAL_PREFIX_SUPPORTED" == "true" ]] || layout_note=" (legacy bucket-root layout; no prefix isolation)"
+mdbt_write_result "$(response_ok "$OP" "logical backup ${BACKUP_NAME} completed for ${MARIADB_NAME}${layout_note}" "$(backup_result true false)")"

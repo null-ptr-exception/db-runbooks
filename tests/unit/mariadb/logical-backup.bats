@@ -17,6 +17,7 @@
 #     timeout still returns a partial result instead of losing it
 
 setup() {
+  unset MARIADB_OPERATOR_GROUP_DEFAULT _MDB_OPERATOR_GROUP
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   BACKUP_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/logical-backup.sh"
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
@@ -40,8 +41,10 @@ for a in "$@"; do
 done
 case "$verb" in
   api-resources)
-    printf 'mariadbs.k8s.mariadb.com\n'
-    [[ "${MOCK_NO_CRD:-0}" == "1" ]] || printf 'backups.k8s.mariadb.com\n'
+    [[ "${MOCK_API_FAIL:-0}" == "1" ]] && exit 1
+    group="${MOCK_OPERATOR_GROUP:-k8s.mariadb.com}"
+    printf 'mariadbs.%s\n' "$group"
+    [[ "${MOCK_NO_CRD:-0}" == "1" ]] || printf 'backups.%s\n' "$group"
     exit 0 ;;
   get)
     case "$args" in
@@ -105,6 +108,28 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(jq -r '.spec.mariaDbRef.name' "${CAPTURE}")" = "mariadb" ]
   [ "$(jq -r '.spec.storage.s3.prefix' "${CAPTURE}")" = "mariadb-logical/mariadb-1" ]
   [ "$(jq -r '.spec.storage.s3.bucket' "${CAPTURE}")" = "db-backups" ]
+  [ "$(result_field '.data.backup.prefixSupported')" = "true" ]
+  [ "$(result_field '.data.backup.storageLayout')" = "namespace-prefix" ]
+}
+
+@test "legacy logical-backup omits the unsupported S3 prefix" {
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
+    MOCK_OPERATOR_GROUP=mariadb.mmontes.io
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.apiVersion' "${CAPTURE}")" = "mariadb.mmontes.io/v1alpha1" ]
+  [ "$(jq -r '.spec.storage.s3 | has("prefix")' "${CAPTURE}")" = "false" ]
+  [ "$(result_field '.data.backup.prefix')" = "null" ]
+  [ "$(result_field '.data.backup.prefixSupported')" = "false" ]
+  [ "$(result_field '.data.backup.storageLayout')" = "bucket-root" ]
+  [[ "$(result_field '.message')" == *"no prefix isolation"* ]]
+}
+
+@test "logical-backup fails closed when operator discovery is unavailable" {
+  run_backup DRY_RUN=true MARIADB_NAME=mariadb MOCK_API_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"could not determine the mariadb-operator generation"* ]]
+  [ "$(result_field '.data.discovery')" = "unknown" ]
 }
 
 @test "logical-backup manifest omits physical-only fields (compression/target) for legacy compat" {

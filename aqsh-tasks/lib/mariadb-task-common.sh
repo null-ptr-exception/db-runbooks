@@ -86,7 +86,10 @@ mdbt_write_result() {
 }
 
 mdbt_fail() {
-  local op="$1" message="$2" data="${3:-{}}" code="${4:-1}"
+  # NB: default via a second statement, not "${3:-{}}" — that brace-in-default
+  # form appends a stray "}" when $3 is set, corrupting a non-empty data payload.
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}"
+  [[ -n "$data" ]] || data="{}"
   mdbt_write_result "$(response_err "$op" "$message" "$data" "$code")"
   exit "$code"
 }
@@ -149,7 +152,7 @@ mdbt_validate_s3_prefix() {
 
 mdbt_validate_endpoint() {
   local name="$1" value="$2" op="$3"
-  # Accept either a scheme URL (mc-style, as carried in MINIO_ENDPOINT) e.g.
+  # Accept either a scheme URL (as carried in MINIO_ENDPOINT), e.g.
   # http://minio.kind-b.test:30080, or a bare host:port (operator-style) e.g.
   # minio.svc:9000. A bare host with no port (and no scheme) is rejected.
   if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9._-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?|[A-Za-z0-9._-]+:[0-9]+)$ ]]; then
@@ -243,6 +246,14 @@ mdbt_wait_mariadb_ready() {
   _kubectl wait --for=condition=Ready "${resource}/${name}" --timeout="$timeout"
 }
 
+# Operator bootstrap is asynchronous and Ready may briefly reflect the newly
+# created instance before backup reconciliation starts. Wait for the explicit
+# restore condition first so callers cannot report success during that window.
+mdbt_wait_mariadb_backup_restored() {
+  local name="$1" timeout="${2:-10m}" resource="${3:-${MARIADB_RESOURCE:-mariadb}}"
+  _kubectl wait --for=condition=BackupRestored "${resource}/${name}" --timeout="$timeout"
+}
+
 # mdbt_physical_backup_manifest <name> <namespace> <mariadb_ref>
 # Emit a mariadb-operator PhysicalBackup CR as JSON (kubectl apply accepts JSON,
 # so there is no YAML-interpolation surface). The single source of truth for the
@@ -296,17 +307,17 @@ mdbt_physical_backup_manifest() {
     }'
 }
 
-# mdbt_logical_backup_manifest <name> <namespace> <mariadb_ref>
+# mdbt_logical_backup_manifest <name> <namespace> <mariadb_ref> <include_prefix>
 # Emit a mariadb-operator `Backup` CR as JSON (logical / mariadb-dump backup).
 # The single source of truth for the Backup shape, sibling to the PhysicalBackup
-# builder above. Kept to the fields required by BOTH operator generations —
-# mariaDbRef + storage.s3 are the only required fields, and neither `compression`
-# nor `databases` exists on the legacy mmontes-era CRD — so the same manifest
-# applies cleanly whether the cluster runs the current or the legacy operator.
+# builder above. The legacy mmontes-era S3 schema has no `prefix` field, so the
+# caller must pass include_prefix=false for that generation. Neither
+# `compression` nor `databases` is emitted because those fields are also absent
+# from the legacy CRD.
 # S3 location/credentials come from the BACKUP_* environment, identically to the
 # physical builder. A Backup with no schedule runs exactly once, immediately.
 mdbt_logical_backup_manifest() {
-  local name="$1" namespace="$2" mariadb="$3"
+  local name="$1" namespace="$2" mariadb="$3" include_prefix="${4:-true}"
   local operator_endpoint operator_tls
   operator_endpoint="$(mdbt_operator_s3_endpoint "$BACKUP_ENDPOINT")"
   operator_tls="$(mdbt_operator_s3_tls_enabled "$BACKUP_ENDPOINT")"
@@ -323,6 +334,7 @@ mdbt_logical_backup_manifest() {
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
     --arg secretKey "$BACKUP_SECRET_KEY" \
+    --argjson includePrefix "$include_prefix" \
     '{
       apiVersion: $apiVersion,
       kind: "Backup",
@@ -330,15 +342,14 @@ mdbt_logical_backup_manifest() {
       spec: {
         mariaDbRef: {name: $mariadb},
         storage: {
-          s3: {
+          s3: ({
             bucket: $bucket,
-            prefix: $prefix,
             endpoint: $endpoint,
             region: $region,
             tls: {enabled: $tls},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
             secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
-          }
+          } + (if $includePrefix then {prefix: $prefix} else {} end))
         }
       }
     }'

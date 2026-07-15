@@ -216,8 +216,9 @@ if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
 fi
 
 if [[ "$WAIT_TIMEOUT" != "0" ]]; then
-  if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
-    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" "$(restore_result true false "$BACKUP_NAME")" 1)"
+  if ! mdbt_wait_mariadb_backup_restored "$TARGET" "$WAIT_TIMEOUT" >/dev/null 2>&1 \
+      || ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
+    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready or finish restoring its Backup within ${WAIT_TIMEOUT}" "$(restore_result true false "$BACKUP_NAME")" 1)"
     exit 1
   fi
 fi

@@ -1038,6 +1038,81 @@ k8s_sts_restart() {
 }
 
 # ---------------------------------------------------------------------------
+# k8s_get_sts_pods <sts_name>
+# Read-only: replica count + the live Pod names currently matched by a
+# StatefulSet's own selector. Shared building block for
+# k8s_delete_sts_cascade_orphan's pre-delete snapshot and for any caller
+# that wants to preview what an orphan-cascade delete would leave running
+# before actually doing it (see mongodb/sts/orphan-delete.sh's dry_run).
+# Returns: JSON response with sts, namespace, replicas, selector, pods[]
+# ---------------------------------------------------------------------------
+k8s_get_sts_pods() {
+  local sts_name="${1:?sts_name is required}"
+  local op="k8s_get_sts_pods"
+
+  local sts_json
+  if ! sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>&1); then
+    log_error "$op" "StatefulSet '$sts_name' not found in namespace '$K8S_NAMESPACE': $sts_json"
+    response_err "$op" "StatefulSet not found" \
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$(echo "$sts_json" | head -1)")\"}" 1
+    return 1
+  fi
+
+  local replicas selector
+  replicas=$(echo "$sts_json" | jq -r '.spec.replicas // 0')
+  selector=$(echo "$sts_json" | jq -r \
+    '.spec.selector.matchLabels // {} | to_entries | map("\(.key)=\(.value)") | join(",")')
+  log_debug "$op" "StatefulSet '$sts_name': replicas=${replicas} selector=\"${selector}\""
+
+  local raw_pods pods_json
+  raw_pods=$(_kubectl get pods --selector="$selector" -o jsonpath='{.items[*].metadata.name}' 2>/dev/null) || raw_pods=""
+  pods_json=$(printf '%s\n' "$raw_pods" | tr ' ' '\n' | jq -R . | jq -sc 'map(select(length > 0))')
+
+  response_ok "$op" "StatefulSet pods retrieved" \
+    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"replicas\":${replicas},\"selector\":\"$(_escape_json_string "$selector")\",\"pods\":${pods_json}}"
+}
+
+# ---------------------------------------------------------------------------
+# k8s_delete_sts_cascade_orphan <sts_name>
+# Delete a StatefulSet with `--cascade=orphan`: the controller object is
+# removed but its Pods and PVCs are left running, untouched and now
+# ownerless. This is step one of the standard workaround for enlarging a
+# PVC bound by an immutable volumeClaimTemplate (resize the now-orphaned
+# PVCs directly, then recreate the StatefulSet with the new size so it
+# adopts the existing PVCs by naming convention instead of provisioning new
+# ones) — this function only performs the orphan-cascade delete itself;
+# resizing PVCs and recreating the StatefulSet are deliberately NOT its job.
+# Returns: JSON response with sts, namespace, replicas, and orphaned_pods[]
+# (the pods now running with no owning controller) — logged loudly both
+# before and after the delete since that's exactly the fact a caller needs
+# to see.
+# ---------------------------------------------------------------------------
+k8s_delete_sts_cascade_orphan() {
+  local sts_name="${1:?sts_name is required}"
+  local op="k8s_delete_sts_cascade_orphan"
+
+  local preview
+  preview=$(k8s_get_sts_pods "$sts_name") || { printf '%s' "$preview"; return 1; }
+  local replicas pods_json
+  replicas=$(echo "$preview" | jq -r '.data.replicas')
+  pods_json=$(echo "$preview" | jq -c '.data.pods')
+
+  log_info "$op" "About to orphan-delete StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE' — $(echo "$pods_json" | jq -r 'length') pod(s) will keep running with no owning controller: $(echo "$pods_json" | jq -r 'join(", ")')"
+
+  local out
+  if ! out=$(_kubectl delete statefulset "$sts_name" --cascade=orphan 2>&1); then
+    log_error "$op" "Failed to orphan-delete StatefulSet '$sts_name': $out"
+    response_err "$op" "Failed to delete StatefulSet" \
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$(echo "$out" | head -1)")\"}" 1
+    return 1
+  fi
+
+  log_info "$op" "StatefulSet '$sts_name' deleted with --cascade=orphan; ${replicas} pod(s) remain running, unmanaged, until a new StatefulSet adopts them"
+  response_ok "$op" "StatefulSet orphan-deleted" \
+    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"replicas\":${replicas},\"orphaned_pods\":${pods_json}}"
+}
+
+# ---------------------------------------------------------------------------
 # check_k8s_layer
 # Layer 1 of the MongoDB sanity check: Kubernetes infrastructure health.
 # Checks cluster connectivity, node readiness, STS pod readiness, pod

@@ -109,6 +109,11 @@ override:
    - `sts_name` — from the target pod's `ownerReferences`
    - `recovery_configmap` — from the `data-recovery` init container's own
      volume binding
+   - headless Service (used to build pod seed FQDNs, e.g.
+     `mongodb-0.mongodb-headless.mongo-1.svc.cluster.local`) — from the
+     StatefulSet's own `spec.serviceName`, never assumed to equal the
+     StatefulSet's name (Bitnami's chart commonly names it
+     `<release>-headless`)
    - `credential_secret`/`credential_user`/keys — from the StatefulSet's
      container env: `secretKeyRef` for `MONGO_INITDB_ROOT_USERNAME/PASSWORD`
      (official image) or `MONGODB_ROOT_USER/PASSWORD` (Bitnami), or the
@@ -879,14 +884,16 @@ The `aqsh-mongo-manager` ClusterRole must include (mirrors
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
-    resourceNames: ["mongodb"]   # named get/patch
-    verbs: ["get", "patch"]
+    resourceNames: ["mongodb"]   # named get/patch/delete
+    # delete is for sts/orphan-delete (docs/mongodb/sts-orphan-delete.md),
+    # not used by any recovery/* task itself.
+    verbs: ["get", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list", "watch"]      # list ignores resourceNames, so a separate rule
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "delete"]   # delete is for recovery_wipe_pod force-deleting a not-Ready target pod
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]            # for mongosh exec inside pods
@@ -928,8 +935,10 @@ rules:
 > name that needs separate RBAC consideration. See CLAUDE.md "Configuration
 > Layers".
 
-**Not required**: `pods/delete`, `persistentvolumeclaims/delete`, node access,
-`configmaps` update/list/delete.
+**Not required**: `persistentvolumeclaims/delete`, node access,
+`configmaps` update/list/delete. (`statefulsets` `delete` above is only for
+the separate `sts/orphan-delete` task — no `recovery/*` task deletes the
+StatefulSet itself.)
 
 > **G1 self-heal's one additional RBAC need**: patching in the missing init
 > container/volume uses the *same* `statefulsets` `patch` verb already

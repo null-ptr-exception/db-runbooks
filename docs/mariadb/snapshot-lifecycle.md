@@ -5,11 +5,11 @@
 the AWS RDS `DescribeDBSnapshots` / `DeleteDBSnapshot` analogues.
 
 **The namespace is the database identity.** The caller gives the `namespace`
-(and, for delete, the `backup` name); the bucket and MinIO endpoint are resolved
-internally from deploy-time config (`MINIO_BUCKET` / `MINIO_ENDPOINT` in
-`/etc/aqsh/config/mariadb.env`) plus the per-namespace convention
-(`s3://<bucket>/mariadb/<namespace>/`) — the same location the backup tasks write
-and `restore` reads.
+(and, for delete, the `backup` name); the bucket, endpoint, and prefix are
+resolved from the selected MariaDB workload, then deploy-time configuration and
+the `s3://<bucket>/mariadb/<namespace>/` compatibility convention — the same
+location the physical backup tasks write and `restore` reads. See
+[MariaDB object-storage resolution](object-storage-resolution.md).
 
 ## list-backups (DescribeDBSnapshots)
 
@@ -18,6 +18,7 @@ Read-only. Lists the backup objects under the namespace's prefix.
 | Input | Env | Required | Notes |
 |-------|-----|:--:|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | The database identity |
+| `mariadb` | `MARIADB_NAME` | | Workload storage policy; auto-selected when exactly one exists |
 
 ```bash
 curl -sX POST "$MARIADB_AQSH_URL/tasks/list-backups" \
@@ -44,6 +45,7 @@ Mutating. Deletes one named backup under the namespace's prefix.
 | Input | Env | Required | Default | Notes |
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | The database identity |
+| `mariadb` | `MARIADB_NAME` | | (auto) | Workload storage policy; required only when selection is ambiguous |
 | `backup` | `BACKUP_NAME` | ✓ | — | Backup to delete — a **single name segment** (from `list-backups`); no paths |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default; set `false` (with `confirm=true`) to delete |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to delete |

@@ -87,17 +87,15 @@ kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fcreate' \
   }'"
 ```
 
-The S3/MinIO backup location is resolved internally by the shared
-`mdbt_resolve_backup_location` helper (bucket `db-backups`, prefix
-`mariadb/<namespace>`, endpoint from `MINIO_ENDPOINT` in
-`/etc/aqsh/config/mariadb.env`) — the same convention `restore` reads, so a
-blue-green backup is restore-discoverable by namespace alone. `backup_bucket` /
-`backup_prefix` / `backup_endpoint` are **not** task inputs: Blue writes with its
-own config, and Green **re-resolves** the location with its own config (so each
-cluster uses its own MinIO endpoint rather than the other's). This relies on
-Green keeping the namespace identity (`green_namespace` defaults to `namespace`),
-which is the standard same-namespace, cross-cluster blue-green case. The three
-values stay env-readable as advanced overrides only.
+The S3/MinIO backup location is resolved internally from the selected Blue
+MariaDB workload using the shared resolver described in
+[MariaDB object-storage resolution](object-storage-resolution.md). The
+destination resolves the same Blue identity from its own local MariaDB object.
+This permits a cluster-local endpoint and independently provisioned Secret
+references without transporting credential values, while its bucket and prefix
+must identify the objects Blue wrote. A missing destination policy fails closed.
+Storage fields are not task inputs; advanced `BACKUP_*` process overrides remain
+available to operators.
 
 `green_image` is the image Green is bootstrapped with (match Blue's version so
 restore is compatible). `target_image`, if set and different, triggers an

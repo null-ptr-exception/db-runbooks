@@ -57,10 +57,11 @@ K8S_CONTEXT="${K8S_CONTEXT:-}"         # reachability hook (empty → in-cluster
 # The S3 location is resolved by the shared helper (bucket/prefix/endpoint), and
 # the credentials follow the platform convention; none is a task input.
 BACKUP_NAME="${BACKUP_NAME:-}"         # auto-named below
-BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
-BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
-BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
-BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
+BACKUP_REGION="${BACKUP_REGION:-}"
+BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-}"
+BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-}"
+BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-}"
 # Re-export resolved location for the shared manifest builder.
 BACKUP_TARGET="$TARGET"
 BACKUP_COMPRESSION="$COMPRESSION"
@@ -99,7 +100,10 @@ fi
 
 # Resolve the S3 backup location (bucket / prefix / endpoint) — the same helper
 # restore reads, so this backup lands where restore later looks.
-mdbt_resolve_backup_location "$NAMESPACE"
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
+  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+fi
 
 # Auto-name the backup for the caller when they didn't.
 if [[ -z "$BACKUP_NAME" ]]; then
@@ -114,6 +118,11 @@ mdbt_validate_enum "compression" "$COMPRESSION" "$OP" bzip2 gzip none
 mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
 mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
+mdbt_validate_region "backup_region" "$BACKUP_REGION" "$OP"
+mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$OP"
+mdbt_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$OP"
 
 MANIFEST="$(mdbt_physical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_NAME")"
 
@@ -210,6 +219,10 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
     exit 0
   fi
 
+  if ! mdbt_s3_prepare_direct_client; then
+    mdbt_fail "$OP" "failed to resolve S3 credentials for the selected MariaDB: ${MDBT_S3_ERROR}" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace:$ns,mariadb:$mdb}')" 1
+  fi
   rc=0
   mdbt_pb_handrolled_run "$PB_POD" "${MARIADB_CONTAINER:-mariadb}" "$BACKUP_BUCKET" "$PB_OBJECT" || rc=$?
   if [[ "$rc" -eq 0 ]]; then

@@ -43,7 +43,7 @@ the **latest backup** under the prefix is restored.
 |------|--------|
 | Plan (default) | With `dry_run=true` (the default) the task renders the MariaDB manifest and returns without applying; `confirm` is not required. |
 | Guard | To apply, set `dry_run=false` **and** `confirm=true` (mutating). |
-| Resolve | The restored instance name is auto-generated; the engine version and PVC size are derived from the namespace's instance (a single shared version is accepted across instances) and are **never** silently defaulted; the backup location, credentials, and S3 config come from platform convention. |
+| Resolve | The restored instance name is auto-generated; the engine version and PVC size are derived from the namespace's instance (a single shared version is accepted across instances) and are **never** silently defaulted; the backup location, credentials, and S3 config come from the selected MariaDB workload, then platform fallback. |
 | Guard | If a MariaDB with the resolved name already exists, the task fails — restore never overwrites in place. |
 | Validate | `target_time`, when given, must be a range-checked RFC3339 instant (e.g. `2026-06-14T03:21:00Z`). |
 | Apply | Creates a standalone `MariaDB` CR via `bootstrapFrom.s3` (`backupContentType: Physical`), `replicas=1`, no replication/multiCluster. |
@@ -79,10 +79,12 @@ resolved from the namespace — not a task input**:
 - **Backup location** is resolved by the shared `mdbt_resolve_backup_location`
   helper — the same one the physical-backup **write** side (blue-green) uses — so
   a restore finds a namespace's backups by namespace alone and the two sides can
-  never drift. The bucket (`db-backups`) and endpoint come from deploy-time
-  config (`MINIO_BUCKET` / `MINIO_ENDPOINT` in `/etc/aqsh/config/mariadb.env`);
-  the prefix is the `mariadb/<namespace>` convention. The caller never specifies
-  where backups live.
+  never drift. The bucket, endpoint, and prefix come from the selected
+  workload's `spec.env` / `spec.envFrom` contract first, then deploy-time config
+  (`MINIO_BUCKET` / `MINIO_ENDPOINT` in `/etc/aqsh/config/mariadb.env`) and the
+  `mariadb/<namespace>` compatibility prefix. See
+  [MariaDB object-storage resolution](object-storage-resolution.md). The caller
+  never specifies where backups live.
 
 > **Operator overrides.** `RESTORE_SOURCE`, `RESTORE_TARGET`, `RESTORE_IMAGE`,
 > `STORAGE_SIZE`, and `BACKUP_BUCKET` / `BACKUP_PREFIX` / `BACKUP_ENDPOINT` stay

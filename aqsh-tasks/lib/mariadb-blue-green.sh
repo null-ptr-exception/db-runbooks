@@ -387,6 +387,7 @@ bg_create_physical_backup() {
   bg_validate_region "backup_region" "$BACKUP_REGION" "$op"
   bg_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$op"
   bg_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$op"
+  bg_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$op"
   bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$op"
   bg_validate_enum "backup_target" "$BACKUP_TARGET" "$op" Primary Replica PreferReplica
   bg_validate_enum "backup_compression" "$BACKUP_COMPRESSION" "$op" bzip2 gzip none

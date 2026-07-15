@@ -18,8 +18,12 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
 
+MDB_INPUT="${MARIADB_NAME:-}"
+
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
+# shellcheck source=../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
 # shellcheck source=../../lib/minio-client.sh
 source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, s5 (s5cmd)
 
@@ -46,7 +50,24 @@ if [[ ! "$BACKUP_NAME" =~ ^[A-Za-z0-9._-]+$ || "$BACKUP_NAME" == "." || "$BACKUP
     "$(jq -n --arg v "$BACKUP_NAME" '{field: "backup", value: $v}')" 2
 fi
 
-mdbt_resolve_backup_location "$NAMESPACE"
+mariadb_set_target "${K8S_CONTEXT:-}" "$NAMESPACE" "$MARIADB_RESOURCE" "$MDB_INPUT"
+if [[ -z "$MDB_INPUT" ]]; then
+  resolve_rc=0
+  resolved="$(mariadb_resolve_name)" || resolve_rc=$?
+  case "$resolve_rc" in
+    0) MARIADB_NAME="$resolved" ;;
+    1) MARIADB_NAME="" ;;
+    2) mdbt_fail "$OP" "several MariaDB instances exist; set 'mariadb' to select the storage policy" \
+         "$(jq -n --arg c "$resolved" '{candidateCount:($c|split(",")|length)}')" 2 ;;
+  esac
+else
+  MARIADB_NAME="$MDB_INPUT"
+fi
+
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
+  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 2
+fi
 TARGET="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${BACKUP_NAME}"
 
 delete_result() {
@@ -72,6 +93,11 @@ if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
   exit 0
 fi
 
+if ! mdbt_s3_prepare_direct_client; then
+  mdbt_fail "$OP" "failed to resolve S3 credentials: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1
+fi
+
 if ! setup_minio_client >/dev/null 2>&1; then
   mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
@@ -95,8 +121,10 @@ _exact_entries() {
 # must not masquerade as not-found.
 if ! LS_RAW="$(s5 --json ls "$TARGET" 2>&1)"; then
   if ! grep -q "no object found" <<<"$LS_RAW"; then
-    mdbt_fail "$OP" "failed to check backup '${BACKUP_NAME}': ${LS_RAW}" \
-      "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 1
+    # Never reflect arbitrary S3 client stderr into the task result.
+    mdbt_fail "$OP" "failed to check backup (object-storage request failed)" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" \
+        '{namespace: $ns, backup: $b, reason: "object-storage-request-failed"}')" 1
   fi
 fi
 if ! ENTRIES="$(_exact_entries)"; then

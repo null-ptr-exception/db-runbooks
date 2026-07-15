@@ -150,7 +150,7 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_GET_ERR=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"failed to query source MariaDB"* ]]
+  [[ "$(result_field '.message')" == *"cannot read the selected MariaDB workload spec"* ]]
   [[ "$(result_field '.message')" != *"not found"* ]]
 }
 

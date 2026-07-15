@@ -672,6 +672,10 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
       # The MinIO bucket is a platform internal (db-backups by convention,
       # MINIO_BUCKET from deploy config); not a task input. Env-overridable only.
       - name: backup_databases
@@ -770,6 +774,10 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
   delete-backup:
     script: backup/delete-backup-mariadb.sh
     description: "Delete a named backup for a namespace (AWS RDS DeleteDBSnapshot); mutating (dry_run + confirm). Scoped to the namespace's own backup prefix"
@@ -781,6 +789,10 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
       - name: backup
         env: BACKUP_NAME
         required: true

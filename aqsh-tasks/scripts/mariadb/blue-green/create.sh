@@ -36,11 +36,11 @@ BACKUP_NAME="${BACKUP_NAME:-physicalbackup-blue}"
 # config + the per-namespace convention shared with restore — not passed by the
 # caller — so a blue-green backup is restore-discoverable by namespace alone.
 mdbt_load_config
-mdbt_resolve_backup_location "$BG_NAMESPACE"
-BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
-BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
-BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
-BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
+BACKUP_REGION="${BACKUP_REGION:-}"
+BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-}"
+BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-}"
+BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-}"
 BACKUP_TARGET="${BACKUP_TARGET:-PreferReplica}"
 BACKUP_COMPRESSION="${BACKUP_COMPRESSION:-bzip2}"
 
@@ -60,6 +60,16 @@ LAG_THRESHOLD="${LAG_THRESHOLD:-0}"
 
 case "$INTERNAL_STEP" in
   bootstrap)
+    # Resolve again on Green from its local representation of Blue. Secret refs
+    # are namespace/cluster-local, so this validates an independently provisioned
+    # destination reference without transporting credential values from Blue.
+    if ! _kubectl get mariadb "$BLUE_NAME" -o name >/dev/null 2>&1; then
+      bg_fail "$OP" "destination has no local MariaDB storage policy for the selected Blue identity" \
+        "$(jq -n --arg ns "$BG_NAMESPACE" --arg mdb "$BLUE_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+    fi
+    mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" \
+      || bg_fail "$OP" "internal bootstrap storage resolution failed" \
+        "$(jq -n '{storagePolicy:"unresolved"}')" 2
     result="$(bg_local_step "$BG_DIR/bootstrap-green.sh" \
       "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
       "BLUE_NAME=$BLUE_NAME" "GREEN_IMAGE=$GREEN_IMAGE" \
@@ -68,7 +78,8 @@ case "$INTERNAL_STEP" in
       "BACKUP_BUCKET=$BACKUP_BUCKET" "BACKUP_PREFIX=$BACKUP_PREFIX" \
       "BACKUP_ENDPOINT=$BACKUP_ENDPOINT" "BACKUP_REGION=$BACKUP_REGION" \
       "BACKUP_ACCESS_SECRET=$BACKUP_ACCESS_SECRET" \
-      "BACKUP_ACCESS_KEY=$BACKUP_ACCESS_KEY" "BACKUP_SECRET_KEY=$BACKUP_SECRET_KEY" \
+      "BACKUP_ACCESS_KEY=$BACKUP_ACCESS_KEY" \
+      "BACKUP_SECRET_ACCESS_SECRET=$BACKUP_SECRET_ACCESS_SECRET" "BACKUP_SECRET_KEY=$BACKUP_SECRET_KEY" \
       "GTID_DOMAIN_ID=$GTID_DOMAIN_ID" "SERVER_ID_START_INDEX=$SERVER_ID_START_INDEX" \
       "BLUE_HOST=$BLUE_HOST" "GREEN_HOST=$GREEN_HOST" \
       "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true")" \
@@ -99,6 +110,10 @@ bg_required "peer_token" "$PEER_TOKEN" "$OP"
 
 BG_MDB="$BLUE_NAME"
 bg_init_target
+if ! mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME"; then
+  bg_fail "$OP" "failed to resolve object storage for the selected Blue MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$BG_NAMESPACE" --arg mdb "$BLUE_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+fi
 bg_require_confirm "$OP"
 
 bg_validate_dns_label "blue_name" "$BLUE_NAME" "$OP"
@@ -136,14 +151,9 @@ bootstrap_payload="$(jq -n \
     internal_step: "bootstrap",
     wait_ready: "true", wait_timeout: $timeout, confirm: "true"
   } | with_entries(select(.value != ""))')"
-  # Managed-DB internals are NOT forwarded: the backup bucket/prefix/endpoint and
-  # the credentials (root Secret, S3 access Secret/keys, region) are platform
-  # conventions, so green re-resolves them from its own deploy-time config /
-  # defaults. Green thus uses its own (in-cluster) MinIO endpoint rather than
-  # blue's cross-cluster one. This relies on green keeping the namespace identity
-  # (green_namespace defaults to namespace) so green's resolved prefix
-  # (mariadb/<namespace>) matches where blue wrote the backup — the standard
-  # same-namespace, cross-cluster blue-green case.
+  # Managed-DB internals are NOT forwarded. Green resolves the same selected
+  # Blue identity locally, allowing cluster-local endpoint and Secret refs while
+  # requiring its bucket/prefix policy to point at the shared backup objects.
 
 bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
   "$bootstrap_payload" "$PEER_TIMEOUT")" \

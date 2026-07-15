@@ -19,8 +19,12 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
 
+MDB_INPUT="${MARIADB_NAME:-}"
+
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
+# shellcheck source=../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
 # shellcheck source=../../lib/minio-client.sh
 source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, s5 (s5cmd)
 
@@ -33,9 +37,31 @@ NAMESPACE="${DB_NAMESPACE:-}"          # the database identity — the only requ
 
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
 
+mariadb_set_target "${K8S_CONTEXT:-}" "$NAMESPACE" "$MARIADB_RESOURCE" "$MDB_INPUT"
+if [[ -z "$MDB_INPUT" ]]; then
+  resolve_rc=0
+  resolved="$(mariadb_resolve_name)" || resolve_rc=$?
+  case "$resolve_rc" in
+    0) MARIADB_NAME="$resolved" ;;
+    1) MARIADB_NAME="" ;; # retain namespace-only fallback after full loss
+    2) mdbt_fail "$OP" "several MariaDB instances exist; set 'mariadb' to select the storage policy" \
+         "$(jq -n --arg c "$resolved" '{candidateCount:($c|split(",")|length)}')" 2 ;;
+  esac
+else
+  MARIADB_NAME="$MDB_INPUT"
+fi
+
 # Resolve the S3 backup location for this namespace (bucket / prefix / endpoint),
 # the same convention the backup producers write and restore reads.
-mdbt_resolve_backup_location "$NAMESPACE"
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
+  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 2
+fi
+
+if ! mdbt_s3_prepare_direct_client; then
+  mdbt_fail "$OP" "failed to resolve S3 credentials: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1
+fi
 
 if ! setup_minio_client >/dev/null 2>&1; then
   mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
@@ -53,8 +79,10 @@ if ! LISTING="$(s5 --json ls "$S3_PREFIX" 2>&1)"; then
   if grep -q "no object found" <<<"$LISTING"; then
     LISTING=""
   else
-    mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}': ${LISTING}" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+    # Do not reflect client stderr: SDK/client errors can include request
+    # headers or other deployment details. The actionable category is enough.
+    mdbt_fail "$OP" "failed to list backups (object-storage request failed)" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns, reason: "object-storage-request-failed"}')" 1
   fi
 fi
 if ! BACKUPS="$(printf '%s' "$LISTING" | jq -sc --arg pfx "$S3_PREFIX" '

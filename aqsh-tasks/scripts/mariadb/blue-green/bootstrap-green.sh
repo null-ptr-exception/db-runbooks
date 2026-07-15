@@ -22,6 +22,7 @@ BACKUP_ENDPOINT="${BACKUP_ENDPOINT:?BACKUP_ENDPOINT is required}"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
 BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-$BACKUP_ACCESS_SECRET}"
 BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
 GTID_DOMAIN_ID="${GTID_DOMAIN_ID:-1}"
 SERVER_ID_START_INDEX="${SERVER_ID_START_INDEX:-20}"
@@ -49,6 +50,7 @@ bg_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "blue-green/bootstrap-
 bg_validate_region "backup_region" "$BACKUP_REGION" "blue-green/bootstrap-green"
 bg_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "blue-green/bootstrap-green"
 bg_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "blue-green/bootstrap-green"
+bg_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "blue-green/bootstrap-green"
 bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "blue-green/bootstrap-green"
 bg_validate_uint "gtid_domain_id" "$GTID_DOMAIN_ID" "blue-green/bootstrap-green"
 bg_validate_uint "server_id_start_index" "$SERVER_ID_START_INDEX" "blue-green/bootstrap-green"
@@ -79,7 +81,7 @@ spec:
         name: ${BACKUP_ACCESS_SECRET}
         key: ${BACKUP_ACCESS_KEY}
       secretAccessKeySecretKeyRef:
-        name: ${BACKUP_ACCESS_SECRET}
+        name: ${BACKUP_SECRET_ACCESS_SECRET}
         key: ${BACKUP_SECRET_KEY}
     backupContentType: Physical
   replication:

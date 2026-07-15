@@ -32,7 +32,7 @@ done
 case "$cmd" in
   ls)
     if [[ "${MOCK_S5_AUTH_FAIL:-0}" == "1" ]]; then
-      echo 'ERROR session: fetching region failed: Forbidden: Forbidden status code: 403' >&2; exit 1
+      echo 'ERROR session: credential-marker-must-not-escape: Forbidden status code: 403' >&2; exit 1
     fi
     if [[ -z "${MOCK_S5_LS:-}" ]]; then
       echo "ERROR \"ls ${target}\": no object found" >&2; exit 1
@@ -85,6 +85,7 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
   [[ "$(field '.message')" == *"failed to list backups"* ]]
+  [[ "$(cat "${RESULT}")" != *"credential-marker-must-not-escape"* ]]
 }
 
 @test "list-backups rejects a malformed namespace" {

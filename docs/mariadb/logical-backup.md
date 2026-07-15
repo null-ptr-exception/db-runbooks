@@ -35,4 +35,7 @@ namespace prefix was applied.
 - The source MariaDB must be `Ready` before the Backup CR is created.
 
 S3 endpoint, bucket, region, and credential references are deployment
-configuration rather than task inputs.
+configuration rather than task inputs. They are resolved from the selected
+MariaDB's `spec.env` / `spec.envFrom` before deploy-time fallback. See
+[MariaDB object-storage resolution](object-storage-resolution.md) for the
+contract, precedence, and credential safety rules.

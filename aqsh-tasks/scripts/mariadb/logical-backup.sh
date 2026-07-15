@@ -55,10 +55,11 @@ K8S_CONTEXT="${K8S_CONTEXT:-}"         # reachability hook (empty → in-cluster
 
 # --- Platform internals (NOT task inputs) ------------------------------------
 BACKUP_NAME="${BACKUP_NAME:-}"         # auto-named below
-BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
-BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
-BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
-BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
+BACKUP_REGION="${BACKUP_REGION:-}"
+BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-}"
+BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-}"
+BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-}"
 
 # Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
@@ -114,8 +115,15 @@ fi
 # Resolve the S3 location (bucket / endpoint), then override the prefix to the
 # logical convention so logical backups land under their own prefix, separate
 # from the physical ones restore/bootstrapFrom read from mariadb/<ns>.
-mdbt_resolve_backup_location "$NAMESPACE"
-BACKUP_PREFIX="${LOGICAL_BACKUP_PREFIX:-mariadb-logical/${NAMESPACE}}"
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
+  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$MARIADB_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+fi
+# Preserve the historical logical-only fallback, but honor a workload-provided
+# S3_SUBFOLDER exactly on paths whose operator schema supports a prefix.
+if [[ -z "$(jq -r '.prefix.value // empty' <<<"$MDBT_S3_CONTRACT")" ]]; then
+  BACKUP_PREFIX="${LOGICAL_BACKUP_PREFIX:-mariadb-logical/${NAMESPACE}}"
+fi
 
 # Auto-name the backup for the caller when they didn't.
 if [[ -z "$BACKUP_NAME" ]]; then
@@ -128,6 +136,11 @@ mdbt_validate_dns_label "backup_name" "$BACKUP_NAME" "$OP"
 mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
 mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
+mdbt_validate_region "backup_region" "$BACKUP_REGION" "$OP"
+mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$OP"
+mdbt_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$OP"
 
 MANIFEST="$(mdbt_logical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_NAME" "$LOGICAL_PREFIX_SUPPORTED")"
 

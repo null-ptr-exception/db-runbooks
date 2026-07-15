@@ -34,6 +34,10 @@ rules:
     # patch: tag the managed account password Secret with an owner annotation
     # (create-account collision guard).
     verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    # Resolve non-secret S3 settings referenced by MariaDB.spec.env/envFrom.
+    verbs: ["get"]
   - apiGroups: [{{ .Values.mariadb.operatorGroup | quote }}, "mariadb.mmontes.io"]
     resources: ["mariadbs"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
@@ -46,11 +50,15 @@ rules:
     resources: ["backups", "restores"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
 ---
+{{- $root := . }}
+{{- $namespaces := concat (list .Values.mariadb.namespace) (.Values.mariadbRbac.namespaces | default (list)) | uniq }}
+{{- range $namespace := $namespaces }}
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: aqsh-mariadb-manager
-  namespace: {{ .Values.mariadb.namespace }}
+  namespace: {{ $namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -58,5 +66,6 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: kube-auth-proxy
-    namespace: {{ .Release.Namespace }}
+    namespace: {{ $root.Release.Namespace }}
+{{- end }}
 {{- end }}

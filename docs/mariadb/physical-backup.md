@@ -41,10 +41,11 @@ The only required input is `namespace`.
 | `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Complete-wait timeout. `0` returns immediately without waiting. |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |
 
-The **S3 backup location** (`s3://db-backups/mariadb/<namespace>`, MinIO
-endpoint) and **credentials** are platform internals resolved from deploy-time
-config (`MINIO_BUCKET` / `MINIO_ENDPOINT` in `/etc/aqsh/config/mariadb.env`) plus
-the per-namespace convention — never task inputs. `BACKUP_BUCKET` /
+The **S3 backup location** and **credentials** are platform internals resolved
+first from the selected MariaDB's `spec.env` / `spec.envFrom`, then from
+deploy-time config and the `s3://db-backups/mariadb/<namespace>` compatibility
+default — never task inputs. See [MariaDB object-storage resolution](object-storage-resolution.md).
+`BACKUP_BUCKET` /
 `BACKUP_PREFIX` / `BACKUP_ENDPOINT` (and the access/region settings) stay
 env-readable as advanced operator overrides only.
 

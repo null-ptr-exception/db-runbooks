@@ -113,13 +113,18 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.restored')" = "true" ]
   [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
-  # all three objects were applied, and the MariaDB carries NO bootstrapFrom
+  # The original Secret references are reused directly; no credential values
+  # are copied into a short-lived Secret. The MariaDB carries NO bootstrapFrom.
   [ "$(jq -r '.kind' "${CAP_DIR}/PersistentVolumeClaim.json")" = "PersistentVolumeClaim" ]
   [ "$(jq -r '.kind' "${CAP_DIR}/Job.json")" = "Job" ]
   [ "$(jq -r '.spec.template.spec.initContainers[0].image' "${CAP_DIR}/Job.json")" = "peakcom/s5cmd:v2.3.0" ]
   [ "$(jq -r '.spec.template.spec.initContainers[0].command[0]' "${CAP_DIR}/Job.json")" = "/s5cmd" ]
   [ "$(jq -r '.spec.template.spec.initContainers[0].args[3]' "${CAP_DIR}/Job.json")" = "s3://db-backups/mariadb/mariadb-1/mariadb-20260708120000.xb" ]
-  [ "$(jq -r '.stringData | has("AWS_ACCESS_KEY_ID") and has("AWS_SECRET_ACCESS_KEY")' "${CAP_DIR}/Secret.json")" = "true" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].env[0].valueFrom.secretKeyRef.name' "${CAP_DIR}/Job.json")" = "minio" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].env[0].valueFrom.secretKeyRef.key' "${CAP_DIR}/Job.json")" = "access-key-id" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].env[1].valueFrom.secretKeyRef.name' "${CAP_DIR}/Job.json")" = "minio" ]
+  [ "$(jq -r '.spec.template.spec.initContainers[0].env[1].valueFrom.secretKeyRef.key' "${CAP_DIR}/Job.json")" = "secret-access-key" ]
+  [ ! -f "${CAP_DIR}/Secret.json" ]
   [ "$(jq -r '.spec | has("bootstrapFrom")' "${CAP_DIR}/MariaDB.json")" = "false" ]
 }
 

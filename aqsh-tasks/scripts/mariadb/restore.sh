@@ -41,6 +41,10 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
 
+# Optional selected MariaDB identity. Capture it before mariadb.sh applies its
+# compatibility default so an omitted input remains distinguishable.
+MDB_INPUT="${MARIADB_NAME:-}"
+
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
 # shellcheck source=../../lib/mariadb.sh
@@ -74,20 +78,17 @@ K8S_CONTEXT="${K8S_CONTEXT:-}"         # reachability hook (empty → in-cluster
 #     namespace's instance, never defaulted (an undersized PVC would truncate
 #     the restored data; a mismatched version is unsafe for a physical restore).
 TARGET="${RESTORE_TARGET:-}"
-SOURCE_NAME="${RESTORE_SOURCE:-}"
+SOURCE_NAME="${RESTORE_SOURCE:-$MDB_INPUT}"
 IMAGE="${RESTORE_IMAGE:-}"
 STORAGE_SIZE="${STORAGE_SIZE:-}"
 SOURCE_RESOURCES_JSON="null"
-# Backup location (bucket / prefix / endpoint) — resolved from deploy-time config
-# + the per-namespace naming convention, identically to the write side. Sets
-# BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT (each env-overridable).
-mdbt_resolve_backup_location "$NAMESPACE"
 ROOT_SECRET_NAME="mariadb"
 ROOT_SECRET_KEY="password"
-BACKUP_REGION="us-east-1"
-BACKUP_ACCESS_SECRET="minio"
-BACKUP_ACCESS_KEY="access-key-id"
-BACKUP_SECRET_KEY="secret-access-key"
+BACKUP_REGION="${BACKUP_REGION:-}"
+BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-}"
+BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-}"
+BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-}"
 REPLICAS="1"                           # restore is standalone by design
 
 restore_unhandled_error() {
@@ -188,6 +189,15 @@ if [[ -z "$STORAGE_SIZE" ]]; then
     "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
 fi
 
+# Storage policy follows the selected source MariaDB. Full-loss restores that
+# have no remaining source retain the documented deploy-time fallback.
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$SOURCE_NAME"; then
+  trap - ERR
+  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg mdb "$SOURCE_NAME" \
+      '{namespace:$ns,mariadb:(if $mdb == "" then null else $mdb end)}')" 2
+fi
+
 # Validate the resolved user-facing + override values (internals are trusted).
 mdbt_validate_dns_label "target" "$TARGET" "$OP"
 mdbt_validate_image "image" "$IMAGE" "$OP"
@@ -195,6 +205,11 @@ mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
 mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
 mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
 mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
+mdbt_validate_region "backup_region" "$BACKUP_REGION" "$OP"
+mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$OP"
+mdbt_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$OP"
+mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
@@ -221,6 +236,7 @@ if ! MANIFEST="$(jq -n \
   --arg region "$BACKUP_REGION" \
   --arg accessSecret "$BACKUP_ACCESS_SECRET" \
   --arg accessKey "$BACKUP_ACCESS_KEY" \
+  --arg secretAccessSecret "$BACKUP_SECRET_ACCESS_SECRET" \
   --arg secretKey "$BACKUP_SECRET_KEY" \
   --arg targetTime "$TARGET_TIME" \
   --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
@@ -242,7 +258,7 @@ if ! MANIFEST="$(jq -n \
           region: $region,
           tls: {enabled: $tls},
           accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
-          secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+          secretAccessKeySecretKeyRef: {name: $secretAccessSecret, key: $secretKey}
         }
       } + (if $targetTime == "" then {} else {targetRecoveryTime: $targetTime} end))
     } + (($resourcesJson | try fromjson catch null) as $resources | if $resources == null then {} else {resources: $resources} end))
@@ -317,6 +333,11 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
       "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
   fi
 
+  if ! mdbt_s3_prepare_direct_client; then
+    trap - ERR
+    mdbt_fail "$OP" "could not resolve S3 credentials for the selected MariaDB: ${MDBT_S3_ERROR}" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1
+  fi
   if ! setup_minio_client >/dev/null 2>&1; then
     trap - ERR
     mdbt_fail "$OP" "could not configure the S3/MinIO client for s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}" \
@@ -376,7 +397,7 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
   # OPERATOR_BACKUP_ENDPOINT is only for operator CRs.
   mdbt_pr_orchestrate "$TARGET" "$NAMESPACE" "$IMAGE" "$STORAGE_SIZE" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" \
     "$BACKUP_BUCKET" "$PR_OBJECT" "$BACKUP_ENDPOINT" \
-    "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" \
+    "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_ACCESS_SECRET" "$BACKUP_SECRET_KEY" \
     "$(mdb_operator_apiversion)" "$WAIT_TIMEOUT" || rc=$?
   if [[ "$rc" -eq 0 ]]; then
     mdbt_write_result "$(response_ok "$OP" "MariaDB physically restored into new instance ${TARGET} from ${PR_OBJECT}" "$(pr_result true false)")"

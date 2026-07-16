@@ -101,43 +101,81 @@ _primary_index() { jq -r '.status.currentPrimaryPodIndex // empty' <<<"$1"; }
 # mariadb.*.mmontes.io) never does. When that map is absent we ask each replica
 # pod directly and synthesize the SAME {slaveIORunning, slaveSQLRunning,
 # secondsBehindMaster} shape, so auto-select and Guard 4 keep one source-agnostic
-# code path. A pod we cannot read is recorded as UNHEALTHY (never omitted) so
-# Guard 4's all_ok stays exactly as strict as the CR-status path — we never
-# blind-switch to a replica whose lag we couldn't confirm.
+# code path. The extra healthQuery object preserves why an entry is unavailable
+# without exposing SQL output. A pod we cannot read is recorded as UNKNOWN
+# (never omitted), so Guard 4's all_ok stays exactly as strict as the CR-status
+# path — we never blind-switch to a replica whose lag we couldn't confirm.
+_unavailable_replica_entry() {
+  local status="$1" row_count="${2:-0}"
+  jq -nc --arg status "$status" --argjson rows "$row_count" '{
+    slaveIORunning: null,
+    slaveSQLRunning: null,
+    secondsBehindMaster: null,
+    healthQuery: {status: $status, rowCount: $rows}
+  }'
+}
+
 _replica_entry_via_sql() {
-  local pod="$1" pw="$2" out io sql lag
-  out="$(mariadb_sql_vertical "$pod" "$pw" "SHOW SLAVE STATUS")" || out=""
-  if [[ -z "$out" ]]; then
-    printf '{"slaveIORunning":false,"slaveSQLRunning":false,"secondsBehindMaster":null}'
+  local pod="$1" pw="$2" out io sql lag connection_name row_count
+  if ! out="$(mariadb_sql_vertical "$pod" "$pw" "SHOW ALL SLAVES STATUS")"; then
+    _unavailable_replica_entry query_failed
     return 0
   fi
-  io="$(sed -n 's/^[[:space:]]*Slave_IO_Running:[[:space:]]*//p' <<<"$out" | head -1)"
-  sql="$(sed -n 's/^[[:space:]]*Slave_SQL_Running:[[:space:]]*//p' <<<"$out" | head -1)"
-  lag="$(sed -n 's/^[[:space:]]*Seconds_Behind_Master:[[:space:]]*//p' <<<"$out" | head -1)"
-  jq -nc --arg io "$io" --arg sql "$sql" --arg lag "$lag" '{
+  if [[ -z "$out" ]]; then
+    _unavailable_replica_entry query_empty
+    return 0
+  fi
+
+  # mariadb -E prints one Slave_IO_Running field per connection. Requiring
+  # exactly one prevents an arbitrary first connection from being promoted.
+  row_count="$(awk -F': *' '$1 ~ "^[* ]*Slave_IO_Running$" {n++} END {print n+0}' <<<"$out")"
+  if [[ "$row_count" -eq 0 ]]; then
+    _unavailable_replica_entry malformed_result
+    return 0
+  fi
+  if [[ "$row_count" -ne 1 ]]; then
+    _unavailable_replica_entry multiple_connections "$row_count"
+    return 0
+  fi
+
+  io="$(mariadb_status_field Slave_IO_Running <<<"$out")"
+  sql="$(mariadb_status_field Slave_SQL_Running <<<"$out")"
+  lag="$(mariadb_status_field Seconds_Behind_Master <<<"$out")"
+  connection_name="$(mariadb_status_field Connection_name <<<"$out")"
+  jq -nc --arg io "$io" --arg sql "$sql" --arg lag "$lag" \
+    --arg connection_name "$connection_name" '{
     slaveIORunning: ($io == "Yes"),
     slaveSQLRunning: ($sql == "Yes"),
-    secondsBehindMaster: (if ($lag | test("^[0-9]+$")) then ($lag | tonumber) else null end)
+    secondsBehindMaster: (if ($lag | test("^[0-9]+$")) then ($lag | tonumber) else null end),
+    healthQuery: {
+      status: "ok",
+      rowCount: 1,
+      connectionNamePresent: ($connection_name != "")
+    }
   }'
 }
 
 # Build the status.replication.replicas-equivalent map (keyed by pod name) from
-# live SHOW SLAVE STATUS across every non-primary replica. Returns 1 (empty) only
-# when the root password cannot be resolved at all — the caller then falls
-# through to the existing guards, which block rather than guess.
+# live SHOW ALL SLAVES STATUS across every non-primary replica. The returned
+# envelope includes a redacted diagnostic even if credentials cannot be read.
 _build_replicas_via_sql() {
   local pw i pod entry map='{}' candidates=()
-  local unhealthy='{"slaveIORunning":false,"slaveSQLRunning":false,"secondsBehindMaster":null}'
   for ((i = 0; i < CR_REPLICAS; i++)); do
     [[ "$i" == "$FROM_INDEX" ]] && continue
     candidates+=("${MDB}-${i}")
   done
-  pw="$(mariadb_read_root_password "${MDB}-${FROM_INDEX}" "${candidates[@]}")" || return 1
+  if ! pw="$(mariadb_read_root_password "${MDB}-${FROM_INDEX}" "${candidates[@]}")"; then
+    jq -nc '{replicas: {}, diagnostic: {status: "credentials_unavailable", query: "SHOW ALL SLAVES STATUS"}}'
+    return 0
+  fi
   for pod in "${candidates[@]}"; do
-    entry="$(_replica_entry_via_sql "$pod" "$pw")" || entry="$unhealthy"
+    entry="$(_replica_entry_via_sql "$pod" "$pw")" || entry="$(_unavailable_replica_entry parser_failed)"
     map="$(jq -c --arg k "$pod" --argjson v "$entry" '.[$k] = $v' <<<"$map")"
   done
-  printf '%s' "$map"
+  jq -nc --argjson replicas "$map" --argjson count "${#candidates[@]}" '{
+    replicas: $replicas,
+    diagnostic: {status: "completed", query: "SHOW ALL SLAVES STATUS", podCount: $count}
+  }'
 }
 
 # --- resolve target ----------------------------------------------------------
@@ -179,16 +217,16 @@ fi
 # Resolve the replica-health map ONCE; auto-select and Guard 4 both read it, so
 # neither cares which operator generation produced it. Current gen: the CR's
 # status.replication.replicas. Legacy (mmontes) gen: that key is absent, so fall
-# back to live SHOW SLAVE STATUS. Fallback fails soft — an empty map just lets
-# the guards below block, never a blind switch.
+# back to live SHOW ALL SLAVES STATUS. Fallback fails soft — an empty map just
+# lets the guards below block, never a blind switch.
 REPLICAS_JSON="$(jq -c '.status.replication.replicas // {}' <<<"$CR_JSON")"
 REPLICAS_SOURCE="cr_status"
+REPLICAS_QUERY_DIAGNOSTIC='null'
 if [[ "$REPLICAS_JSON" == "{}" ]]; then
-  _sql_map="$(_build_replicas_via_sql)" || _sql_map=""
-  if [[ -n "$_sql_map" && "$_sql_map" != "{}" ]]; then
-    REPLICAS_JSON="$_sql_map"
-    REPLICAS_SOURCE="show_slave_status"
-  fi
+  _sql_result="$(_build_replicas_via_sql)" || _sql_result='{"replicas":{},"diagnostic":{"status":"build_failed","query":"SHOW ALL SLAVES STATUS"}}'
+  REPLICAS_JSON="$(jq -c '.replicas // {}' <<<"$_sql_result")"
+  REPLICAS_QUERY_DIAGNOSTIC="$(jq -c '.diagnostic // null' <<<"$_sql_result")"
+  REPLICAS_SOURCE="show_all_slaves_status"
 fi
 
 # Target selection: an explicit podIndex, or — when the caller gives none — the
@@ -209,7 +247,9 @@ else
     | sort_by(.lag, .idx)
     | (.[0].idx // "")' <<<"$REPLICAS_JSON")"
   if [[ -z "$TARGET_INDEX" ]]; then
-    emit BLOCKED NO_ELIGIBLE_REPLICA "no healthy, caught-up replica available to promote (lag_threshold=${LAG_THRESHOLD}s); nothing safe to switch to" false; exit 0
+    emit BLOCKED NO_ELIGIBLE_REPLICA "no healthy, caught-up replica available to promote (lag_threshold=${LAG_THRESHOLD}s); nothing safe to switch to" false \
+      "$(jq -nc --argjson replicas "$REPLICAS_JSON" --argjson diagnostic "$REPLICAS_QUERY_DIAGNOSTIC" \
+        '{replicas: $replicas} + (if $diagnostic == null then {} else {replica_health_query: $diagnostic} end)')"; exit 0
   fi
   AUTO_SELECTED=true
 fi
@@ -223,7 +263,7 @@ if [[ "$TARGET_INDEX" == "$FROM_INDEX" ]]; then
 fi
 
 # Guard 4: strict lag pre-check. The replica-health map (REPLICAS_JSON, from CR
-# status or the legacy SHOW SLAVE STATUS fallback) is keyed by pod name
+# status or the legacy SHOW ALL SLAVES STATUS fallback) is keyed by pod name
 # (<mdb>-<index>). Verify the TARGET pod is actually a known replica (a bare
 # all(...) would pass vacuously if the target key were missing) AND that every
 # replica is healthy and caught up — so the operator's sync-wait is instant and

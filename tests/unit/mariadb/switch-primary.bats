@@ -30,7 +30,7 @@ case "$verb" in
         if [[ "$s" == "stuck" ]]; then idx="${MOCK_PRIMARY_INDEX:-0}"; ready="False"; fi
         # MOCK_LEGACY=1 emulates the mmontes-era operator: it publishes
         # currentPrimary/currentPrimaryPodIndex but NEVER status.replication, so
-        # the script must fall back to SHOW SLAVE STATUS over `exec` (below).
+        # the script must fall back to SHOW ALL SLAVES STATUS over `exec` (below).
         if [[ "${MOCK_LEGACY:-0}" == "1" ]]; then
           jq -n --argjson idx "$idx" \
             --arg enabled "${MOCK_REPL_ENABLED:-true}" \
@@ -65,12 +65,15 @@ case "$verb" in
     # kubectl exec <pod> -c <container> -- <cmd...>
     case "$args" in
       *"printenv MARIADB_ROOT_PASSWORD"*) printf '%s' "${MOCK_ROOT_PW:-test-pass}"; exit 0 ;;
-      *"SHOW SLAVE STATUS"*)
+      *"SHOW ALL SLAVES STATUS"*)
+        [[ "${MOCK_LEGACY_QUERY_FAIL:-0}" == "1" ]] && exit 1
+        [[ "${MOCK_LEGACY_EMPTY:-0}" == "1" ]] && exit 0
         # A caught-up replica by default. Per-pod knobs exercise mixed-health
         # fallback maps; the unnumbered knobs remain the default for every pod.
         io="${MOCK_LEGACY_IO:-Yes}"
         sql="${MOCK_LEGACY_SQL:-Yes}"
         lag="${MOCK_LEGACY_LAG:-0}"
+        connection_name="${MOCK_LEGACY_CONNECTION_NAME:-legacy-primary}"
         case "$args" in
           *"exec mariadb-1 "*)
             io="${MOCK_LEGACY_IO_1:-$io}"
@@ -84,9 +87,17 @@ case "$verb" in
             ;;
         esac
         printf '*************************** 1. row ***************************\n'
+        printf '               Connection_name: %s\n' "$connection_name"
         printf '             Slave_IO_Running: %s\n' "$io"
         printf '            Slave_SQL_Running: %s\n' "$sql"
         printf '        Seconds_Behind_Master: %s\n' "$lag"
+        if [[ "${MOCK_LEGACY_MULTIPLE:-0}" == "1" ]]; then
+          printf '*************************** 2. row ***************************\n'
+          printf '               Connection_name: legacy-secondary\n'
+          printf '             Slave_IO_Running: Yes\n'
+          printf '            Slave_SQL_Running: Yes\n'
+          printf '        Seconds_Behind_Master: 0\n'
+        fi
         exit 0 ;;
       *) echo "mock: unhandled exec: $args" >&2; exit 1 ;;
     esac ;;
@@ -208,15 +219,22 @@ field() { jq -r "$1" "${RESULT}"; }
 
 # --- legacy operator (mmontes): no status.replication.replicas ---------------
 # It publishes currentPrimaryPodIndex but not the per-replica health map, so the
-# script falls back to live SHOW SLAVE STATUS. These lock down that both the
+# script falls back to live SHOW ALL SLAVES STATUS. These lock down that both the
 # auto-select and Guard 4 paths keep working (and stay safe) on legacy.
 
-@test "switch-primary (legacy) auto-selects via SHOW SLAVE STATUS fallback" {
+@test "switch-primary (legacy) auto-selects a healthy named replication connection" {
   run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0    # no target
   [ "$(field '.reason_code')" = "SWITCH_DRY_RUN" ]
   [ "$(field '.to_pod_index')" = "1" ]
   [ "$(field '.target_auto_selected')" = "true" ]
-  [ "$(field '.replicas_source')" = "show_slave_status" ]
+  [ "$(field '.replicas_source')" = "show_all_slaves_status" ]
+}
+
+@test "switch-primary (legacy) accepts an explicit healthy named target in dry-run" {
+  run_switch DRY_RUN=true TARGET_POD_INDEX=1 MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0
+  [ "$(field '.reason_code')" = "SWITCH_DRY_RUN" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+  [ "$(field '.replicas_source')" = "show_all_slaves_status" ]
 }
 
 @test "switch-primary (legacy) picks the healthy replica before the strict mixed-health guard" {
@@ -227,7 +245,7 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.reason_code')" = "REPLICAS_NOT_IN_SYNC" ]
   [ "$(field '.to_pod_index')" = "1" ]
   [ "$(field '.target_auto_selected')" = "true" ]
-  [ "$(field '.replicas_source')" = "show_slave_status" ]
+  [ "$(field '.replicas_source')" = "show_all_slaves_status" ]
   [ "$(field '.replicas["mariadb-1"].secondsBehindMaster')" = "0" ]
   [ "$(field '.replicas["mariadb-2"].secondsBehindMaster')" = "30" ]
 }
@@ -235,18 +253,55 @@ field() { jq -r "$1" "${RESULT}"; }
 @test "switch-primary (legacy) blocks auto-select when replicas lag" {
   run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_LAG=30
   [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "ok" ]
 }
 
 @test "switch-primary (legacy) blocks auto-select when replication is broken" {
   run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_IO=No
   [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].slaveIORunning')" = "false" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "ok" ]
+}
+
+@test "switch-primary (legacy) blocks when the SQL replication thread is stopped" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_SQL=No
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].slaveSQLRunning')" = "false" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "ok" ]
+}
+
+@test "switch-primary (legacy) blocks and diagnoses an empty status result" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_EMPTY=1
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].slaveIORunning')" = "null" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "query_empty" ]
+}
+
+@test "switch-primary (legacy) blocks and diagnoses a failed status query" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_QUERY_FAIL=1
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].slaveIORunning')" = "null" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "query_failed" ]
+}
+
+@test "switch-primary (legacy) blocks instead of choosing the first of multiple connections" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_MULTIPLE=1
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.status')" = "multiple_connections" ]
+  [ "$(field '.replicas["mariadb-1"].healthQuery.rowCount')" = "2" ]
+}
+
+@test "switch-primary (legacy) blocks when replication lag is unknown" {
+  run_switch DRY_RUN=true MOCK_LEGACY=1 MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_LAG=NULL
+  [ "$(field '.reason_code')" = "NO_ELIGIBLE_REPLICA" ]
+  [ "$(field '.replicas["mariadb-1"].secondsBehindMaster')" = "null" ]
 }
 
 @test "switch-primary (legacy) blocks an explicit target that is lagging" {
   run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_LEGACY=1 \
     MOCK_PRIMARY_INDEX=0 MOCK_LEGACY_LAG=30
   [ "$(field '.reason_code')" = "REPLICAS_NOT_IN_SYNC" ]
-  [ "$(field '.replicas_source')" = "show_slave_status" ]
+  [ "$(field '.replicas_source')" = "show_all_slaves_status" ]
 }
 
 @test "switch-primary (legacy) completes the switch on confirm" {

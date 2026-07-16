@@ -10,7 +10,7 @@
 #
 # Scope covers the happy-path switch plus the live SQL-health fallback: the
 # latter pauses the controller and removes only its replica status map so the
-# real task must query the still-running replicas with SHOW SLAVE STATUS. The
+# real task must query the still-running replicas with SHOW ALL SLAVES STATUS. The
 # stuck-switch recovery ladder (rollback / gated pod-eviction) stays unit-tested;
 # validating it needs a fault-injection harness tracked in #59.
 
@@ -269,7 +269,7 @@ _dump_state() {
   # The current operator normally publishes status.replication.replicas, so
   # briefly stop only its controller and remove that status field. The database
   # pods stay running. This deterministically drives the production task through
-  # real pod exec + SHOW SLAVE STATUS without adding a test-only code switch.
+  # real pod exec + SHOW ALL SLAVES STATUS without adding a test-only code switch.
   _wait_for_all_replicas_caught_up 120
   local from data to
   from="$(_primary_index)"
@@ -291,7 +291,7 @@ _dump_state() {
   data="$(_task_result_data)"
   echo "# SQL fallback dry_run result: $data" >&3
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
-  assert_equal "$(echo "$data" | jq -r '.replicas_source')" "show_slave_status"
+  assert_equal "$(echo "$data" | jq -r '.replicas_source')" "show_all_slaves_status"
   assert_equal "$(echo "$data" | jq -r '.target_auto_selected')" "true"
   to="$(echo "$data" | jq -r '.to_pod_index')"
   [ "$to" != "$from" ]

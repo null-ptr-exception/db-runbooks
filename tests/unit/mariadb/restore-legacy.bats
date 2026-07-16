@@ -39,6 +39,11 @@ case "$verb" in
         pod="$(printf '%s' "$args" | sed -n 's/.*get pod \([^ ]*\).*/\1/p')"
         [[ "${MOCK_NOT_ADOPTED:-0}" == "1" ]] && { printf 'some-other-pvc'; exit 0; }
         printf 'storage-%s' "$pod"; exit 0 ;;
+      *"get secret"*"-o json"*)
+        jq -n '{data:{
+          "legacy-access-key": ("mock-access" | @base64),
+          "legacy-secret-key": ("mock-secret" | @base64)
+        }}'; exit 0 ;;
       *"get secret"*) printf '%s' "${MOCK_ROOT_PW-s3cret}" | base64;  exit 0 ;;
       *"get mariadb"*) [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-}";            exit 0 ;;
@@ -97,13 +102,32 @@ run_restore() {
 
 result_field() { jq -r "$1" "${RESULT}"; }
 
-@test "legacy dry_run plans a hand-rolled physical restore (no operator CR)" {
+assert_restore_contract() {
+  jq -e '
+    .data
+    | keys == [
+        "contentType", "dryRun", "namespace", "pointInTimeRecovery",
+        "provisioned", "restored", "state"
+      ]
+  ' "${RESULT}" >/dev/null
+  jq -e '.data.pointInTimeRecovery | keys == ["enabled", "targetRecoveryTime"]' \
+    "${RESULT}" >/dev/null
+}
+
+assert_error_reason() {
+  [ "$(result_field '.status')" = "error" ]
+  [ "$(result_field '.reason')" = "$1" ]
+}
+
+@test "legacy dry_run returns a sanitized physical restore plan" {
   run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
-  [ "$(result_field '.data.backup.contentType')" = "Physical" ]
-  [[ "$(result_field '.data.plan.pvc')" == storage-*-0 ]]
-  [[ "$(result_field '.data.plan.source')" == s3://* ]]
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  [ "$(result_field '.data.dryRun')" = "true" ]
+  [ "$(result_field '.data.provisioned')" = "false" ]
+  [ "$(result_field '.data.restored')" = "false" ]
+  [ "$(result_field '.data.state')" = "PLANNED" ]
+  assert_restore_contract
   [ ! -f "${CAP_DIR}/PersistentVolumeClaim.json" ]
 }
 
@@ -111,8 +135,10 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi
   [ "$status" -eq 0 ]
+  [ "$(result_field '.data.provisioned')" = "true" ]
   [ "$(result_field '.data.restored')" = "true" ]
-  [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
+  [ "$(result_field '.data.state')" = "COMPLETED" ]
+  assert_restore_contract
   # The original Secret references are reused directly; no credential values
   # are copied into a short-lived Secret. The MariaDB carries NO bootstrapFrom.
   [ "$(jq -r '.kind' "${CAP_DIR}/PersistentVolumeClaim.json")" = "PersistentVolumeClaim" ]
@@ -132,48 +158,80 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_XB_LIST=""
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"no physical backup"* ]]
+  assert_error_reason BACKUP_NOT_FOUND
+  [ "$(result_field '.message')" = "no backup is available to restore" ]
 }
 
 @test "legacy refuses to overwrite an existing target" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"already exists"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "restore target is unavailable" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb-restored"* ]]
 }
 
 @test "legacy fails when the prepare Job does not complete" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_JOB_FAIL=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"exit 11"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "database restore failed" ]
+  assert_restore_contract
 }
 
 @test "legacy fails when the restored instance never becomes Ready" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_READY_FAIL=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"exit 13"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "database restore failed" ]
+  assert_restore_contract
 }
 
 @test "fail-closed: legacy fails when the PVC was not adopted (would be empty)" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_NOT_ADOPTED=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"exit 14"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "database restore failed" ]
   [ "$(result_field '.data.restored')" = "false" ]
+  assert_restore_contract
 }
 
 @test "fail-closed: legacy fails when the restored datadir has no user tables" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi MOCK_TABLE_COUNT=0
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"exit 14"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "database restore failed" ]
+  assert_restore_contract
 }
 
 @test "legacy rejects point-in-time recovery (not supported hand-rolled)" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi TARGET_TIME="2026-07-08T00:00:00Z"
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"point-in-time"* ]]
+  assert_error_reason RESTORE_CAPABILITY_UNAVAILABLE
+  [ "$(result_field '.message')" = "point-in-time recovery is unavailable for this database" ]
+}
+
+@test "legacy restore does not expose its mode, object, Secret, or resource plan" {
+  run_restore DRY_RUN=true RESTORE_TARGET=internal-legacy-target \
+    RESTORE_IMAGE=mariadb:10.6 STORAGE_SIZE=1Gi \
+    BACKUP_ENDPOINT="https://legacy-storage.internal.invalid:9443" \
+    BACKUP_BUCKET="private-legacy-bucket" BACKUP_PREFIX="private/legacy/prefix" \
+    BACKUP_ACCESS_SECRET="legacy-access-secret" BACKUP_ACCESS_KEY="legacy-access-key" \
+    BACKUP_SECRET_ACCESS_SECRET="legacy-secret-access" BACKUP_SECRET_KEY="legacy-secret-key"
+  [ "$status" -eq 0 ]
+  assert_restore_contract
+  local public_output="$(cat "${RESULT}")${output}"
+  local marker
+  for marker in \
+    internal-legacy-target legacy-storage.internal.invalid private-legacy-bucket \
+    private/legacy/prefix legacy-access-secret legacy-access-key \
+    legacy-secret-access legacy-secret-key hand-rolled s3:// \
+    PersistentVolumeClaim Job secretKeyRef plan manifest; do
+    [[ "$public_output" != *"$marker"* ]]
+  done
 }

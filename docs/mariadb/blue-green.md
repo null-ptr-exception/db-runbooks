@@ -87,23 +87,19 @@ kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fcreate' \
   }'"
 ```
 
-The S3/MinIO backup location is resolved internally from the selected Blue
-MariaDB workload using the shared resolver described in
-[MariaDB object-storage resolution](object-storage-resolution.md). The
-destination resolves the same Blue identity from its own local MariaDB object.
-This permits a cluster-local endpoint and independently provisioned Secret
-references without transporting credential values, while its bucket and prefix
-must identify the objects Blue wrote. A missing destination policy fails closed.
-Storage fields are not task inputs; advanced `BACKUP_*` process overrides remain
-available to operators.
+Backup storage is resolved internally by the platform on both sides of the
+workflow. Callers do not provide or receive backend locations or credential
+references. If the destination cannot resolve the matching backup, the operation
+fails safely with a stable public reason and generic guidance.
 
 `green_image` is the image Green is bootstrapped with (match Blue's version so
 restore is compatible). `target_image`, if set and different, triggers an
 in-place upgrade of Green after bootstrap. The task only succeeds once Green
 validates as a healthy replica of Blue caught up within `lag_threshold`
 (default `0`), mirroring AWS create completing with green in sync. Poll the
-returned task ID; the result includes the backup descriptor, bootstrap,
-upgrade, and final replication-validation sub-results.
+returned task ID; the result reports sanitized progress for backup, bootstrap,
+upgrade, and final replication validation without storage identifiers,
+credential references, manifests, raw status, or platform API details.
 
 ## Switchover
 

@@ -59,6 +59,48 @@ task_result() {
   echo "$TASK_RESPONSE" | jq -c '.result.data as $d | (($d | try fromjson catch null) // (if ($d|type)=="object" then $d else .result end))'
 }
 
+assert_backup_result_contract() {
+  local result="$1"
+  echo "$result" | jq -e '
+    (.data | keys) ==
+    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+  ' >/dev/null
+}
+
+assert_backup_result_hides_internals() {
+  local result="$1"
+  echo "$result" | jq -e '
+    [paths(scalars) as $p | ($p[-1] | tostring)]
+    | all(.[];
+          . != "manifest" and . != "plan" and . != "storage" and
+          . != "credentialsRef" and . != "sourcePod" and . != "mode" and
+          . != "operatorGroup" and . != "apiVersion" and . != "conditions")
+  ' >/dev/null
+  [[ "$result" != *"Secret"* ]]
+  [[ "$result" != *"mariadb.mmontes.io"* ]]
+  [[ "$result" != *"k8s.mariadb.com"* ]]
+}
+
+assert_restore_result_contract() {
+  local result="$1"
+  echo "$result" | jq -e '
+    (.data | keys) ==
+    ["contentType", "dryRun", "namespace", "pointInTimeRecovery",
+     "provisioned", "restored", "state"]
+  ' >/dev/null
+}
+
+assert_restore_result_hides_internals() {
+  local result="$1"
+  assert_restore_result_contract "$result"
+  [[ "$result" != *"Secret"* ]]
+  [[ "$result" != *"PersistentVolumeClaim"* ]]
+  [[ "$result" != *"Job"* ]]
+  [[ "$result" != *"mariadb.mmontes.io"* ]]
+  [[ "$result" != *"k8s.mariadb.com"* ]]
+  [[ "$result" != *"s3://"* ]]
+}
+
 submit() {
   local task="$1" payload="$2" id
   http_post "${AQSH_URL}/tasks/${task}" "$payload"
@@ -74,6 +116,10 @@ submit() {
 
 primary_pod() { kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "$1" -o jsonpath='{.status.currentPrimary}'; }
 root_password() { kubectl --context "$CTX_A" -n "$DB_NS" get secret mariadb -o jsonpath='{.data.password}' | base64 -d; }
+mariadb_names() {
+  kubectl --context "$CTX_A" -n "$DB_NS" get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+}
 sql() {
   local cr="$1" query="$2" pod password
   pod="$(primary_pod "$cr")"; password="$(root_password)"
@@ -94,16 +140,23 @@ sql() {
 @test "legacy logical Backup omits unsupported prefix and is accepted" {
   submit logical-backup '{"namespace":"mariadb-1","dry_run":"true"}'
   result=$(task_result)
+  backup=$(echo "$result" | jq -r '.data.backupName')
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" false
-  assert_equal "$(echo "$result" | jq -r '.data.backup.prefixSupported')" false
-  assert_equal "$(echo "$result" | jq -r '.data.manifest | fromjson | .apiVersion')" mariadb.mmontes.io/v1alpha1
-  assert_equal "$(echo "$result" | jq -r '.data.manifest | fromjson | .spec.storage.s3 | has("prefix")')" false
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Logical
+  assert_equal "$(echo "$result" | jq -r '.data.state')" PLANNED
+  run kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup"
+  assert_failure
 
   submit logical-backup '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"0"}'
   result=$(task_result)
   backup=$(echo "$result" | jq -r '.data.backupName')
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" true
-  assert_equal "$(echo "$result" | jq -r '.data.backup.storageLayout')" bucket-root
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Logical
+  assert_equal "$(echo "$result" | jq -r '.data.state')" REQUESTED
   assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup" -o jsonpath='{.apiVersion}')" mariadb.mmontes.io/v1alpha1
   assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup" -o jsonpath='{.spec.storage.s3.prefix}')" ""
   kubectl --context "$CTX_A" -n "$DB_NS" delete backup "$backup" --wait=false >/dev/null
@@ -115,21 +168,28 @@ sql() {
     CREATE TABLE phase23_e2e.marker (id INT PRIMARY KEY, value VARCHAR(64)); \
     INSERT INTO phase23_e2e.marker VALUES (1, 'before-backup');"
 
-  submit physical-backup '{"namespace":"mariadb-1","dry_run":"true","compression":"none"}'
+  submit physical-backup '{"namespace":"mariadb-1","dry_run":"true"}'
   result=$(task_result)
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" false
-  assert_equal "$(echo "$result" | jq -r '.data.backup.mode')" hand-rolled
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Physical
+  assert_equal "$(echo "$result" | jq -r '.data.state')" PLANNED
   run kubectl --context "$CTX_A" -n "$DB_NS" get physicalbackup
   assert_failure
 
-  submit physical-backup '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","compression":"none","wait_timeout":"10m"}'
+  submit physical-backup '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   result=$(task_result)
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" true
-  object=$(echo "$result" | jq -r '.data.backup.object')
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Physical
+  assert_equal "$(echo "$result" | jq -r '.data.state')" COMPLETED
+  backup=$(echo "$result" | jq -r '.data.backupName')
+  object="tenant-a/database/${backup}.xb"
   # The legacy direct-client path must honor the workload S3_SUBFOLDER even
   # though the legacy operator-managed logical Backup CRD cannot carry prefix.
   [[ "$object" == tenant-a/database/*.xb ]]
-  assert_equal "$(echo "$result" | jq -r '.data.backup.compression')" none
   run kubectl --context "$CTX_B" -n minio run phase23-s5cmd-ls \
     --image=peakcom/s5cmd:v2.3.0 --restart=Never --rm -i \
     --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin-changeme-prod \
@@ -141,19 +201,31 @@ sql() {
   # contain the later row.
   sql mariadb "INSERT INTO phase23_e2e.marker VALUES (2, 'after-backup');"
 
+  restore_names_before="$(mariadb_names | sort)"
   submit restore '{"namespace":"mariadb-1","dry_run":"true"}'
   result=$(task_result)
+  assert_restore_result_hides_internals "$result"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Physical
+  assert_equal "$(echo "$result" | jq -r '.data.dryRun')" true
+  assert_equal "$(echo "$result" | jq -r '.data.provisioned')" false
   assert_equal "$(echo "$result" | jq -r '.data.restored')" false
-  target=$(echo "$result" | jq -r '.data.target')
-  run kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "$target"
-  assert_failure
+  assert_equal "$(echo "$result" | jq -r '.data.state')" PLANNED
+  assert_equal "$(mariadb_names | sort)" "$restore_names_before"
 
   submit restore '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   result=$(task_result)
-  target=$(echo "$result" | jq -r '.data.target')
+  assert_restore_result_hides_internals "$result"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" Physical
+  assert_equal "$(echo "$result" | jq -r '.data.dryRun')" false
+  assert_equal "$(echo "$result" | jq -r '.data.provisioned')" true
+  target="$(comm -13 \
+    <(printf '%s\n' "$restore_names_before") \
+    <(mariadb_names | sort))"
+  [[ "$target" =~ ^mariadb-1-restore-[0-9]{14}$ ]]
   RESTORE_TARGET="$target"
   export RESTORE_TARGET
   assert_equal "$(echo "$result" | jq -r '.data.restored')" true
+  assert_equal "$(echo "$result" | jq -r '.data.state')" COMPLETED
   assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "$target" -o jsonpath='{.apiVersion}')" mariadb.mmontes.io/v1alpha1
   assert_equal "$(kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "$target" -o jsonpath='{.spec.volumeClaimTemplate.resources.requests.storage}')" 1Gi
   pvc=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod "${target}-0" -o jsonpath='{.spec.volumes[*].persistentVolumeClaim.claimName}')
@@ -168,13 +240,17 @@ sql() {
   result=$(task_result)
   assert_equal "$(echo "$result" | jq -r .status)" error
   assert_equal "$(echo "$result" | jq -r .code)" 2
+  assert_equal "$(echo "$result" | jq -r .reason)" OPERATION_UNAVAILABLE
   message=$(echo "$result" | jq -r .message)
-  [[ "$message" == *"requires the k8s.mariadb.com generation"* ]]
-  [[ "$message" == *"no ExternalMariaDB CRD"* ]]
-  [[ "$message" == *"upgrade the operator"* ]]
-  [[ "$message" != *"no matches for kind"* ]]
-  assert_equal "$(echo "$result" | jq -r '.data.operatorGroup')" mariadb.mmontes.io
-  echo "$result" | jq -e '.data.required | index("multiCluster") and index("externalmariadbs CRD") and index("physical bootstrapFrom")' >/dev/null
+  assert_equal "$message" "blue-green is unavailable for this database"
+  assert_equal "$(echo "$result" | jq -r '.data | keys | sort | join(",")')" "available,stage"
+  assert_equal "$(echo "$result" | jq -r '.data.stage')" capability-check
+  assert_equal "$(echo "$result" | jq -r '.data.available')" false
+  [[ "$result" != *"mariadb.mmontes.io"* ]]
+  [[ "$result" != *"ExternalMariaDB"* ]]
+  [[ "$result" != *"CRD"* ]]
+  [[ "$result" != *"operator"* ]]
+  [[ "$result" != *"multiCluster"* ]]
   after=$(kubectl --context "$CTX_A" -n "$DB_NS" get mariadb,backup,restore,job,pvc,statefulset,secret -o name 2>/dev/null | sort)
   assert_equal "$after" "$before"
   run kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "${RESTORE_TARGET:-legacy-restore}" mariadb-green

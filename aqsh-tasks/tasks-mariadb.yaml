@@ -663,7 +663,7 @@ tasks:
         default: "false"
   backup:
     script: backup/backup-mariadb.sh
-    description: "Backup MariaDB database to MinIO"
+    description: "Create a logical backup for the database identified by namespace"
     timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -672,20 +672,9 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      # The MinIO bucket is a platform internal (db-backups by convention,
-      # MINIO_BUCKET from deploy config); not a task input. Env-overridable only.
-      - name: backup_databases
-        env: BACKUP_DATABASES
-        required: false
-        type: string
-        default: --all-databases
   physical-backup:
     script: mariadb/physical-backup.sh
-    description: "Take a physical (mariabackup) backup of a namespace's MariaDB to S3/MinIO — the restorable counterpart of restore; the S3 location and credentials are resolved internally"
+    description: "Create a restorable physical backup for the database identified by namespace"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # The namespace is the database identity; the S3 backup location and
@@ -697,20 +686,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      - name: target
-        env: BACKUP_TARGET
-        required: false
-        type: string
-        default: PreferReplica
-      - name: compression
-        env: BACKUP_COMPRESSION
-        required: false
-        type: string
-        default: bzip2
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -730,7 +705,7 @@ tasks:
         default: "false"
   logical-backup:
     script: mariadb/logical-backup.sh
-    description: "Take a logical (mariadb-dump) backup of a namespace's MariaDB to S3/MinIO via the operator Backup CR — the operator-managed logical counterpart of physical-backup; works on both operator generations. The S3 location and credentials are resolved internally"
+    description: "Create a logical backup for the database identified by namespace"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # Same user-facing surface as physical-backup, minus the physical-only
@@ -742,10 +717,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -765,7 +736,7 @@ tasks:
         default: "false"
   list-backups:
     script: backup/list-backups-mariadb.sh
-    description: "List the backups stored for a namespace (AWS RDS DescribeDBSnapshots); read-only. Location is resolved internally from the platform convention"
+    description: "List backups for the database identified by namespace; read-only"
     timeout: 2m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -774,13 +745,9 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
   delete-backup:
     script: backup/delete-backup-mariadb.sh
-    description: "Delete a named backup for a namespace (AWS RDS DeleteDBSnapshot); mutating (dry_run + confirm). Scoped to the namespace's own backup prefix"
+    description: "Delete a named backup for the database identified by namespace; mutating (dry_run + confirm)"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -789,10 +756,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
       - name: backup
         env: BACKUP_NAME
         required: true
@@ -809,7 +772,7 @@ tasks:
         default: "false"
   restore:
     script: mariadb/restore.sh
-    description: "Recreate a namespace's MariaDB from its physical backup (optionally point-in-time); the namespace is the database identity — version, storage, name, S3 location, and credentials are all resolved internally"
+    description: "Restore the database identified by namespace from a physical backup, optionally to a point in time"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # The namespace identifies the managed database; the engine version, storage

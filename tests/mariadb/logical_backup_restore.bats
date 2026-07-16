@@ -108,6 +108,28 @@ _task_result_data() {
   '
 }
 
+assert_backup_result_contract() {
+  local result="$1"
+  echo "$result" | jq -e '
+    (.data | keys) ==
+    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+  ' >/dev/null
+}
+
+assert_backup_result_hides_internals() {
+  local result="$1"
+  echo "$result" | jq -e '
+    [paths(scalars) as $p | ($p[-1] | tostring)]
+    | all(.[];
+          . != "manifest" and . != "plan" and . != "storage" and
+          . != "credentialsRef" and . != "sourcePod" and . != "operatorGroup" and
+          . != "apiVersion" and . != "conditions")
+  ' >/dev/null
+  [[ "$result" != *"Secret"* ]]
+  [[ "$result" != *"k8s.mariadb.com"* ]]
+  [[ "$result" != *"mariadb.mmontes.io"* ]]
+}
+
 _matching_resource_names() {
   local resource="$1" pattern="$2"
   kubectl --context "$CTX_A" -n "$DB_NS" get "$resource" \
@@ -201,19 +223,21 @@ _sql() {
     mariadb -u root -p"${password}" -N -B -e "$query"
 }
 
-@test "logical-backup dry-run renders a Backup without applying it" {
+@test "logical-backup dry-run returns a sanitized summary without applying" {
   _submit "logical-backup" \
     '{"namespace":"mariadb-1","dry_run":"true"}'
 
-  local result manifest backup_name
+  local result backup_name
   result="$(_task_result_data)"
-  manifest=$(echo "$result" | jq -c '.data.manifest | fromjson')
-  backup_name=$(echo "$manifest" | jq -r '.metadata.name')
+  backup_name=$(echo "$result" | jq -r '.data.backupName')
 
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.dryRun')" "true"
   assert_equal "$(echo "$result" | jq -r '.data.created')" "false"
-  assert_equal "$(echo "$manifest" | jq -r '.kind')" "Backup"
-  assert_equal "$(echo "$manifest" | jq -r '.spec.mariaDbRef.name')" "mariadb"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "PLANNED"
+  [[ -n "$backup_name" ]]
 
   run kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup_name"
   assert_failure
@@ -229,8 +253,11 @@ _sql() {
   result="$(_task_result_data)"
   backup_name=$(echo "$result" | jq -r '.data.backupName // empty')
 
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" "true"
-  assert_equal "$(echo "$result" | jq -r '.data.backup.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "COMPLETED"
   [[ -n "$backup_name" ]]
 
   kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup_name"

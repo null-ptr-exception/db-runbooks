@@ -84,27 +84,57 @@ run_backup() {
 
 result_field() { jq -r "$1" "${RESULT}"; }
 
-@test "legacy dry_run plans a hand-rolled mariabackup (no operator CR)" {
-  run_backup DRY_RUN=true MARIADB_NAME=mariadb
+assert_public_backup_data() {
+  jq -e '
+    (.data | keys) ==
+    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+  ' "${RESULT}" >/dev/null
+}
+
+assert_response_hides() {
+  local combined marker
+  combined="$(cat "${RESULT}")"$'\n'"${output:-}"
+  for marker in "$@"; do
+    [[ "$combined" != *"$marker"* ]]
+  done
+}
+
+@test "legacy dry_run returns the same sanitized public summary" {
+  run_backup DRY_RUN=true MARIADB_NAME=mariadb \
+    BACKUP_ENDPOINT=https://private-legacy-storage.example.invalid \
+    BACKUP_BUCKET=private-legacy-bucket \
+    BACKUP_PREFIX=private/legacy-prefix \
+    BACKUP_REGION=private-legacy-region
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
-  [ "$(result_field '.data.backup.contentType')" = "Physical" ]
-  [[ "$(result_field '.data.backup.object')" == *.xb ]]
-  [ "$(result_field '.data.plan.command')" = "mariabackup --backup --stream=xbstream" ]
-  [[ "$(result_field '.message')" == *"legacy operator"* ]]
+  assert_public_backup_data
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  [ "$(result_field '.data.state')" = "PLANNED" ]
+  [ "$(result_field '.data.created')" = "false" ]
+  [ "$(result_field '.data.dryRun')" = "true" ]
+  [ ! -f "${PIPE_CAPTURE}" ]
+  [ ! -f "${EXEC_CAPTURE}" ]
+  assert_response_hides private-legacy-storage.example.invalid \
+    private-legacy-bucket private/legacy-prefix private-legacy-region \
+    hand-rolled sourcePod mariabackup manifest plan object Secret operator
 }
 
 @test "legacy apply streams the backup to S3 and reports created" {
-  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
+    MOCK_ROOT_PW=private-root-password-marker
   [ "$status" -eq 0 ]
+  assert_public_backup_data
   [ "$(result_field '.data.created')" = "true" ]
-  [ "$(result_field '.data.backup.mode')" = "hand-rolled" ]
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  [ "$(result_field '.data.state')" = "COMPLETED" ]
   [ "$(cat "${PIPE_CAPTURE}")" = "XBSTREAM_BYTES" ]   # the stream reached s5cmd pipe
+  assert_response_hides private-root-password-marker sourcePod mode object \
+    bucket endpoint Secret
 }
 
 @test "legacy bounds the remote mariabackup stream with a configurable timeout" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MDBT_PB_STREAM_TIMEOUT=17
   [ "$status" -eq 0 ]
+  assert_public_backup_data
   [[ "$(cat "${EXEC_CAPTURE}")" == *"MDBT_PB_STREAM_TIMEOUT=17"* ]]
   [[ "$(cat "${EXEC_CAPTURE}")" == *'timeout "$MDBT_PB_STREAM_TIMEOUT" mariabackup'* ]]
 }
@@ -113,30 +143,40 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.sourcePod')" = "mariadb-2" ]
+  assert_public_backup_data
+  [[ "$(cat "${EXEC_CAPTURE}")" == *"mariadb-2"* ]]
+  assert_response_hides mariadb-0 mariadb-2 sourcePod
 }
 
 @test "legacy Primary target backs up from ordinal 0" {
-  run_backup DRY_RUN=true MARIADB_NAME=mariadb BACKUP_TARGET=Primary \
+  run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb BACKUP_TARGET=Primary \
     MOCK_PODS="mariadb-0 mariadb-1 mariadb-2"
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.sourcePod')" = "mariadb-0" ]
+  assert_public_backup_data
+  [[ "$(cat "${EXEC_CAPTURE}")" == *"mariadb-0"* ]]
+  assert_response_hides mariadb-0 mariadb-2 sourcePod
 }
 
 @test "legacy fails closed when the container has no root credential" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_ROOT_PW=""
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"3=no root credential"* ]]
+  [ "$(result_field '.reason')" = "BACKUP_FAILED" ]
+  assert_public_backup_data
+  assert_response_hides "root credential" Secret sourcePod object
 }
 
 @test "legacy fails when the mariadb container cannot run mariabackup" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_EXEC_FAIL=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"hand-rolled physical backup failed"* ]]
+  [ "$(result_field '.reason')" = "BACKUP_FAILED" ]
+  assert_public_backup_data
+  assert_response_hides hand-rolled mariabackup sourcePod object
 }
 
 @test "legacy fails when the S3 upload fails" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_PIPE_FAIL=1
   [ "$status" -ne 0 ]
-  [[ "$(result_field '.message')" == *"hand-rolled physical backup failed"* ]]
+  [ "$(result_field '.reason')" = "BACKUP_FAILED" ]
+  assert_public_backup_data
+  assert_response_hides hand-rolled s5cmd bucket endpoint sourcePod object
 }

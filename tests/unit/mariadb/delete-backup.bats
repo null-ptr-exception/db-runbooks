@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # Contract tests for backup/delete-backup-mariadb.sh — run against a mock
-# `s5cmd`, no MinIO. Lock down: confirm gating, dry-run plan, path-traversal
+# `s5cmd`, no MinIO. Lock down: confirm gating, sanitised dry-run result, path-traversal
 # guard on the backup name, not-found handling, the type-aware delete (exact key
 # for a flat object, "name/*" wildcard for a physical-backup directory — never a
 # bare prefix rm, which s5cmd silently no-ops), and the verify-after check that
@@ -33,6 +33,10 @@ while (( i < ${#args[@]} )); do
 done
 case "$cmd" in
   ls)
+    if [[ "${MOCK_S5_AUTH_FAIL:-0}" == "1" ]]; then
+      echo 'ERROR credential-marker-must-not-escape: Forbidden status code: 403' >&2
+      exit 1
+    fi
     # s5cmd ls matches by PREFIX: with MOCK_S5_SIBLING=1 a sibling whose name
     # extends the target's (e.g. snap-1 -> snap-10) is always in the listing.
     out=""
@@ -73,10 +77,16 @@ run_del() {
 }
 field() { jq -r "$1" "${RESULT}"; }
 
+assert_public_delete_result() {
+  [ "$(field '.data | keys | sort | join(",")')" = "backup,deleted,dryRun,namespace,state" ]
+  [ "$(field '.data | has("location") or has("bucket") or has("endpoint") or has("path") or has("plan")')" = "false" ]
+}
+
 @test "delete-backup requires confirm=true to apply" {
   run_del DRY_RUN=false CONFIRM=false BACKUP_NAME=snap-1
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "INVALID_REQUEST" ]
   [[ "$(field '.message')" == *"confirm=true is required"* ]]
   [ ! -f "${RM_CAPTURE}" ]
 }
@@ -87,7 +97,9 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.dryRun')" = "true" ]
   [ "$(field '.data.deleted')" = "false" ]
-  [ "$(field '.data.location.path')" = "mariadb/mariadb-1/snap-1" ]
+  [ "$(field '.data.state')" = "PLANNED" ]
+  [ "$(field '.data.backup')" = "snap-1" ]
+  assert_public_delete_result
   [ ! -f "${RM_CAPTURE}" ]
 }
 
@@ -95,6 +107,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true BACKUP_NAME="../other-ns/secret"
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "INVALID_REQUEST" ]
   [[ "$(field '.message')" == *"single name segment"* ]]
   [ ! -f "${RM_CAPTURE}" ]
 }
@@ -103,6 +116,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "INVALID_REQUEST" ]
   [[ "$(field '.message')" == *"backup is required"* ]]
 }
 
@@ -110,6 +124,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=missing MOCK_S5_TYPE=none
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "BACKUP_NOT_FOUND" ]
   [[ "$(field '.message')" == *"not found"* ]]
   [ ! -f "${RM_CAPTURE}" ]
 }
@@ -119,6 +134,8 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.deleted')" = "true" ]
+  [ "$(field '.data.state')" = "DELETED" ]
+  assert_public_delete_result
   # exact key, scoped to the namespace prefix, no wildcard
   [ "$(cat "${RM_CAPTURE}")" = "s3://db-backups/mariadb/mariadb-1/snap-1" ]
 }
@@ -127,6 +144,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=phys-1 MOCK_S5_TYPE=directory
   [ "$status" -eq 0 ]
   [ "$(field '.data.deleted')" = "true" ]
+  assert_public_delete_result
   # MUST be the wildcard form — a bare prefix rm is a silent no-op in s5cmd,
   # and "name/*" (unlike "name*") cannot over-match a sibling like "phys-10"
   [ "$(cat "${RM_CAPTURE}")" = "s3://db-backups/mariadb/mariadb-1/phys-1/*" ]
@@ -136,6 +154,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=snap-1 MOCK_S5_RM_NOOP=1
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "BACKUP_FAILED" ]
   [[ "$(field '.message')" == *"still present"* ]]
 }
 
@@ -144,6 +163,7 @@ field() { jq -r "$1" "${RESULT}"; }
   run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=snap-1 MOCK_S5_TYPE=none MOCK_S5_SIBLING=1
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "BACKUP_NOT_FOUND" ]
   [[ "$(field '.message')" == *"not found"* ]]
   [ ! -f "${RM_CAPTURE}" ]
 }
@@ -155,5 +175,31 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.deleted')" = "true" ]
+  assert_public_delete_result
   [ "$(cat "${RM_CAPTURE}")" = "s3://db-backups/mariadb/mariadb-1/snap-1" ]
+}
+
+@test "delete-backup maps storage failures to a stable reason without returning client details" {
+  run_del DRY_RUN=false CONFIRM=true BACKUP_NAME=snap-1 MOCK_S5_AUTH_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "BACKUP_SERVICE_UNAVAILABLE" ]
+  [[ "$(cat "${RESULT}")" != *"credential-marker-must-not-escape"* ]]
+  [[ "$output" != *"credential-marker-must-not-escape"* ]]
+  [ ! -f "${RM_CAPTURE}" ]
+}
+
+@test "delete-backup dry run does not reveal resolved storage details" {
+  cat > "${MOCK_DIR}/mariadb.env" <<EOF
+MINIO_BUCKET=internal-bucket-marker
+MINIO_ENDPOINT=http://internal-endpoint-marker.invalid
+EOF
+  run_del MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env" DRY_RUN=true BACKUP_NAME=snap-1
+  [ "$status" -eq 0 ]
+  assert_public_delete_result
+  [[ "$(cat "${RESULT}")" != *"internal-bucket-marker"* ]]
+  [[ "$(cat "${RESULT}")" != *"internal-endpoint-marker"* ]]
+  [[ "$output" != *"internal-bucket-marker"* ]]
+  [[ "$output" != *"internal-endpoint-marker"* ]]
+  [ ! -f "${RM_CAPTURE}" ]
 }

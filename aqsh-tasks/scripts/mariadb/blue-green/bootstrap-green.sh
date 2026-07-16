@@ -10,15 +10,15 @@ fi
 # shellcheck source=aqsh-tasks/lib/mariadb-blue-green.sh
 source "${LIB_DIR}/mariadb-blue-green.sh"
 
-BLUE_NAME="${BLUE_NAME:?BLUE_NAME is required}"
-GREEN_IMAGE="${GREEN_IMAGE:?GREEN_IMAGE is required}"
+BLUE_NAME="${BLUE_NAME:-}"
+GREEN_IMAGE="${GREEN_IMAGE:-}"
 ROOT_SECRET_NAME="${ROOT_SECRET_NAME:-mariadb}"
 ROOT_SECRET_KEY="${ROOT_SECRET_KEY:-password}"
 STORAGE_SIZE="${STORAGE_SIZE:-1Gi}"
 REPLICAS="${REPLICAS:-2}"
-BACKUP_BUCKET="${BACKUP_BUCKET:?BACKUP_BUCKET is required}"
-BACKUP_PREFIX="${BACKUP_PREFIX:?BACKUP_PREFIX is required}"
-BACKUP_ENDPOINT="${BACKUP_ENDPOINT:?BACKUP_ENDPOINT is required}"
+BACKUP_BUCKET="${BACKUP_BUCKET:-}"
+BACKUP_PREFIX="${BACKUP_PREFIX:-}"
+BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-}"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
 BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
@@ -36,28 +36,37 @@ bg_require_confirm "blue-green/bootstrap-green"
 
 GREEN_HOST="${GREEN_HOST:-${BG_MDB}-primary.${BG_NAMESPACE}.svc.cluster.local}"
 
+bg_required "blue" "$BLUE_NAME" "blue-green/bootstrap-green"
+bg_required "green_image" "$GREEN_IMAGE" "blue-green/bootstrap-green"
 bg_validate_dns_label "namespace" "$BG_NAMESPACE" "blue-green/bootstrap-green"
 bg_validate_dns_label "green" "$BG_MDB" "blue-green/bootstrap-green"
 bg_validate_dns_label "blue" "$BLUE_NAME" "blue-green/bootstrap-green"
 bg_validate_image "green_image" "$GREEN_IMAGE" "blue-green/bootstrap-green"
-bg_validate_dns_label "root_secret_name" "$ROOT_SECRET_NAME" "blue-green/bootstrap-green"
-bg_validate_secret_key "root_secret_key" "$ROOT_SECRET_KEY" "blue-green/bootstrap-green"
 bg_validate_storage_size "storage_size" "$STORAGE_SIZE" "blue-green/bootstrap-green"
 bg_validate_uint "replicas" "$REPLICAS" "blue-green/bootstrap-green"
-bg_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "blue-green/bootstrap-green"
-bg_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "blue-green/bootstrap-green"
-bg_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "blue-green/bootstrap-green"
-bg_validate_region "backup_region" "$BACKUP_REGION" "blue-green/bootstrap-green"
-bg_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "blue-green/bootstrap-green"
-bg_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "blue-green/bootstrap-green"
-bg_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "blue-green/bootstrap-green"
-bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "blue-green/bootstrap-green"
 bg_validate_uint "gtid_domain_id" "$GTID_DOMAIN_ID" "blue-green/bootstrap-green"
 bg_validate_uint "server_id_start_index" "$SERVER_ID_START_INDEX" "blue-green/bootstrap-green"
 bg_validate_endpoint "blue_host" "$BLUE_HOST" "blue-green/bootstrap-green"
 bg_validate_endpoint "green_host" "$GREEN_HOST" "blue-green/bootstrap-green"
 
-_kubectl apply -f - <<EOF
+if ! (
+  MDBT_RESULT_FILE=/dev/null
+  bg_validate_dns_label "root_secret_name" "$ROOT_SECRET_NAME" "blue-green/bootstrap-green"
+  bg_validate_secret_key "root_secret_key" "$ROOT_SECRET_KEY" "blue-green/bootstrap-green"
+  bg_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "blue-green/bootstrap-green"
+  bg_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "blue-green/bootstrap-green"
+  bg_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "blue-green/bootstrap-green"
+  bg_validate_region "backup_region" "$BACKUP_REGION" "blue-green/bootstrap-green"
+  bg_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "blue-green/bootstrap-green"
+  bg_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "blue-green/bootstrap-green"
+  bg_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "blue-green/bootstrap-green"
+  bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "blue-green/bootstrap-green"
+); then
+  bg_fail "blue-green/bootstrap-green" "database configuration is unavailable" \
+    '{"stage":"bootstrap","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+fi
+
+if ! _kubectl apply -f - >/dev/null 2>&1 <<EOF
 apiVersion: k8s.mariadb.com/v1alpha1
 kind: MariaDB
 metadata:
@@ -131,27 +140,31 @@ spec:
     name: ${ROOT_SECRET_NAME}
     key: ${ROOT_SECRET_KEY}
 EOF
+then
+  bg_fail "blue-green/bootstrap-green" "database bootstrap could not be started" \
+    '{"stage":"bootstrap","completed":false}' 1 INTERNAL_ERROR
+fi
 
 if [[ "$WAIT_READY" != "false" ]]; then
-  bg_wait_mariadb_ready "$BG_MDB" "$WAIT_TIMEOUT"
+  if ! bg_wait_mariadb_ready "$BG_MDB" "$WAIT_TIMEOUT" >/dev/null 2>&1; then
+    bg_fail "blue-green/bootstrap-green" "database bootstrap did not complete in time" \
+      '{"stage":"bootstrap","completed":false}' 1 DATABASE_NOT_READY
+  fi
 fi
 
 data="$(jq -n \
   --arg namespace "$BG_NAMESPACE" \
   --arg blue "$BLUE_NAME" \
   --arg green "$BG_MDB" \
-  --arg image "$GREEN_IMAGE" \
-  --arg bucket "$BACKUP_BUCKET" \
-  --arg prefix "$BACKUP_PREFIX" \
-  --arg endpoint "$BACKUP_ENDPOINT" \
-  --arg primary "$BLUE_NAME" \
+  --arg version "$GREEN_IMAGE" \
   '{
     namespace: $namespace,
     blue: $blue,
     green: $green,
-    image: $image,
-    backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, contentType: "Physical"},
-    desiredMultiClusterPrimary: $primary
+    stage: "bootstrap",
+    completed: true,
+    version: $version,
+    replicationConfigured: true
   }')"
 
 bg_write_result "$(response_ok "blue-green/bootstrap-green" "green MariaDB bootstrapped" "$data")"

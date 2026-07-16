@@ -64,13 +64,13 @@ case "$INTERNAL_STEP" in
     # are namespace/cluster-local, so this validates an independently provisioned
     # destination reference without transporting credential values from Blue.
     if ! _kubectl get mariadb "$BLUE_NAME" -o name >/dev/null 2>&1; then
-      bg_fail "$OP" "destination has no local MariaDB storage policy for the selected Blue identity" \
-        "$(jq -n --arg ns "$BG_NAMESPACE" --arg mdb "$BLUE_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+      bg_fail "$OP" "database configuration is unavailable" \
+        '{"stage":"bootstrap","completed":false}' 2 DATABASE_NOT_FOUND
     fi
-    mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" \
-      || bg_fail "$OP" "internal bootstrap storage resolution failed" \
-        "$(jq -n '{storagePolicy:"unresolved"}')" 2
-    result="$(bg_local_step "$BG_DIR/bootstrap-green.sh" \
+    mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" 2>/dev/null \
+      || bg_fail "$OP" "backup configuration is unavailable" \
+        '{"stage":"bootstrap","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+    if ! bg_local_step "$BG_DIR/bootstrap-green.sh" \
       "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
       "BLUE_NAME=$BLUE_NAME" "GREEN_IMAGE=$GREEN_IMAGE" \
       "ROOT_SECRET_NAME=$ROOT_SECRET_NAME" "ROOT_SECRET_KEY=$ROOT_SECRET_KEY" \
@@ -82,23 +82,33 @@ case "$INTERNAL_STEP" in
       "BACKUP_SECRET_ACCESS_SECRET=$BACKUP_SECRET_ACCESS_SECRET" "BACKUP_SECRET_KEY=$BACKUP_SECRET_KEY" \
       "GTID_DOMAIN_ID=$GTID_DOMAIN_ID" "SERVER_ID_START_INDEX=$SERVER_ID_START_INDEX" \
       "BLUE_HOST=$BLUE_HOST" "GREEN_HOST=$GREEN_HOST" \
-      "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true")" \
-      || bg_fail "$OP" "internal bootstrap failed" "$BG_LOCAL_ERR"
-    bg_write_result "$(response_ok "$OP" "internal bootstrap completed" "$result")"
+      "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true" >/dev/null; then
+      bg_fail "$OP" "database bootstrap failed" \
+        '{"stage":"bootstrap","completed":false}' 1 INTERNAL_ERROR
+    fi
+    data="$(jq -n \
+      --arg namespace "$BG_NAMESPACE" --arg green "$GREEN_NAME" --arg version "$GREEN_IMAGE" \
+      '{namespace:$namespace, green:$green, stage:"bootstrap", completed:true, version:$version}')"
+    bg_write_result "$(response_ok "$OP" "database bootstrap completed" "$data")"
     exit 0
     ;;
   upgrade)
-    result="$(bg_local_step "$BG_DIR/upgrade-green.sh" \
+    if ! bg_local_step "$BG_DIR/upgrade-green.sh" \
       "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
-      "TARGET_IMAGE=$TARGET_IMAGE" "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true")" \
-      || bg_fail "$OP" "internal upgrade failed" "$BG_LOCAL_ERR"
-    bg_write_result "$(response_ok "$OP" "internal upgrade completed" "$result")"
+      "TARGET_IMAGE=$TARGET_IMAGE" "WAIT_READY=true" "WAIT_TIMEOUT=$WAIT_TIMEOUT" "CONFIRM=true" >/dev/null; then
+      bg_fail "$OP" "database upgrade failed" \
+        '{"stage":"upgrade","completed":false}' 1 INTERNAL_ERROR
+    fi
+    data="$(jq -n \
+      --arg namespace "$BG_NAMESPACE" --arg green "$GREEN_NAME" --arg version "$TARGET_IMAGE" \
+      '{namespace:$namespace, green:$green, stage:"upgrade", completed:true, version:$version}')"
+    bg_write_result "$(response_ok "$OP" "database upgrade completed" "$data")"
     exit 0
     ;;
   "")
     ;;
   *)
-    bg_fail "$OP" "internal_step is not supported" "$(jq -n --arg internalStep "$INTERNAL_STEP" '{internalStep: $internalStep}')" 2
+    bg_fail "$OP" "request is not supported" '{}' 2 INVALID_REQUEST
     ;;
 esac
 
@@ -110,9 +120,9 @@ bg_required "peer_token" "$PEER_TOKEN" "$OP"
 
 BG_MDB="$BLUE_NAME"
 bg_init_target
-if ! mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME"; then
-  bg_fail "$OP" "failed to resolve object storage for the selected Blue MariaDB: ${MDBT_S3_ERROR}" \
-    "$(jq -n --arg ns "$BG_NAMESPACE" --arg mdb "$BLUE_NAME" '{namespace:$ns,mariadb:$mdb}')" 2
+if ! mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" 2>/dev/null; then
+  bg_fail "$OP" "backup configuration is unavailable" \
+    '{"stage":"backup","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
 fi
 bg_require_confirm "$OP"
 
@@ -128,13 +138,13 @@ bg_validate_url "peer_aqsh_url" "$PEER_AQSH_URL" "$OP"
 # than the one Blue wrote and find no backup. Reject it up front rather than fail
 # obscurely at bootstrap time.
 if [[ "$GREEN_NAMESPACE" != "$BG_NAMESPACE" ]]; then
-  bg_fail "$OP" "green_namespace ('${GREEN_NAMESPACE}') must match the source namespace ('${BG_NAMESPACE}'): the backup location is resolved per-namespace, so a cross-namespace green cannot find blue's backup" \
-    "$(jq -n --arg s "$BG_NAMESPACE" --arg g "$GREEN_NAMESPACE" '{source_namespace: $s, green_namespace: $g}')" 2
+  bg_fail "$OP" "green_namespace must match namespace" \
+    "$(jq -n --arg s "$BG_NAMESPACE" --arg g "$GREEN_NAMESPACE" '{namespace: $s, greenNamespace: $g}')" \
+    2 INVALID_REQUEST
 fi
 
 # Step 1: physical backup of Blue (local cluster). Sets BG_BACKUP_DATA.
 bg_create_physical_backup "$OP"
-backup="$BG_BACKUP_DATA"
 
 # Step 2: bootstrap Green from that backup (peer cluster).
 bootstrap_payload="$(jq -n \
@@ -155,15 +165,17 @@ bootstrap_payload="$(jq -n \
   # Blue identity locally, allowing cluster-local endpoint and Secret refs while
   # requiring its bucket/prefix policy to point at the shared backup objects.
 
-bootstrap="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
-  "$bootstrap_payload" "$PEER_TIMEOUT")" \
-  || bg_fail "$OP" "bootstrap of green failed" "$BG_PEER_ERR"
+if ! bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
+  "$bootstrap_payload" "$PEER_TIMEOUT" >/dev/null; then
+  bg_fail "$OP" "database bootstrap failed" \
+    '{"stage":"bootstrap","completed":false}' 1 PEER_OPERATION_FAILED
+fi
 
 # Step 3: upgrade Green to the target image (peer cluster), only if requested
 # and different from the bootstrap image.
-upgrade="{}"
+upgrade_performed=false
 if [[ -n "$TARGET_IMAGE" && "$TARGET_IMAGE" != "$GREEN_IMAGE" ]]; then
-  upgrade="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
+  if ! bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/create" \
     "$(jq -n \
       --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
       --arg greenImage "$GREEN_IMAGE" --arg image "$TARGET_IMAGE" \
@@ -173,31 +185,37 @@ if [[ -n "$TARGET_IMAGE" && "$TARGET_IMAGE" != "$GREEN_IMAGE" ]]; then
         target_image: $image, internal_step: "upgrade",
         wait_ready: "true", wait_timeout: $timeout, confirm: "true"
       }')" \
-    "$PEER_TIMEOUT")" \
-    || bg_fail "$OP" "upgrade of green failed" "$BG_PEER_ERR"
+    "$PEER_TIMEOUT" >/dev/null; then
+    bg_fail "$OP" "database upgrade failed" \
+      '{"stage":"upgrade","completed":false}' 1 PEER_OPERATION_FAILED
+  fi
+  upgrade_performed=true
 fi
 
 # Step 4: final validation — create only succeeds when Green is a healthy
 # replica of Blue caught up within lag_threshold (AWS create completes with
 # green replicating and in sync). The validate internal step is hosted by the
 # blue-green/switchover task on the peer.
-final_validate="$(bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
+if ! bg_peer_call_task "$OP" "$PEER_AQSH_URL" "$PEER_TOKEN" "blue-green/switchover" \
   "$(jq -n --arg ns "$GREEN_NAMESPACE" --arg mdb "$GREEN_NAME" --arg blue "$BLUE_NAME" \
     --arg lag "$LAG_THRESHOLD" \
     '{namespace: $ns, green_name: $mdb, blue_name: $blue, expected_primary: $blue, check_replication: "true", lag_threshold: $lag, internal_step: "validate"}')" \
-  "$PEER_TIMEOUT")" \
-  || bg_fail "$OP" "green was provisioned but did not validate as a caught-up replica of blue" "$BG_PEER_ERR"
+  "$PEER_TIMEOUT" >/dev/null; then
+  bg_fail "$OP" "database replication validation failed" \
+    '{"stage":"validation","completed":false}' 1 PEER_OPERATION_FAILED
+fi
 
+effective_version="${TARGET_IMAGE:-$GREEN_IMAGE}"
 data="$(jq -n \
   --arg blue "$BLUE_NAME" --arg green "$GREEN_NAME" \
   --arg blueNamespace "$BG_NAMESPACE" --arg greenNamespace "$GREEN_NAMESPACE" \
-  --argjson backup "$backup" --argjson bootstrap "$bootstrap" --argjson upgrade "$upgrade" \
-  --argjson finalValidate "$final_validate" \
+  --arg version "$effective_version" --argjson upgradePerformed "$upgrade_performed" \
   '{
     blue: $blue, green: $green,
     blueNamespace: $blueNamespace, greenNamespace: $greenNamespace,
-    backup: $backup, bootstrap: $bootstrap, upgrade: $upgrade,
-    replicationValidate: $finalValidate
+    stage: "ready", completed: true, version: $version,
+    backupCompleted: true, bootstrapCompleted: true,
+    upgradePerformed: $upgradePerformed, replicationValidated: true
   }')"
 
 bg_write_result "$(response_ok "$OP" "green provisioned from blue physical backup" "$data")"

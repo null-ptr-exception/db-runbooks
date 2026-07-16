@@ -70,13 +70,41 @@ mdbt_write_result() {
   fi
 }
 
+# Build the public error envelope used by MariaDB tasks. `reason` is a stable,
+# machine-readable contract; the human message may evolve without forcing API
+# clients to parse prose. Keep implementation diagnostics in task logs only.
+mdbt_error_response() {
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}" reason="${5:-OPERATION_FAILED}"
+  [[ -n "$data" ]] || data="{}"
+  response_err "$op" "$message" "$data" "$code" |
+    jq -c --arg reason "$reason" '. + {reason: $reason}'
+}
+
 mdbt_fail() {
   # NB: default via a second statement, not "${3:-{}}" — that brace-in-default
   # form appends a stray "}" when $3 is set, corrupting a non-empty data payload.
-  local op="$1" message="$2" data="${3:-}" code="${4:-1}"
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}" reason="${5:-}"
   [[ -n "$data" ]] || data="{}"
-  mdbt_write_result "$(response_err "$op" "$message" "$data" "$code")"
+  if [[ -z "$reason" ]]; then
+    if [[ "$code" == "2" ]]; then
+      reason="INVALID_REQUEST"
+    else
+      reason="OPERATION_FAILED"
+    fi
+  fi
+  mdbt_write_result "$(mdbt_error_response "$op" "$message" "$data" "$code" "$reason")"
   exit "$code"
+}
+
+# Run a validator for platform-owned values without exposing its field names or
+# values through the public response. Validators call `exit`, hence the
+# subshell. The caller supplies the user-safe category/message.
+mdbt_validate_internal_or_fail() {
+  local op="$1" reason="$2" message="$3"
+  shift 3
+  if ! (MDBT_RESULT_FILE=/dev/null; "$@") >/dev/null 2>&1; then
+    mdbt_fail "$op" "$message" "{}" 1 "$reason"
+  fi
 }
 
 # mdbt_require_confirm <op> <confirm_value>
@@ -85,7 +113,7 @@ mdbt_require_confirm() {
   local op="$1" confirm="$2"
   case "$confirm" in
     true | TRUE | yes | YES | 1) ;;
-    *) mdbt_fail "$op" "confirm=true is required for this mutating task" "{\"confirm\":\"$confirm\"}" 2 ;;
+    *) mdbt_fail "$op" "confirm=true is required for this mutating task" "{\"confirm\":\"$confirm\"}" 2 "INVALID_REQUEST" ;;
   esac
 }
 

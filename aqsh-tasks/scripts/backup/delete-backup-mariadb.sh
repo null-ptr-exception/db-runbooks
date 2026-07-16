@@ -47,7 +47,7 @@ mdbt_required "backup" "$BACKUP_NAME" "$OP"
 # confined to this namespace's prefix.
 if [[ ! "$BACKUP_NAME" =~ ^[A-Za-z0-9._-]+$ || "$BACKUP_NAME" == "." || "$BACKUP_NAME" == ".." ]]; then
   mdbt_fail "$OP" "backup must be a single name segment (^[A-Za-z0-9._-]+$), not a path" \
-    "$(jq -n --arg v "$BACKUP_NAME" '{field: "backup", value: $v}')" 2
+    "$(jq -n --arg v "$BACKUP_NAME" '{field: "backup", value: $v}')" 2 "INVALID_REQUEST"
 fi
 
 mariadb_set_target "${K8S_CONTEXT:-}" "$NAMESPACE" "$MARIADB_RESOURCE" "$MDB_INPUT"
@@ -57,16 +57,16 @@ if [[ -z "$MDB_INPUT" ]]; then
   case "$resolve_rc" in
     0) MARIADB_NAME="$resolved" ;;
     1) MARIADB_NAME="" ;;
-    2) mdbt_fail "$OP" "several MariaDB instances exist; set 'mariadb' to select the storage policy" \
-         "$(jq -n --arg c "$resolved" '{candidateCount:($c|split(",")|length)}')" 2 ;;
+    2) mdbt_fail "$OP" "database configuration is ambiguous" \
+         "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 2 "DATABASE_CONFIGURATION_AMBIGUOUS" ;;
   esac
 else
   MARIADB_NAME="$MDB_INPUT"
 fi
 
 if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
-  mdbt_fail "$OP" "failed to resolve object storage for the selected MariaDB: ${MDBT_S3_ERROR}" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 2
+  mdbt_fail "$OP" "backup configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
 fi
 TARGET="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${BACKUP_NAME}"
 
@@ -74,33 +74,31 @@ delete_result() {
   jq -n \
     --arg namespace "$NAMESPACE" \
     --arg backup "$BACKUP_NAME" \
-    --arg bucket "$BACKUP_BUCKET" \
-    --arg prefix "$BACKUP_PREFIX" \
-    --arg path "${BACKUP_PREFIX}/${BACKUP_NAME}" \
+    --arg state "$3" \
     --argjson dry "$1" \
     --argjson deleted "$2" \
     '{
       namespace: $namespace,
       backup: $backup,
-      location: {bucket: $bucket, prefix: $prefix, path: $path},
+      state: $state,
       dryRun: $dry,
       deleted: $deleted
     }'
 }
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-  mdbt_write_result "$(response_ok "$OP" "dry run: would delete backup '${BACKUP_NAME}' from ${NAMESPACE}" "$(delete_result true false)")"
+  mdbt_write_result "$(response_ok "$OP" "backup deletion dry run completed" "$(delete_result true false PLANNED)")"
   exit 0
 fi
 
-if ! mdbt_s3_prepare_direct_client; then
-  mdbt_fail "$OP" "failed to resolve S3 credentials: ${MDBT_S3_ERROR}" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1
+if ! mdbt_s3_prepare_direct_client >/dev/null 2>&1; then
+  mdbt_fail "$OP" "backup configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
 fi
 
 if ! setup_minio_client >/dev/null 2>&1; then
-  mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+  mdbt_fail "$OP" "backup service is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
 fi
 
 # `s5cmd ls <name>` matches by PREFIX, so "backup-1" also returns a sibling
@@ -122,14 +120,14 @@ _exact_entries() {
 if ! LS_RAW="$(s5 --json ls "$TARGET" 2>&1)"; then
   if ! grep -q "no object found" <<<"$LS_RAW"; then
     # Never reflect arbitrary S3 client stderr into the task result.
-    mdbt_fail "$OP" "failed to check backup (object-storage request failed)" \
+    mdbt_fail "$OP" "backup service request failed" \
       "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" \
-        '{namespace: $ns, backup: $b, reason: "object-storage-request-failed"}')" 1
+        '{namespace: $ns, backup: $b}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
   fi
 fi
 if ! ENTRIES="$(_exact_entries)"; then
   mdbt_fail "$OP" "backup '${BACKUP_NAME}' not found for namespace '${NAMESPACE}'" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2
+    "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2 "BACKUP_NOT_FOUND"
 fi
 
 # Delete by detected type. This must NOT be a bare `s5 rm "$TARGET"` for a
@@ -151,7 +149,7 @@ done <<<"$ENTRIES"
 # prefix-sibling like "backup-10" must NOT count as "still present".
 if _exact_entries >/dev/null; then
   mdbt_fail "$OP" "failed to delete backup '${BACKUP_NAME}' from ${NAMESPACE} (still present after delete)" \
-    "$(delete_result false false)" 1
+    "$(delete_result false false FAILED)" 1 "BACKUP_FAILED"
 fi
 
-mdbt_write_result "$(response_ok "$OP" "deleted backup '${BACKUP_NAME}' from ${NAMESPACE}" "$(delete_result false true)")"
+mdbt_write_result "$(response_ok "$OP" "backup deleted" "$(delete_result false true DELETED)")"

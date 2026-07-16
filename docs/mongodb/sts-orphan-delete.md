@@ -42,19 +42,20 @@ workaround this task participates in.
 
 ```text
 caller
-  │ POST /tasks/mongodb%2Fsts%2Forphan-delete
+  │ POST /tasks/sts%2Forphan-delete
   ▼
 aqsh-tasks/scripts/mongodb/sts/orphan-delete.sh
   │
   ├─ resolve STS name (recovery_resolve_sts_name)
   │    internal config -> single-STS-in-namespace auto-detect -> "mongodb"
   │
-  ├─ k8s_get_sts_pods(sts)          — preview: replicas + pod names
-  │
-  ├─ dry_run=true  → write preview JSON, exit (no cluster mutation)
+  ├─ dry_run=true
+  │    └─ k8s_get_sts_pods(sts)     — replicas + pod names (ownerReferences)
+  │         → write preview JSON, exit (no cluster mutation)
   │
   └─ dry_run=false + confirm=true
        └─ k8s_delete_sts_cascade_orphan(sts)
+            takes its own pre-delete snapshot (same k8s_get_sts_pods),
             kubectl delete statefulset <sts> --cascade=orphan
             → StatefulSet object gone; Pods + PVCs keep running
 ```
@@ -116,13 +117,13 @@ Gate rules (`INVALID_INPUT` on violation):
 
 ```bash
 # 1. Preview — confirm which STS/pods would be affected
-curl -s -X POST "$AQSH_URL/tasks/mongodb%2Fsts%2Forphan-delete" \
+curl -s -X POST "$AQSH_URL/tasks/sts%2Forphan-delete" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"namespace": "mongo-1"}'
 # → poll /executions/<id>, inspect would_orphan_pods
 
 # 2. Confirmed delete — detach the StatefulSet
-curl -s -X POST "$AQSH_URL/tasks/mongodb%2Fsts%2Forphan-delete" \
+curl -s -X POST "$AQSH_URL/tasks/sts%2Forphan-delete" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"namespace": "mongo-1", "dry_run": "false", "confirm": "true"}'
 # → StatefulSet "mongodb" is gone; mongodb-0/1/2 pods keep Running

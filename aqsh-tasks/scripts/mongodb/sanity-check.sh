@@ -110,9 +110,7 @@ _resolve_primary_with_retry() {
 
 # The STS's own spec.serviceName governs pod DNS and is not guaranteed to
 # equal the StatefulSet's name (e.g. Bitnami commonly uses "<sts>-headless").
-_HEADLESS_SVC=$(_recovery_detect_headless_service "$_STS_NAME") || _HEADLESS_SVC="$_STS_NAME"
-[[ "$_HEADLESS_SVC" != "$_STS_NAME" ]] && \
-  log_info "mongo-sanity-check" "headless service auto-detected: ${_HEADLESS_SVC} (sts=${_STS_NAME})"
+_HEADLESS_SVC=$(recovery_resolve_headless_service "$_STS_NAME")
 
 _SEED_HOST="${_STS_NAME}-0.${_HEADLESS_SVC}.${DB_NAMESPACE}.svc.cluster.local"
 _SEED_PORT="27017"

@@ -131,7 +131,8 @@ to force-wipe a healthy pod or to override the auto-selected candidate. Resoluti
    Service used to build pod seed FQDNs (`<sts>-0.<headless-svc>.<ns>.svc.
    cluster.local`) from the StatefulSet's own `spec.serviceName` — never
    assumed to equal the StatefulSet's name, since e.g. Bitnami's chart
-   commonly names it `<release>-headless` — and
+   commonly names it `<release>-headless`; tier-1 override is
+   `MONGO_HEADLESS_SVC_DEFAULT` — and
    `data_path`/`mount_path` by asking mongod itself for its real dbPath
    (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
    mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file

@@ -113,7 +113,8 @@ override:
      `mongodb-0.mongodb-headless.mongo-1.svc.cluster.local`) — from the
      StatefulSet's own `spec.serviceName`, never assumed to equal the
      StatefulSet's name (Bitnami's chart commonly names it
-     `<release>-headless`)
+     `<release>-headless`); internal-config override:
+     `MONGO_HEADLESS_SVC_DEFAULT`
    - `credential_secret`/`credential_user`/keys — from the StatefulSet's
      container env: `secretKeyRef` for `MONGO_INITDB_ROOT_USERNAME/PASSWORD`
      (official image) or `MONGODB_ROOT_USER/PASSWORD` (Bitnami), or the

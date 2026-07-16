@@ -52,26 +52,25 @@ fi
 _STS=$(recovery_resolve_sts_name "${MONGO_STS_NAME_DEFAULT:-}")
 log_debug "sts-orphan-delete" "resolved STS name: ${_STS}"
 
-_PREVIEW=$(k8s_get_sts_pods "$_STS") \
-  || fail_task "STS_NOT_FOUND" "StatefulSet '${_STS}' not found in namespace '${DB_NAMESPACE}'" \
-    "$(jq -nc --arg sts "$_STS" '{sts:$sts}')"
-
-_REPLICAS=$(jq -r '.data.replicas' <<< "$_PREVIEW")
-_PODS_JSON=$(jq -c '.data.pods' <<< "$_PREVIEW")
-
-log_info "sts-orphan-delete" "STS=${_STS} namespace=${DB_NAMESPACE} replicas=${_REPLICAS} pods=$(jq -r 'join(",")' <<< "$_PODS_JSON")"
-
 if bool_enabled "$DRY_RUN"; then
-  log_info "sts-orphan-delete" "dry-run: would delete StatefulSet '${_STS}' with --cascade=orphan — no changes made"
-  jq -n \
-    --arg namespace "$DB_NAMESPACE" \
-    --arg sts "$_STS" \
-    --argjson replicas "$_REPLICAS" \
-    --argjson pods "$_PODS_JSON" \
-    '{dry_run: true, namespace: $namespace, sts: $sts, replicas: $replicas,
-      would_orphan_pods: $pods,
+  # Preview here only; the confirm path relies on the identical snapshot
+  # k8s_delete_sts_cascade_orphan takes itself, so one execution never holds
+  # two divergent views of the same StatefulSet.
+  if ! _PREVIEW=$(k8s_get_sts_pods "$_STS"); then
+    # Pass the real failure through — "not found" is only one of the ways a
+    # lookup can fail (RBAC forbidden, API timeout, ...), and reporting the
+    # wrong one sends the operator chasing a nonexistent naming problem.
+    fail_task "STS_LOOKUP_FAILED" \
+      "$(jq -r '.message // "StatefulSet lookup failed"' <<< "$_PREVIEW"): '${_STS}' in namespace '${DB_NAMESPACE}'" \
+      "$(jq -c '.data // {}' <<< "$_PREVIEW")"
+  fi
+  log_info "sts-orphan-delete" "dry-run: $(jq -r \
+    '.data | "would delete StatefulSet \(.sts) (replicas=\(.replicas)) with --cascade=orphan; \(.pods | length) pod(s) would keep running: \(.pods | join(", "))"' \
+    <<< "$_PREVIEW") — no changes made"
+  jq -c --arg namespace "$DB_NAMESPACE" \
+    '.data | {dry_run: true, namespace: $namespace, sts, replicas, would_orphan_pods: .pods,
       note: "pods and PVCs stay running and untouched; only the StatefulSet controller object is removed. Resizing PVCs and recreating the StatefulSet are separate, manual steps not performed by this task."}' \
-    > "$AQSH_RESULT_FILE"
+    <<< "$_PREVIEW" > "$AQSH_RESULT_FILE"
   exit 0
 fi
 

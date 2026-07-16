@@ -91,10 +91,16 @@ mongo_account_set_connection_from_root_secret() {
   root_user=$(extract_secret_value "$namespace" "$cred_secret" "$user_key") || return 1
   root_pass=$(extract_secret_value "$namespace" "$cred_secret" "$pass_key") || return 1
 
-  headless_svc=$(_mongo_account_headless_service "$namespace" "$sts_name") || headless_svc="$sts_name"
+  # Same 3-tier resolution as recovery_resolve_headless_service in
+  # mongodb-recovery.sh (which account scripts don't source): internal
+  # config -> live spec.serviceName auto-detect -> sts_name itself.
+  headless_svc="${MONGO_HEADLESS_SVC_DEFAULT:-}"
+  if [[ -z "$headless_svc" ]]; then
+    headless_svc=$(_mongo_account_headless_service "$namespace" "$sts_name") || headless_svc="$sts_name"
+  fi
   [[ "$headless_svc" != "$sts_name" ]] && \
     log_info "mongo_account_set_connection_from_root_secret" \
-      "headless service auto-detected: ${headless_svc} (sts=${sts_name})"
+      "headless service resolved: ${headless_svc} (sts=${sts_name})"
   seed_host="${sts_name}-0.${headless_svc}.${namespace}.svc.cluster.local"
   log_debug "mongo_account_set_connection_from_root_secret" "resolving primary via seed: ${seed_host}"
   primary_out=$(mongo_resolve_primary "$seed_host" "27017" "$root_user" "$root_pass" "admin") || return 1

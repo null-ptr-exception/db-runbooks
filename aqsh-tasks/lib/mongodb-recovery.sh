@@ -117,13 +117,15 @@ _recovery_pod_ordinal() {
 # ---------------------------------------------------------------------------
 _recovery_list_pods() {
   local sts_name="$1"
-  local label_sel
-  label_sel=$(_kubectl get statefulset "$sts_name" \
-    -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>/dev/null \
-    | sed 's/,$//') || true
-  [[ -z "$label_sel" ]] && return 1
-  _kubectl get pods -l "$label_sel" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true
+  # Contract kept from the original label-selector implementation: return 1
+  # when the StatefulSet itself can't be read (callers treat that as "can't
+  # enumerate"), success with empty output when it owns no pods. The listing
+  # itself matches pod ownerReferences (via _k8s_sts_owned_pod_names in
+  # k8s.sh) — exact ownership, instead of a reconstructed label selector
+  # that over-matches other workloads sharing the same labels and can't
+  # express matchExpressions.
+  _kubectl get statefulset "$sts_name" -o name >/dev/null 2>&1 || return 1
+  _k8s_sts_owned_pod_names "$sts_name" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -247,6 +249,30 @@ _recovery_detect_headless_service() {
   local svc
   svc=$(_kubectl get statefulset "$sts_name" -o jsonpath='{.spec.serviceName}' 2>/dev/null) || return 1
   [[ -z "$svc" ]] && return 1
+  printf '%s' "$svc"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_headless_service <sts_name>
+# Standard 3-tier resolution (CLAUDE.md "Configuration Layers") for the
+# headless Service name used in pod seed FQDNs:
+#   1. MONGO_HEADLESS_SVC_DEFAULT (internal config) — the escape hatch when
+#      live detection can't run (e.g. RBAC denies the STS get)
+#   2. live auto-detect from the StatefulSet's own spec.serviceName
+#   3. sts_name itself — the conventional layout where they match
+# Always succeeds; logs when the resolved name differs from sts_name.
+# ---------------------------------------------------------------------------
+recovery_resolve_headless_service() {
+  local sts_name="${1:?sts_name is required}"
+  local svc="${MONGO_HEADLESS_SVC_DEFAULT:-}"
+  if [[ -z "$svc" ]]; then
+    svc=$(_recovery_detect_headless_service "$sts_name") || svc="$sts_name"
+  fi
+  if [[ "$svc" != "$sts_name" ]]; then
+    log_info "recovery_resolve_headless_service" \
+      "headless service resolved: ${svc} (sts=${sts_name})"
+  fi
   printf '%s' "$svc"
   return 0
 }
@@ -1704,10 +1730,7 @@ try {
   local pods_raw
   pods_raw=$(_recovery_list_pods "$sts_name") || pods_raw=""
   local headless_svc
-  headless_svc=$(_recovery_detect_headless_service "$sts_name") || headless_svc="$sts_name"
-  [[ "$headless_svc" != "$sts_name" ]] && \
-    log_info "recovery_fix_force_primary" \
-      "headless service auto-detected: ${headless_svc} (sts=${sts_name})"
+  headless_svc=$(recovery_resolve_headless_service "$sts_name")
   local re_add_json=""
   while IFS= read -r pod; do
     [[ -z "$pod" || "$pod" == "$force_pod" ]] && continue

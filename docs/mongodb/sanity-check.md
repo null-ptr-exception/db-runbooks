@@ -153,7 +153,8 @@ kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
 
 A non-default StatefulSet name, credential secret, or headless Service
 convention is not overridable per-call — set `MONGO_STS_NAME_DEFAULT` /
-`MONGO_CRED_SECRET_DEFAULT` / etc. in `/etc/aqsh/config/mongodb.env` instead
+`MONGO_CRED_SECRET_DEFAULT` / `MONGO_HEADLESS_SVC_DEFAULT` / etc. in
+`/etc/aqsh/config/mongodb.env` instead
 (see `docs/mongodb/recovery.md` "API Reference"), or rely on auto-detect,
 which now also resolves the headless Service from the StatefulSet's own
 `spec.serviceName` rather than assuming it matches the StatefulSet's name.

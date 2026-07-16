@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # =============================================================================
-# Integration tests for the mongodb/sts/orphan-delete task
+# Integration tests for the sts/orphan-delete task (aqsh-mongodb)
 # (see docs/mongodb/sts-orphan-delete.md).
 #
 # Dedicated throwaway namespace, single-replica bare `mongo:7` StatefulSet —
@@ -176,7 +176,7 @@ wait_for_task_any() {
 # TASK_RESPONSE and RESULT_DATA (the .result.data payload).
 run_orphan_delete_task() {
   local body="$1" max_wait="${2:-120}"
-  http_post "${AQSH_URL}/tasks/mongodb%2Fsts%2Forphan-delete" "$body"
+  http_post "${AQSH_URL}/tasks/sts%2Forphan-delete" "$body"
   [[ "$HTTP_CODE" == "202" ]] || { echo "submit got HTTP ${HTTP_CODE}: ${HTTP_BODY}" >&2; return 1; }
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id')

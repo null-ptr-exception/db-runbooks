@@ -28,10 +28,10 @@ the **latest backup** under the prefix is restored.
 
 - **Same cluster.** Restore runs where aqsh, the mariadb-operator, and the
   MariaDB instances all live (`cluster-dbs`), via the in-cluster config.
-  `context` is only a *reachability* hook — leave it empty in-cluster; set it to
-  reach the same cluster from an out-of-cluster kubeconfig (dev/ops/tests). It
-  is **not** a cross-cluster switch; cross-cluster restore (which would need the
-  operator + secrets provisioned in the target cluster) is out of scope.
+  Direct, out-of-cluster script execution may still set `K8S_CONTEXT` as a
+  local-development reachability hook, but it is not a task input or a
+  cross-cluster switch. Cross-cluster restore (which would need the operator +
+  secrets provisioned in the target cluster) is out of scope.
 - **Same namespace.** The restored instance is created in the source namespace;
   there is no target-namespace input.
 - **New instance.** Restore never overwrites in place — it refuses if an
@@ -51,13 +51,12 @@ the **latest backup** under the prefix is restored.
 
 ## Inputs
 
-The only required input is `namespace`. The full caller surface is just six
+The only required input is `namespace`. The full caller surface is just five
 inputs:
 
 | Input | Env | Required | Default | Notes |
 |-------|-----|:--:|---------|-------|
 | `namespace` | `DB_NAMESPACE` | ✓ | — | The database identity — the namespace to restore. |
-| `context` | `K8S_CONTEXT` | | `""` | Reachability hook (see _Scope_). Leave empty in-cluster; set it only to reach the same cluster from an out-of-cluster kubeconfig. Validated when non-empty. |
 | `target_time` | `TARGET_TIME` | | — | RFC3339 instant for point-in-time recovery. Omit to restore the latest backup. |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default; set `false` (with `confirm=true`) to apply. |
 | `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Ready wait timeout. `0` returns immediately without waiting. |

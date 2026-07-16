@@ -68,7 +68,6 @@ automatically. `replicas_source` in the output tells you which source was used.
 | `namespace` | `DB_NAMESPACE` | ✓ | — | Target MariaDB namespace |
 | `target` | `TARGET_POD_INDEX` | | (auto) | Replica podIndex to promote; **omit to auto-pick** the most caught-up healthy replica (like RDS `FailoverDBCluster`) |
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR (auto-detected if one) |
-| `context` | `K8S_CONTEXT` | | `""` | Reachability hook |
 | `wait_timeout` | `WAIT_TIMEOUT` | | `300` | Seconds to wait for the switch to complete |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to switch |

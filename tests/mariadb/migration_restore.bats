@@ -1,33 +1,86 @@
 #!/usr/bin/env bats
 
 setup_file() {
-  load '../test_helper/common_setup'
-  common_setup --create-token
-  if [[ "${DB_MODE:-single}" == "dual" ]]; then
-    deploy_mariadb_dual "mariadb-3"
-  else
-    deploy_mariadb "mariadb-3"
-  fi
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
+  load 'setup_suite'
+
+  CTX_A="kind-cluster-a"
+  CTX_B="kind-cluster-b"
+  NS="db-ops"
+  MARIADB_AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
+
+  kubectl --context "$CTX_B" -n "$NS" wait pod \
+    -l app=test-client --for=condition=Ready --timeout=120s
+  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
+    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
+  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
+
+  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
+
+  # Stand up a throwaway mariadb-3 instance on cluster-a (isolated from mariadb-1).
+  deploy_throwaway_mariadb "mariadb-3" "$CTX_A" || return 1
+
+  export CTX_A CTX_B NS MARIADB_AQSH_URL TEST_POD TOKEN
 }
 
 setup() {
-  load '../test_helper/common_setup'
+  load '../test_helper/bats-support/load'
+  load '../test_helper/bats-assert/load'
 }
 
 teardown_file() {
-  if [[ "${DB_MODE:-single}" == "dual" ]]; then
-    kubectl --context kind-cluster-dbs-a delete ns mariadb-3 --ignore-not-found
-    kubectl --context kind-cluster-dbs-b delete ns mariadb-3 --ignore-not-found
-  else
-    kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" delete ns mariadb-3 --ignore-not-found
-  fi
+  load 'setup_suite'
+  delete_namespace_and_wait "kind-cluster-a" "mariadb-3"
+}
+
+kexec() {
+  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
+}
+
+http_post() {
+  local url="$1" body="$2"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X POST '${url}' -H 'Authorization: Bearer ${TOKEN}' \
+    -H 'Content-Type: application/json' -d '${body}'")
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+http_get() {
+  local url="$1"
+  local response
+  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
+    -X GET '${url}' -H 'Authorization: Bearer ${TOKEN}'")
+  HTTP_CODE=$(echo "$response" | tail -1)
+  HTTP_BODY=$(echo "$response" | sed '$d')
+  export HTTP_CODE HTTP_BODY
+}
+
+wait_for_task() {
+  local base_url="$1" task_id="$2" max_wait="${3:-540}"
+  local elapsed=0 status
+  while (( elapsed < max_wait )); do
+    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
+      -H 'Authorization: Bearer ${TOKEN}' '${base_url}/executions/${task_id}'")
+    export TASK_RESPONSE
+    status=$(echo "$TASK_RESPONSE" | jq -r '.status' 2>/dev/null || true)
+    [[ "$status" == "completed" ]] && return 0
+    [[ "$status" == "failed" ]] && { echo "Task ${task_id} failed: ${TASK_RESPONSE}" >&2; return 1; }
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  echo "Task ${task_id} timed out after ${max_wait}s (status: ${status})" >&2
+  return 1
 }
 
 # Clean up any restore targets this suite created so later suites still see a
 # clean namespace.
 teardown() {
   if [[ -n "${RESTORE_TARGET:-}" ]]; then
-    kubectl --context "${CLUSTER_DBS_CONTEXT:-kind-cluster-dbs}" \
+    kubectl --context kind-cluster-a \
       -n mariadb-3 delete mariadb "$RESTORE_TARGET" --ignore-not-found >/dev/null 2>&1 || true
     unset RESTORE_TARGET
   fi
@@ -81,9 +134,9 @@ _restore_result_data() {
   data=$(_restore_result_data "$TASK_RESPONSE")
   echo "result: ${data}" >&2
 
-  dry_run=$(echo "$data" | jq -r '.dryRun')
-  restored=$(echo "$data" | jq -r '.restored')
-  manifest=$(echo "$data" | jq -r '.manifest')
+  dry_run=$(echo "$data" | jq -r '.data.dryRun')
+  restored=$(echo "$data" | jq -r '.data.restored')
+  manifest=$(echo "$data" | jq -r '.data.manifest')
 
   assert_equal "$dry_run" "true"
   assert_equal "$restored" "false"
@@ -115,7 +168,7 @@ _restore_result_data() {
 
   local data prefix
   data=$(_restore_result_data "$TASK_RESPONSE")
-  prefix=$(echo "$data" | jq -r '.manifest | fromjson | .spec.bootstrapFrom.s3.prefix')
+  prefix=$(echo "$data" | jq -r '.data.manifest | fromjson | .spec.bootstrapFrom.s3.prefix')
 
   assert_equal "$prefix" "$backup_path"
 }
@@ -142,7 +195,7 @@ _restore_result_data() {
 
   local data image
   data=$(_restore_result_data "$TASK_RESPONSE")
-  image=$(echo "$data" | jq -r '.image')
+  image=$(echo "$data" | jq -r '.data.image')
 
   # The mariadb-3 instance was deployed by setup_file; image should be non-empty.
   echo "detected image: ${image}" >&2
@@ -174,8 +227,8 @@ _restore_result_data() {
 
   local data host port
   data=$(_restore_result_data "$TASK_RESPONSE")
-  host=$(echo "$data" | jq -r '.connection.host')
-  port=$(echo "$data" | jq -r '.connection.port')
+  host=$(echo "$data" | jq -r '.data.connection.host')
+  port=$(echo "$data" | jq -r '.data.connection.port')
 
   assert_equal "$host" "mariadb-3-migrated-primary.mariadb-3.svc.cluster.local"
   assert_equal "$port" "3306"
@@ -253,7 +306,7 @@ _restore_result_data() {
 
   local payload
   payload=$(jq -nc \
-    --arg ep "http://${CLUSTER_DBS_IP}:30083/minio" \
+    --arg ep "http://minio.kind-b.test:30080" \
     '{
       namespace: "mariadb-3",
       backup_file: "mariadb/mariadb-3/nonexistent-backup-99999999999999",
@@ -276,7 +329,7 @@ _restore_result_data() {
 
   local data message
   data=$(_restore_result_data "$TASK_RESPONSE")
-  message=$(echo "$TASK_RESPONSE" | jq -r '.result.message // empty')
+  message=$(echo "$data" | jq -r '.message // empty')
 
   echo "error result: ${data}" >&2
   run echo "$message"
@@ -293,7 +346,7 @@ _restore_result_data() {
   fi
 
   local minio_endpoint secret_key
-  minio_endpoint="http://${CLUSTER_DBS_IP}:30083/minio"
+  minio_endpoint="http://minio.kind-b.test:30080"
   secret_key="minioadmin-changeme-prod"
 
   # Step 1: Run migration/sourcedb-backup to create the backup we will restore.
@@ -321,7 +374,7 @@ _restore_result_data() {
 
   local backup_data backup_file
   backup_data=$(_restore_result_data "$TASK_RESPONSE")
-  backup_file=$(echo "$backup_data" | jq -r '.backup.prefix + "/" + .backupName')
+  backup_file=$(echo "$backup_data" | jq -r '.data.backup.prefix + "/" + .data.backupName')
   echo "backup_file for restore: ${backup_file}" >&2
   [[ -n "$backup_file" && "$backup_file" != "null/null" ]]
 
@@ -355,8 +408,8 @@ _restore_result_data() {
   data=$(_restore_result_data "$TASK_RESPONSE")
   echo "restore result: ${data}" >&2
 
-  restored=$(echo "$data" | jq -r '.restored')
-  target=$(echo "$data" | jq -r '.target')
+  restored=$(echo "$data" | jq -r '.data.restored')
+  target=$(echo "$data" | jq -r '.data.target')
 
   assert_equal "$restored" "true"
   [[ -n "$target" && "$target" != "null" ]]
@@ -398,7 +451,7 @@ _restore_result_data() {
 
   local data dry_run
   data=$(_restore_result_data "$TASK_RESPONSE")
-  dry_run=$(echo "$data" | jq -r '.dryRun')
+  dry_run=$(echo "$data" | jq -r '.data.dryRun')
 
   assert_equal "$dry_run" "true"
 }

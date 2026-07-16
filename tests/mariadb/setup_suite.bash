@@ -59,6 +59,76 @@ delete_namespace_and_wait() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# deploy_throwaway_mariadb <namespace> [context]
+#
+# Creates a namespace, RBAC RoleBinding (against the aqsh-mariadb-manager
+# ClusterRole installed by the mariadbRbac release), and a non-replicated
+# MariaDB CR. Used by individual .bats files (get-db-env, check_connection,
+# migration_*) for a disposable per-file instance isolated from mariadb-1.
+# ---------------------------------------------------------------------------
+deploy_throwaway_mariadb() {
+  local namespace="$1"
+  local ctx="${2:-kind-cluster-a}"
+
+  kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
+    | kubectl --context "$ctx" apply -f -
+
+  kubectl --context "$ctx" -n "$namespace" apply -f - <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aqsh-mariadb-manager
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aqsh-mariadb-manager
+subjects:
+  - kind: ServiceAccount
+    name: kube-auth-proxy
+    namespace: db-ops
+EOF
+
+  kubectl --context "$ctx" apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb
+  namespace: ${namespace}
+stringData:
+  password: mariadb-test-pass
+---
+apiVersion: k8s.mariadb.com/v1alpha1
+kind: MariaDB
+metadata:
+  name: mariadb
+  namespace: ${namespace}
+spec:
+  rootPasswordSecretKeyRef:
+    name: mariadb
+    key: password
+  port: 3306
+  image: mariadb:10.6
+  storage:
+    size: 1Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+EOF
+
+  echo "Waiting for ${namespace} to be ready..."
+  if ! kubectl --context "$ctx" -n "$namespace" wait \
+    --for=condition=Ready mariadb/mariadb --timeout=300s 2>/dev/null; then
+    echo "MariaDB CR not ready after 300s. Checking status..." >&2
+    kubectl --context "$ctx" -n "$namespace" get mariadb mariadb -o yaml | tail -50 >&2
+    kubectl --context "$ctx" -n "$namespace" get pods >&2
+    return 1
+  fi
+}
+
 setup_suite() {
   ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
   "${ROOT_DIR}/scripts/preflight.sh"

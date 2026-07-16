@@ -203,30 +203,12 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
-      - name: resource
-        env: MARIADB_RESOURCE
-        required: false
-        type: string
-        default: mariadb
-      - name: mdb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      - name: container
-        env: MARIADB_CONTAINER
-        required: false
-        type: string
-        default: mariadb
-      - name: top
-        env: TOP_ACCOUNTS
+      - name: account_limit
+        env: ACCOUNT_LIMIT
         required: false
         type: string
         default: "10"
+        pattern: '^([1-9]|[1-4][0-9]|50)$'
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"

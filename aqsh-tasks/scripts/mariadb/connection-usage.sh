@@ -7,9 +7,6 @@ set -euo pipefail
 # Queries every pod so direct replica/read-service traffic is not hidden.
 # =============================================================================
 
-# Capture the caller input before lib/mariadb.sh applies its default name.
-MDB_INPUT="${MARIADB_NAME:-}"
-
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,17 +23,17 @@ source "${LIB_DIR}/mariadb.sh"
 CONTEXT="${K8S_CONTEXT:-}"
 NAMESPACE="${DB_NAMESPACE:-${K8S_NAMESPACE:-}}"
 RESOURCE="${MARIADB_RESOURCE:-mariadb}"
-MDB="$MDB_INPUT"
+MDB=""
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
-TOP="${TOP_ACCOUNTS:-10}"
-MAX_TOP="${CONNECTION_USAGE_MAX_TOP:-50}"
+ACCOUNT_LIMIT="${ACCOUNT_LIMIT:-10}"
+MAX_ACCOUNT_LIMIT="${CONNECTION_USAGE_MAX_ACCOUNT_LIMIT:-50}"
 UTIL_WARN_PCT="${CONNECTION_USAGE_WARN_PCT:-80}"
 ACCOUNT_SHARE_WARN_PCT="${CONNECTION_USAGE_ACCOUNT_SHARE_WARN_PCT:-60}"
 ACCOUNT_SHARE_WARN_MIN="${CONNECTION_USAGE_ACCOUNT_SHARE_WARN_MIN:-10}"
 RESULT_FILE="${AQSH_RESULT_FILE:-}"
 
-is_uint() {
-  [[ "${1:-}" =~ ^[0-9]+$ ]]
+is_canonical_uint() {
+  [[ "${1:-}" =~ ^(0|[1-9][0-9]*)$ ]]
 }
 
 emit() {
@@ -47,7 +44,6 @@ emit() {
     --arg reason "$reason" \
     --arg summary "$summary" \
     --arg namespace "$NAMESPACE" \
-    --arg mdb "${MDB:-}" \
     --argjson partial "$partial" \
     --argjson extra "$extra" \
     '{
@@ -55,7 +51,6 @@ emit() {
       reason_code: $reason,
       summary: $summary,
       namespace: $namespace,
-      mdb: (if $mdb == "" then null else $mdb end),
       snapshot_type: "point-in-time",
       partial: $partial,
       changed: false
@@ -68,32 +63,33 @@ if [[ -z "$NAMESPACE" ]]; then
   emit BLOCKED INVALID_INPUT "namespace is required" false
   exit 0
 fi
-for policy_name in MAX_TOP UTIL_WARN_PCT ACCOUNT_SHARE_WARN_PCT ACCOUNT_SHARE_WARN_MIN; do
-  if ! is_uint "${!policy_name}"; then
+for policy_name in MAX_ACCOUNT_LIMIT UTIL_WARN_PCT ACCOUNT_SHARE_WARN_PCT ACCOUNT_SHARE_WARN_MIN; do
+  if ! is_canonical_uint "${!policy_name}"; then
     emit ERROR INVALID_POLICY "internal connection-usage policy is invalid" false
     exit 1
   fi
 done
-if ! is_uint "$TOP" || (( TOP < 1 || TOP > MAX_TOP )); then
-  emit BLOCKED INVALID_TOP "top must be an integer between 1 and ${MAX_TOP}" false \
-    "$(jq -nc --arg value "$TOP" --argjson max "$MAX_TOP" '{top:$value, max:$max}')"
+if ! is_canonical_uint "$ACCOUNT_LIMIT" || \
+    (( ACCOUNT_LIMIT < 1 || ACCOUNT_LIMIT > MAX_ACCOUNT_LIMIT )); then
+  emit BLOCKED INVALID_ACCOUNT_LIMIT \
+    "account_limit must be an integer between 1 and ${MAX_ACCOUNT_LIMIT}" false \
+    "$(jq -nc --arg value "$ACCOUNT_LIMIT" --argjson max "$MAX_ACCOUNT_LIMIT" \
+      '{invalid_value:$value, max_account_limit:$max}')"
   exit 0
 fi
 
-mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB_INPUT" "$CONTAINER"
+mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "" "$CONTAINER"
 _on_ambiguous() {
-  emit BLOCKED MARIADB_AMBIGUOUS "several MariaDB instances exist in '${NAMESPACE}'; set mdb to choose one" false \
-    "$(jq -nc --arg candidates "$1" '{candidates:($candidates / ",")}')"
+  emit BLOCKED MARIADB_AMBIGUOUS \
+    "namespace '${NAMESPACE}' must contain exactly one MariaDB instance" false
   exit 0
 }
 _on_none() {
   emit BLOCKED MARIADB_NOT_FOUND "no MariaDB instance found in '${NAMESPACE}'" false
   exit 0
 }
-if [[ -z "$MDB" ]]; then
-  mariadb_autodetect_target false _on_ambiguous _on_none
-  MDB="$MARIADB_NAME"
-fi
+mariadb_autodetect_target false _on_ambiguous _on_none
+MDB="$MARIADB_NAME"
 
 mapfile -t PODS < <(mariadb_list_pods)
 if [[ ${#PODS[@]} -eq 0 ]]; then
@@ -131,7 +127,7 @@ for pod in "${PODS[@]}"; do
 
   pod_max=$(sed -n '1p' <<<"$raw")
   rows_text=$(sed '1d' <<<"$raw")
-  if ! is_uint "$pod_max" || (( pod_max < 1 )); then
+  if ! is_canonical_uint "$pod_max" || (( pod_max < 1 )); then
     FAILED_PODS=$((FAILED_PODS + 1))
     POD_RESULTS=$(jq -c --arg pod "$pod" \
       '. + [{pod:$pod, collected:false, error:"invalid max_connections result"}]' <<<"$POD_RESULTS")
@@ -205,8 +201,14 @@ ALL_ACCOUNTS=$(jq -c --argjson total "$TOTAL_CONNECTIONS" '
         else ((.current_connections * 1000 / $total) | round / 10) end)
     })
   | sort_by([-.current_connections, .account])' <<<"$ALL_ROWS")
-ACCOUNT_COUNT=$(jq 'length' <<<"$ALL_ACCOUNTS")
-ACCOUNTS=$(jq -c --argjson top "$TOP" '.[:$top]' <<<"$ALL_ACCOUNTS")
+TOTAL_ACCOUNT_COUNT=$(jq 'length' <<<"$ALL_ACCOUNTS")
+ACCOUNTS=$(jq -c --argjson account_limit "$ACCOUNT_LIMIT" \
+  '.[:$account_limit]' <<<"$ALL_ACCOUNTS")
+RETURNED_ACCOUNT_COUNT=$(jq 'length' <<<"$ACCOUNTS")
+TRUNCATED=$(jq -n \
+  --argjson total "$TOTAL_ACCOUNT_COUNT" \
+  --argjson returned "$RETURNED_ACCOUNT_COUNT" \
+  '$returned < $total')
 
 WARNINGS=$(jq -nc \
   --argjson utilization "$UTILIZATION_PERCENT" \
@@ -236,8 +238,10 @@ EXTRA=$(jq -nc \
   --argjson total_connections "$TOTAL_CONNECTIONS" \
   --argjson connection_capacity "$CONNECTION_CAPACITY" \
   --argjson utilization_percent "$UTILIZATION_PERCENT" \
-  --argjson account_count "$ACCOUNT_COUNT" \
-  --argjson top "$TOP" \
+  --argjson total_account_count "$TOTAL_ACCOUNT_COUNT" \
+  --argjson returned_account_count "$RETURNED_ACCOUNT_COUNT" \
+  --argjson account_limit "$ACCOUNT_LIMIT" \
+  --argjson truncated "$TRUNCATED" \
   --argjson accounts "$ACCOUNTS" \
   --argjson pods "$POD_RESULTS" \
   --argjson warnings "$WARNINGS" '
@@ -250,8 +254,10 @@ EXTRA=$(jq -nc \
     connection_capacity:$connection_capacity,
     capacity_scope:"sum-of-queried-pods",
     utilization_percent:$utilization_percent,
-    account_count:$account_count,
-    top:$top,
+    total_account_count:$total_account_count,
+    returned_account_count:$returned_account_count,
+    account_limit:$account_limit,
+    truncated:$truncated,
     accounts:$accounts,
     pods:$pods,
     warnings:$warnings

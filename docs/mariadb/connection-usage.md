@@ -9,18 +9,18 @@ the most connections right now?" without exposing raw process-list rows or SQL.
 ```json
 {
   "namespace": "mariadb-1",
-  "top": "10"
+  "account_limit": "10"
 }
 ```
 
 | Input | Required | Default | Notes |
 |---|---:|---:|---|
-| `namespace` | yes | — | MariaDB namespace. |
-| `mdb` | no | auto-detect | Required only when the namespace contains multiple MariaDB instances. |
-| `context` | no | in-cluster | Kubernetes context override. |
-| `resource` | no | `mariadb` | MariaDB CR resource name. |
-| `container` | no | `mariadb` | MariaDB container name. |
-| `top` | no | `10` | Number of sorted accounts to return, from 1 to 50. |
+| `namespace` | yes | — | Namespace containing exactly one MariaDB instance. |
+| `account_limit` | no | `10` | Maximum number of accounts to return, from 1 to 50. |
+
+The task auto-detects the MariaDB instance from `namespace`. If the namespace
+contains no instance or more than one instance, it fails closed instead of
+asking callers to identify Kubernetes resources or containers.
 
 The root credential is resolved from the managed MariaDB pod environment. It is
 not a task input and is never returned.
@@ -33,48 +33,70 @@ not a task input and is never returned.
   "reason_code": "CONNECTION_USAGE_READY",
   "snapshot_type": "point-in-time",
   "partial": false,
-  "snapshot_at": "2026-07-15T04:00:00Z",
+  "snapshot_at": "2026-07-16T01:30:00Z",
   "namespace": "mariadb-1",
-  "mdb": "mariadb",
-  "requested_pods": 3,
-  "queried_pods": 3,
+  "requested_pods": 2,
+  "queried_pods": 2,
   "failed_pods": 0,
-  "total_connections": 46,
-  "connection_capacity": 450,
+  "total_connections": 120,
+  "connection_capacity": 300,
   "capacity_scope": "sum-of-queried-pods",
-  "utilization_percent": 10.2,
-  "account_count": 3,
-  "top": 10,
+  "utilization_percent": 40,
+  "total_account_count": 2,
+  "returned_account_count": 2,
+  "account_limit": 10,
+  "truncated": false,
   "accounts": [
     {
       "account": "order_service",
-      "current_connections": 31,
-      "active_connections": 7,
-      "idle_connections": 24,
+      "current_connections": 100,
+      "active_connections": 12,
+      "idle_connections": 88,
       "longest_active_seconds": 18,
-      "pods": ["mariadb-0"],
-      "share_percent": 67.4
+      "pods": ["mariadb-0", "mariadb-1"],
+      "share_percent": 83.3
+    },
+    {
+      "account": "report_service",
+      "current_connections": 20,
+      "active_connections": 3,
+      "idle_connections": 17,
+      "longest_active_seconds": 5,
+      "pods": ["mariadb-1"],
+      "share_percent": 16.7
     }
   ],
   "pods": [
     {
       "pod": "mariadb-0",
       "collected": true,
-      "current_connections": 36,
+      "current_connections": 70,
       "max_connections": 150,
-      "utilization_percent": 24
+      "utilization_percent": 46.7
+    },
+    {
+      "pod": "mariadb-1",
+      "collected": true,
+      "current_connections": 50,
+      "max_connections": 150,
+      "utilization_percent": 33.3
     }
   ],
   "warnings": [
     {
       "code": "ACCOUNT_CONNECTION_SHARE_HIGH",
       "account": "order_service",
-      "share_percent": 67.4,
+      "share_percent": 83.3,
       "threshold_percent": 60
     }
   ]
 }
 ```
+
+`accounts` is sorted by `current_connections` from highest to lowest. Ties are
+sorted by account name so repeated snapshots are deterministic.
+`account_limit` only limits the returned `accounts` array; totals, utilization,
+warnings, and pod collection still use every observed account.
 
 `max_connections` is a per-server setting. For a multi-pod MariaDB instance,
 `connection_capacity` is therefore the sum of the limits on successfully

@@ -125,7 +125,7 @@ start_probe_connections() {
 submit_connection_usage() {
   local task_id
   http_post "${AQSH_URL}/tasks/connection-usage" \
-    '{"namespace":"mariadb-1","mdb":"mariadb","top":"10"}'
+    '{"namespace":"mariadb-1","account_limit":"10"}'
   assert_equal "$HTTP_CODE" "202"
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [[ -n "$task_id" ]] || { echo "no task id: $HTTP_BODY" >&2; return 1; }
@@ -153,6 +153,8 @@ submit_connection_usage() {
     *) echo "$result" | jq '.' >&2; return 1 ;;
   esac
   [ "$(echo "$result" | jq -r '.partial')" = "false" ]
+  [ "$(echo "$result" | jq -r '.account_limit')" = "10" ]
+  [ "$(echo "$result" | jq -r '.returned_account_count == (.accounts | length)')" = "true" ]
   [ "$(echo "$result" | jq -r '.queried_pods == .requested_pods')" = "true" ]
   [ "$(echo "$account" | jq -r '.current_connections >= 3')" = "true" ]
   [ "$(echo "$account" | jq -r '.active_connections >= 3')" = "true" ]

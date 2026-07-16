@@ -61,6 +61,7 @@ if [[ " $args " == *" exec "* ]]; then
 100
 {"account": "app_a", "current_connections": 3, "active_connections": "2", "idle_connections": "1", "longest_active_seconds": 12}
 {"account": "app_b", "current_connections": 1, "active_connections": "0", "idle_connections": "1", "longest_active_seconds": null}
+{"account": "app_c", "current_connections": 1, "active_connections": "1", "idle_connections": "0", "longest_active_seconds": 4}
 ROWS
         ;;
       mariadb-1)
@@ -83,8 +84,9 @@ exit 1
 MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
-  export DB_NAMESPACE="mariadb-1" MARIADB_NAME="mariadb"
-  unset MOCK_FAIL_POD MOCK_EMPTY MOCK_ROOT_PASSWORD MOCK_PODS MOCK_MDB_NAMES || true
+  export DB_NAMESPACE="mariadb-1"
+  unset MARIADB_NAME MOCK_FAIL_POD MOCK_EMPTY MOCK_ROOT_PASSWORD MOCK_PODS \
+    MOCK_MDB_NAMES || true
 }
 
 teardown() {
@@ -101,39 +103,51 @@ field() {
 }
 
 @test "connection-usage aggregates and sorts accounts across pods" {
-  run_usage TOP_ACCOUNTS=2
+  run_usage ACCOUNT_LIMIT=2
 
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "READY" ]
   [ "$(field '.reason_code')" = "CONNECTION_USAGE_READY" ]
   [ "$(field '.snapshot_type')" = "point-in-time" ]
-  [ "$(field '.total_connections')" = "10" ]
+  [ "$(field '.total_connections')" = "11" ]
   [ "$(field '.connection_capacity')" = "300" ]
-  [ "$(field '.utilization_percent')" = "3.3" ]
-  [ "$(field '.account_count')" = "3" ]
+  [ "$(field '.utilization_percent')" = "3.7" ]
+  [ "$(field '.total_account_count')" = "4" ]
+  [ "$(field '.returned_account_count')" = "2" ]
+  [ "$(field '.account_limit')" = "2" ]
+  [ "$(field '.truncated')" = "true" ]
   [ "$(field '.accounts | length')" = "2" ]
   [ "$(field '.accounts[0].account')" = "app_a" ]
   [ "$(field '.accounts[0].current_connections')" = "5" ]
   [ "$(field '.accounts[0].active_connections')" = "3" ]
   [ "$(field '.accounts[0].idle_connections')" = "2" ]
   [ "$(field '.accounts[0].longest_active_seconds')" = "12" ]
-  [ "$(field '.accounts[0].share_percent')" = "50" ]
+  [ "$(field '.accounts[0].share_percent')" = "45.5" ]
   [ "$(field '.accounts[0].pods | join(",")')" = "mariadb-0,mariadb-1" ]
   [ "$(field '.accounts[1].account')" = "report_user" ]
 }
 
 @test "connection-usage normalizes a null longest-active value to zero" {
-  run_usage TOP_ACCOUNTS=3
+  run_usage ACCOUNT_LIMIT=4
 
   [ "$status" -eq 0 ]
   [ "$(field '.accounts[] | select(.account=="app_b") | .longest_active_seconds')" = "0" ]
+  [ "$(field '.truncated')" = "false" ]
+}
+
+@test "connection-usage sorts equal connection counts by account name" {
+  run_usage ACCOUNT_LIMIT=4
+
+  [ "$status" -eq 0 ]
+  [ "$(field '[.accounts[2].account, .accounts[3].account] | join(",")')" = \
+    "app_b,app_c" ]
 }
 
 @test "connection-usage reports per-pod capacity without treating it as one global limit" {
   run_usage
 
   [ "$(field '.pods | length')" = "2" ]
-  [ "$(field '.pods[] | select(.pod=="mariadb-0") | .current_connections')" = "4" ]
+  [ "$(field '.pods[] | select(.pod=="mariadb-0") | .current_connections')" = "5" ]
   [ "$(field '.pods[] | select(.pod=="mariadb-0") | .max_connections')" = "100" ]
   [ "$(field '.pods[] | select(.pod=="mariadb-1") | .current_connections')" = "6" ]
   [ "$(field '.pods[] | select(.pod=="mariadb-1") | .max_connections')" = "200" ]
@@ -145,17 +159,31 @@ field() {
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "READY" ]
   [ "$(field '.total_connections')" = "0" ]
-  [ "$(field '.account_count')" = "0" ]
+  [ "$(field '.total_account_count')" = "0" ]
+  [ "$(field '.returned_account_count')" = "0" ]
+  [ "$(field '.truncated')" = "false" ]
   [ "$(field '.accounts | length')" = "0" ]
   [ "$(field '.warnings | length')" = "0" ]
 }
 
-@test "connection-usage validates the top bound" {
-  run_usage TOP_ACCOUNTS=0
+@test "connection-usage validates the account limit bound" {
+  run_usage ACCOUNT_LIMIT=0
 
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "BLOCKED" ]
-  [ "$(field '.reason_code')" = "INVALID_TOP" ]
+  [ "$(field '.reason_code')" = "INVALID_ACCOUNT_LIMIT" ]
+  [ "$(field '.invalid_value')" = "0" ]
+  [ "$(field '.max_account_limit')" = "50" ]
+  [ "$(field '.invalid_value | type')" = "string" ]
+}
+
+@test "connection-usage rejects non-canonical account limits" {
+  run_usage ACCOUNT_LIMIT=051
+
+  [ "$status" -eq 0 ]
+  [ "$(field '.status')" = "BLOCKED" ]
+  [ "$(field '.reason_code')" = "INVALID_ACCOUNT_LIMIT" ]
+  [ "$(field '.invalid_value')" = "051" ]
 }
 
 @test "connection-usage makes a failed pod explicit and marks data partial" {
@@ -211,9 +239,29 @@ field() {
 }
 
 @test "connection-usage auto-detects a single MariaDB instance" {
-  unset MARIADB_NAME
   run_usage MOCK_MDB_NAMES=custom-db MOCK_PODS=custom-db-0 MOCK_EMPTY=true
 
   [ "$status" -eq 0 ]
-  [ "$(field '.mdb')" = "custom-db" ]
+  [ "$(field '.status')" = "READY" ]
+  [ "$(field '.pods[0].pod')" = "custom-db-0" ]
+  [ "$(field 'has("mdb")')" = "false" ]
+}
+
+@test "connection-usage fails closed when a namespace has multiple instances" {
+  run_usage MOCK_MDB_NAMES="mariadb reporting"
+
+  [ "$status" -eq 0 ]
+  [ "$(field '.status')" = "BLOCKED" ]
+  [ "$(field '.reason_code')" = "MARIADB_AMBIGUOUS" ]
+  [ "$(field '.summary')" = \
+    "namespace 'mariadb-1' must contain exactly one MariaDB instance" ]
+}
+
+@test "connection-usage public contract exposes only namespace and account_limit" {
+  local inputs
+  inputs=$(sed -n '/^  connection-usage:/,/^  sanity-check:/p' \
+    "${REPO_ROOT}/aqsh-tasks/tasks-mariadb.yaml" \
+    | awk '$1 == "-" && $2 == "name:" {print $3}')
+
+  [ "$inputs" = $'namespace\naccount_limit' ]
 }

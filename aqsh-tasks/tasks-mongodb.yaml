@@ -1145,3 +1145,33 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # STS orphan-delete gateway (see docs/mongodb/sts-orphan-delete.md).
+  # sts_name is deliberately NOT a task input — same auto-detect tier as
+  # recovery/* (CLAUDE.md "Configuration Layers").
+  sts/orphan-delete:
+    script: mongodb/sts/orphan-delete.sh
+    description: "Delete the StatefulSet with --cascade=orphan — Pods/PVCs stay running, unmanaged; dry_run -> confirm. Step 1 of the enlarge-PVC workaround (PVC resize + STS recreate are separate manual steps)"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

@@ -80,13 +80,12 @@ setup() {
       "get node node-1 -o json")
         printf '{"status":{"conditions":[{"type":"Ready","status":"True"},{"type":"MemoryPressure","status":"False"},{"type":"DiskPressure","status":"False"},{"type":"PIDPressure","status":"False"}]}}\n'
         ;;
-      "get pods -l app=mongodb -o json")
-        # multi-line on purpose: the restart-count scan is line-based (grep -A)
-        printf '{"items":[\n{"metadata":{"name":"mongodb-0"},\n"status":{"containerStatuses":[{"restartCount":%s}]}}\n]}\n' \
-          "${MOCK_RESTART_COUNT:-0}"
+      "get pods -o json")
+        printf '{"items":[{"metadata":{"name":"mongodb-0","ownerReferences":[{"kind":"StatefulSet","name":"mongodb"}]}}]}\n'
         ;;
       "get pod mongodb-0 -o json")
-        printf '{"status":{"conditions":[{"type":"PodScheduled","status":"True"},{"type":"ContainersReady","status":"True"}]}}\n'
+        printf '{"status":{"conditions":[{"type":"PodScheduled","status":"True"},{"type":"ContainersReady","status":"True"}],"containerStatuses":[{"restartCount":%s}]}}\n' \
+          "${MOCK_RESTART_COUNT:-0}"
         ;;
       "get events --field-selector type=Warning"*)
         printf '%s' "${MOCK_WARNING_EVENTS:-}"

@@ -102,7 +102,10 @@ and the PBM gateway tasks (`pbm/status`, `pbm/backup`, `pbm/list`,
 `pbm/restore`, `pbm/delete`, `pbm/pitr`, `pbm/logs`, `pbm/cancel-backup`,
 `pbm/schedule`, `pbm/config`; see `docs/mongodb/pbm.md` — these also keep the agent
 container name, storage location, and S3 credentials internal-config/
-auto-detect only, and never load MongoDB credentials at all) —
+auto-detect only, and never load MongoDB credentials at all) and the
+`sts/orphan-delete` task (see `docs/mongodb/sts-orphan-delete.md` — detaches
+a StatefulSet from its Pods via `kubectl delete --cascade=orphan`; step 1 of
+the standard PVC-enlarge workaround, PVC resize/STS recreate stay manual) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
@@ -124,7 +127,12 @@ to force-wipe a healthy pod or to override the auto-selected candidate. Resoluti
    `MONGODB_ROOT_USER/PASSWORD`, or the Bitnami file-mounted-secret
    convention — a `*_FILE`-suffixed env var holding a path into a
    Secret-backed volume mount), `recovery_configmap` from the
-   `data-recovery` init container's own volume binding, and
+   `data-recovery` init container's own volume binding, the headless
+   Service used to build pod seed FQDNs (`<sts>-0.<headless-svc>.<ns>.svc.
+   cluster.local`) from the StatefulSet's own `spec.serviceName` — never
+   assumed to equal the StatefulSet's name, since e.g. Bitnami's chart
+   commonly names it `<release>-headless`; tier-1 override is
+   `MONGO_HEADLESS_SVC_DEFAULT` — and
    `data_path`/`mount_path` by asking mongod itself for its real dbPath
    (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
    mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file

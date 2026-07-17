@@ -500,23 +500,33 @@ reconfig_run_checks() {
   fi
 
   # ── k8s cross-check (block for local hosts, warn for drift/foreign) ───────
-  local sts_pods
+  local sts_pods headless_svc
   sts_pods=$(_recovery_list_pods "$sts_name" 2>/dev/null | tr '\n' ' ') || sts_pods=""
+  # Pod FQDNs embed the STS's spec.serviceName, which is not guaranteed to
+  # equal the STS name (Bitnami: "<release>-headless") — match on the
+  # resolved headless service, plus the STS name itself for the conventional
+  # layout, so a local host is never misclassified as cross-cluster.
+  headless_svc=$(recovery_resolve_headless_service "$sts_name")
   local k8s_findings
   k8s_findings=$(jq -cn --argjson ops "$ops" --argjson m "$members" \
-    --arg pods "$sts_pods" --arg sts "$sts_name" --arg ns "$K8S_NAMESPACE" '
+    --arg pods "$sts_pods" --arg sts "$sts_name" --arg svc "$headless_svc" --arg ns "$K8S_NAMESPACE" '
     ($pods | split(" ") | map(select(. != ""))) as $podlist
-    | [ $ops[] | select(.action == "add_member")
+    | (["." + $sts + "." + $ns + ".", "." + $svc + "." + $ns + "."] | unique) as $local_markers
+    | def is_local($fqdn):
+        any($local_markers[]; . as $mk | $fqdn | contains($mk))
+        or ($fqdn | endswith("." + $sts)) or ($fqdn | endswith("." + $svc));
+    [ $ops[] | select(.action == "add_member")
         | (.host | if contains(":") then split(":")[0] else . end) as $fqdn
         | ($fqdn | split(".")[0]) as $podname
-        | if ($fqdn | contains("." + $sts + "." + $ns + ".")) or ($fqdn | endswith("." + $sts)) then
+        | if is_local($fqdn) then
             if ($podlist | index($podname)) then empty
             else {st: "block", d: ("add_member host " + $fqdn + " matches this StatefulSet naming but pod " + $podname + " does not exist — scale the StatefulSet first")}
             end
           else {st: "warn", d: ("add_member host " + $fqdn + " is not locally verifiable (cross-cluster member?) — confirm it is reachable before apply")}
           end ]
-    + [ $m[] | (.host | split(".")[0]) as $podname
-        | select((.host | contains("." + $sts + "." + $ns + ".")) and (($podlist | index($podname)) | not))
+    + [ $m[] | (.host | if contains(":") then split(":")[0] else . end) as $fqdn
+        | ($fqdn | split(".")[0]) as $podname
+        | select(is_local($fqdn) and (($podlist | index($podname)) | not))
         | {st: "warn", d: ("existing member " + .host + " has no backing pod in this cluster — config/StatefulSet drift")} ]
     | if length == 0 then [{st: "pass", d: "members and StatefulSet pods are consistent"}] else . end
   ')

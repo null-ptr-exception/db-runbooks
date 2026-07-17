@@ -325,6 +325,30 @@ pbm_storage_matches() {
 }
 
 # ---------------------------------------------------------------------------
+# _pbm_wait_no_resync <pod> <container> [timeout_s]
+# Block while a resync operation holds the PBM op lock (config writes and
+# backups submitted meanwhile fail with "another operation in progress").
+# Only resyncs are waited on — other running ops are a caller concern.
+# rc 0 when no resync is running or status can't be read (callers proceed
+# and surface the real error); rc 1 on timeout with the resync still going.
+# ---------------------------------------------------------------------------
+_pbm_wait_no_resync() {
+  local pod="${1:?}" container="${2:?}"
+  local timeout="${3:-${PBM_RESYNC_WAIT_TIMEOUT:-180}}"
+  local interval="${PBM_BUSY_RETRY_DELAY:-10}"
+  local waited=0 st op_type
+  while (( waited < timeout )); do
+    st=$(_pbm_exec_json "$pod" "$container" status) || return 0
+    op_type=$(printf '%s' "$st" | jq -r '.running.type // empty' 2>/dev/null) || op_type=""
+    [[ "$op_type" != "resync" ]] && return 0
+    log_info "mongo-pbm" "resync in progress — waiting ${interval}s (${waited}/${timeout}s elapsed)"
+    sleep "$interval"
+    waited=$(( waited + interval ))
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # pbm_apply_storage_config <namespace> <pod> <container>
 # Render + apply the resolved storage config. Pre-creates the bucket with mc
 # (PBM does not create buckets), reusing the same credentials the config
@@ -355,17 +379,55 @@ pbm_apply_storage_config() {
     log_warn "mongo-pbm" "could not ensure bucket ${PBM_BUCKET} via mc (continuing, pbm will verify): ${bucket_out:0:300}"
   fi
 
-  local yaml out
+  # PBM holds a global op lock while a resync runs (agents kick one off
+  # automatically right after a config write), and any config write or
+  # backup submitted meanwhile fails with "Error: another operation in
+  # progress, Resync ...". Wait out a running resync instead of failing the
+  # whole task on the race, and retry briefly for any other transient lock.
+  local yaml out attempt
+  local max_attempts=6 retry_delay="${PBM_BUSY_RETRY_DELAY:-10}"
   yaml=$(pbm_render_storage_config "$access" "$secret")
-  if ! out=$(_pbm_exec_stdin "$pod" "$container" "$yaml" config --file /dev/stdin); then
+  _pbm_wait_no_resync "$pod" "$container" \
+    || log_warn "mongo-pbm" "resync still running after wait timeout — attempting config apply anyway"
+  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+    if out=$(_pbm_exec_stdin "$pod" "$container" "$yaml" config --file /dev/stdin); then
+      break
+    fi
+    if [[ "$out" == *"another operation in progress"* && "$attempt" -lt "$max_attempts" ]]; then
+      log_warn "mongo-pbm" "PBM busy, retrying config apply in ${retry_delay}s (attempt ${attempt}/${max_attempts}): ${out:0:160}"
+      # Sleep unconditionally: the wait returns 0 *immediately* when the lock
+      # holder is not a resync (e.g. a backup), and retrying without a delay
+      # would burn all attempts in moments.
+      _pbm_wait_no_resync "$pod" "$container" || true
+      sleep "$retry_delay"
+      continue
+    fi
     printf '%s' "$out"
     return 1
-  fi
-  if ! out=$(_pbm_exec "$pod" "$container" config --force-resync); then
+  done
+  for (( attempt = 1; attempt <= max_attempts; attempt++ )); do
+    if out=$(_pbm_exec "$pod" "$container" config --force-resync); then
+      break
+    fi
+    if [[ "$out" == *"another operation in progress"*Resync* ]]; then
+      # A resync already being underway IS the goal state of --force-resync:
+      # the config write above auto-triggers one, so racing it is expected.
+      log_info "mongo-pbm" "resync already in progress — --force-resync goal already satisfied"
+      break
+    fi
+    if [[ "$out" == *"another operation in progress"* && "$attempt" -lt "$max_attempts" ]]; then
+      log_warn "mongo-pbm" "PBM busy, retrying force-resync in ${retry_delay}s (attempt ${attempt}/${max_attempts}): ${out:0:160}"
+      sleep "$retry_delay"
+      continue
+    fi
     printf '%s' "$out"
     return 1
-  fi
-  log_info "mongo-pbm" "applied PBM storage config: endpoint=${PBM_ENDPOINT} bucket=${PBM_BUCKET} prefix=${PBM_PREFIX} (resync triggered)"
+  done
+  # Leave with the op lock free: a backup/pitr call typically follows
+  # immediately and would otherwise trip over the resync we just triggered.
+  _pbm_wait_no_resync "$pod" "$container" \
+    || log_warn "mongo-pbm" "resync still running after wait timeout — follow-up operations may briefly see PBM busy"
+  log_info "mongo-pbm" "applied PBM storage config: endpoint=${PBM_ENDPOINT} bucket=${PBM_BUCKET} prefix=${PBM_PREFIX} (resync done)"
   return 0
 }
 

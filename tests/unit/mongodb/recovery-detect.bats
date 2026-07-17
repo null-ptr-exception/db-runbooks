@@ -69,7 +69,16 @@ case "$cmd" in
         fi
         exit 0 ;;
       pods)
-        if [[ -n "${MOCK_POD_LIST:-}" ]]; then
+        if [[ "$flags" == *"-o json"* ]]; then
+          # ownerReferences derived from the pod-name convention <sts>-<ordinal>
+          out='{"items":['
+          sep=""
+          for p in ${MOCK_POD_LIST:-}; do
+            out+="${sep}{\"metadata\":{\"name\":\"${p}\",\"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"${p%-*}\"}]}}"
+            sep=","
+          done
+          printf '%s]}\n' "$out"
+        elif [[ -n "${MOCK_POD_LIST:-}" ]]; then
           printf '%s\n' ${MOCK_POD_LIST}
         fi
         exit 0 ;;

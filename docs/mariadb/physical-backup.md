@@ -37,7 +37,6 @@ The only required input is `namespace`.
 | `mariadb` | `MARIADB_NAME` | | (auto) | Which instance to back up. Auto-detected when the namespace has exactly one. |
 | `target` | `BACKUP_TARGET` | | `PreferReplica` | Back up from `Primary`, `Replica`, or `PreferReplica`. |
 | `compression` | `BACKUP_COMPRESSION` | | `bzip2` | `bzip2`, `gzip`, or `none`. |
-| `context` | `K8S_CONTEXT` | | `""` | Reachability hook; leave empty in-cluster. Validated when non-empty. |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default; set `false` (with `confirm=true`) to apply. |
 | `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Complete-wait timeout. `0` returns immediately without waiting. |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |

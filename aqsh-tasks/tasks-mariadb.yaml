@@ -24,11 +24,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -89,11 +84,6 @@ tasks:
         env: TARGET_POD_INDEX
         required: false
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: mdb
         env: MARIADB_NAME
         required: false
@@ -138,11 +128,6 @@ tasks:
         required: false
         type: string
         default: "all"
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: mdb
         env: MARIADB_NAME
         required: false
@@ -168,11 +153,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -203,11 +183,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -284,11 +259,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -720,11 +690,6 @@ tasks:
         required: false
         type: string
         default: bzip2
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -760,11 +725,6 @@ tasks:
         env: MARIADB_NAME
         required: false
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -833,11 +793,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: target_time
         env: TARGET_TIME
         required: false
@@ -875,11 +830,6 @@ tasks:
         env: BACKUP_NAME
         required: false
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false

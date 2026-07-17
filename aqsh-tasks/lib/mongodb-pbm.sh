@@ -395,7 +395,11 @@ pbm_apply_storage_config() {
     fi
     if [[ "$out" == *"another operation in progress"* && "$attempt" -lt "$max_attempts" ]]; then
       log_warn "mongo-pbm" "PBM busy, retrying config apply in ${retry_delay}s (attempt ${attempt}/${max_attempts}): ${out:0:160}"
-      _pbm_wait_no_resync "$pod" "$container" || sleep "$retry_delay"
+      # Sleep unconditionally: the wait returns 0 *immediately* when the lock
+      # holder is not a resync (e.g. a backup), and retrying without a delay
+      # would burn all attempts in moments.
+      _pbm_wait_no_resync "$pod" "$container" || true
+      sleep "$retry_delay"
       continue
     fi
     printf '%s' "$out"

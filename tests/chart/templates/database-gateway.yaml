@@ -1,0 +1,64 @@
+{{- if .Values.databaseGateway.enabled }}
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.databaseGateway.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: {{ .Values.databaseGateway.name }}
+    istio: {{ .Values.databaseGateway.name }}
+  servers:
+    - hosts:
+{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
+      port:
+        name: http
+        number: {{ .Values.databaseGateway.ports.http }}
+        protocol: HTTP
+    - hosts:
+{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
+      port:
+        name: https
+        number: {{ .Values.databaseGateway.ports.https }}
+        protocol: HTTPS
+      tls:
+        mode: PASSTHROUGH
+    - hosts:
+{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
+      port:
+        name: tcp-mariadb-rw
+        number: {{ .Values.databaseGateway.ports.readWrite }}
+        protocol: TCP
+    - hosts:
+{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
+      port:
+        name: tcp-mariadb-ro
+        number: {{ .Values.databaseGateway.ports.readOnly }}
+        protocol: TCP
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ .Values.databaseGateway.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  hosts:
+{{ toYaml .Values.databaseGateway.hosts | indent 4 }}
+  gateways:
+    - {{ .Values.databaseGateway.name }}
+  tcp:
+    - match:
+        - port: {{ .Values.databaseGateway.ports.readWrite }}
+      route:
+        - destination:
+            host: {{ .Values.databaseGateway.destinations.readWriteService }}
+            port:
+              number: {{ .Values.databaseGateway.destinations.port }}
+    - match:
+        - port: {{ .Values.databaseGateway.ports.readOnly }}
+      route:
+        - destination:
+            host: {{ .Values.databaseGateway.destinations.readOnlyService }}
+            port:
+              number: {{ .Values.databaseGateway.destinations.port }}
+{{- end }}

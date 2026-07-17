@@ -42,6 +42,10 @@ Istio Gateway (cluster-a:30080)
 
 Istio Gateway (cluster-b:30080)
     └─ minio.kind-b.test        → MinIO API
+
+Namespace-local database gateway (cluster-a / mariadb-1)
+    ├─ :3306 → mariadb-operator primary Service
+    └─ :3307 → mariadb-operator secondary Service
 ```
 
 Cross-cluster DNS: `*.kind-a.test` → cluster-a IP, `*.kind-b.test` → cluster-b
@@ -87,6 +91,7 @@ auto-detection) used by the MongoDB account/recovery tasks.
 | **aqsh-mongodb** | cluster-a | Async task queue for MongoDB (restart, sanity-check, account lifecycle, recovery/\*, backup) |
 | **Redis** | cluster-a | Shared task queue broker for aqsh |
 | **MariaDB** | cluster-a | Single instance via mariadb-operator (`mariadb-1`) |
+| **Database gateway** | cluster-a | Namespace-local Envoy gateway for MariaDB primary/secondary TCP routing |
 | **MongoDB** | cluster-a | Single StatefulSet instance (`mongo-1`) |
 | **MinIO** | cluster-b | S3-compatible object storage for backup tasks |
 | **test-client** | cluster-b | curl pod with a projected ServiceAccount token, used to call aqsh through the gateway |

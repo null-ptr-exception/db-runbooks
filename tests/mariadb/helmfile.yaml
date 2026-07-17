@@ -1,3 +1,10 @@
+repositories:
+  - name: istio
+    url: https://istio-release.storage.googleapis.com/charts
+
+helmDefaults:
+  skipSchemaValidation: true
+
 releases:
   # cluster-a: fedauth reader RBAC
   - name: mariadb-rbac-a
@@ -33,6 +40,53 @@ releases:
           namespace: mariadb-1
           # Replicated so the switch-primary e2e can promote a replica.
           replicas: 3
+        databaseGateway:
+          enabled: true
+          testClient:
+            enabled: true
+
+  # cluster-a: one Envoy gateway workload owned by the MariaDB namespace.
+  - name: database-gateway
+    chart: istio/gateway
+    version: 1.24.3
+    namespace: mariadb-1
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    needs:
+      - kind-cluster-a/mariadb-1/mariadb-1
+    values:
+      - autoscaling:
+          enabled: false
+        service:
+          type: ClusterIP
+          ports:
+            - name: status-port
+              port: 15021
+              protocol: TCP
+              targetPort: 15021
+            - name: http
+              port: 80
+              protocol: TCP
+              targetPort: 80
+            - name: https
+              port: 443
+              protocol: TCP
+              targetPort: 443
+            - name: tcp-mariadb-rw
+              port: 3306
+              protocol: TCP
+              targetPort: 3306
+            - name: tcp-mariadb-ro
+              port: 3307
+              protocol: TCP
+              targetPort: 3307
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
 
   # cluster-b: MinIO for backup tests
   - name: minio

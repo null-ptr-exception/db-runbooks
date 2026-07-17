@@ -41,6 +41,12 @@ spec:
       replPasswordSecretKeyRef:
         name: mariadb
         key: password
+  # Keep the operator-native role Services explicit: the namespace-local
+  # database gateway routes writes to the primary and reads to secondaries.
+  primaryService:
+    type: ClusterIP
+  secondaryService:
+    type: ClusterIP
 {{- end }}
 {{- if eq .Values.mariadb.operatorGroup "k8s.mariadb.com" }}
   storage:

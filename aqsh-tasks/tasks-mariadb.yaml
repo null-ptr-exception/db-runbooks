@@ -172,6 +172,23 @@ tasks:
         required: false
         type: string
         default: "true"
+  connection-usage:
+    script: mariadb/connection-usage.sh
+    description: "Read-only point-in-time MariaDB connection usage grouped by database account across all instance pods"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: account_limit
+        env: ACCOUNT_LIMIT
+        required: false
+        type: string
+        default: "10"
+        pattern: '^([1-9]|[1-4][0-9]|50)$'
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"

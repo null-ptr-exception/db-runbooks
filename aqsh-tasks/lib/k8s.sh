@@ -1056,34 +1056,41 @@ k8s_get_sts_pods() {
   local sts_name="${1:?sts_name is required}"
   local op="k8s_get_sts_pods"
 
-  local sts_json
-  if ! sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>&1); then
-    log_error "$op" "Failed to read StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE': $sts_json"
+  # stderr goes to a temp file, not 2>&1: kubectl can emit exit-0 stderr in
+  # shapes we can't enumerate (admission "Warning:" lines, client-go
+  # throttling notices, plugin output), and any of it merged into stdout
+  # would corrupt the JSON parsed below.
+  local sts_json stderr_tmp err_detail
+  stderr_tmp=$(mktemp)
+  if ! sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>"$stderr_tmp"); then
+    err_detail=$(head -1 "$stderr_tmp")
+    rm -f "$stderr_tmp"
+    log_error "$op" "Failed to read StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE': $err_detail"
     response_err "$op" "Failed to read StatefulSet" \
-      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$(echo "$sts_json" | head -1)")\"}" 1
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$err_detail")\"}" 1
     return 1
   fi
-  # kubectl can print "Warning: ..." lines to stderr and still exit 0; the
-  # 2>&1 capture (needed for the error path above) would prepend them to the
-  # JSON and break every jq parse below. Strip them.
-  sts_json=$(printf '%s\n' "$sts_json" | sed '/^Warning:/d')
+  rm -f "$stderr_tmp"
 
   local replicas
   replicas=$(echo "$sts_json" | jq -r '.spec.replicas // 0')
   log_debug "$op" "StatefulSet '$sts_name': replicas=${replicas}"
 
+  # Same separate stderr capture as above — here a stray exit-0 stderr line
+  # merged into stdout wouldn't just break a parse, it would be counted as a
+  # pod name in the preview.
   local pod_names pods_json
-  if ! pod_names=$(_k8s_sts_owned_pod_names "$sts_name" 2>&1); then
-    log_error "$op" "Failed to list pods in namespace '$K8S_NAMESPACE': $(echo "$pod_names" | head -1)"
+  stderr_tmp=$(mktemp)
+  if ! pod_names=$(_k8s_sts_owned_pod_names "$sts_name" 2>"$stderr_tmp"); then
+    err_detail=$(head -1 "$stderr_tmp")
+    rm -f "$stderr_tmp"
+    log_error "$op" "Failed to list pods in namespace '$K8S_NAMESPACE': $err_detail"
     response_err "$op" "Failed to list pods" \
-      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$(echo "$pod_names" | head -1)")\"}" 1
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$err_detail")\"}" 1
     return 1
   fi
-  # The 2>&1 capture (needed for the failure detail above) also picks up
-  # kubectl "Warning: ..." stderr lines on success — drop them, they are not
-  # pod names.
-  pods_json=$(printf '%s\n' "$pod_names" | sed '/^Warning:/d' \
-    | jq -Rsc '[splits("\n") | select(length > 0)]')
+  rm -f "$stderr_tmp"
+  pods_json=$(printf '%s\n' "$pod_names" | jq -Rsc '[splits("\n") | select(length > 0)]')
 
   response_ok "$op" "StatefulSet pods retrieved" \
     "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"replicas\":${replicas},\"pods\":${pods_json}}"

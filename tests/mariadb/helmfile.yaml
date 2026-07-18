@@ -74,6 +74,7 @@ releases:
           config:
             mariadb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
           authProxy:
             tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:
@@ -119,6 +120,7 @@ releases:
           config:
             mariadb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
           authProxy:
             tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:

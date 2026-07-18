@@ -28,6 +28,11 @@ aqsh:
   tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
   config: {}
+  # ASCII-armored PGP PRIVATE key for the secrets/* task family. Empty =
+  # no aqsh-pgp Secret, no mount, secrets/plan|apply|pubkey fail with
+  # PGP_KEY_UNAVAILABLE. Suites inject a per-run throwaway key via
+  # runtime-values.yaml (see tests/*/setup_suite.bash).
+  pgpKey: ""
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     imagePullPolicy: IfNotPresent

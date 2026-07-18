@@ -56,6 +56,21 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
+  # Throwaway deployment PGP keypair for the secrets/* task family (private
+  # key becomes the aqsh-pgp Secret via aqsh.pgpKey; callers fetch the public
+  # half through the secrets/pubkey task). No gpg on the host → no key; the
+  # secrets.bats file skips itself instead of failing the whole suite.
+  local PGP_HOME PGP_PRIV=""
+  if command -v gpg >/dev/null 2>&1; then
+    PGP_HOME=$(mktemp -d)
+    chmod 700 "$PGP_HOME"
+    GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
+      --quick-generate-key "aqsh-secrets-e2e" rsa3072 encr 7d
+    PGP_PRIV=$(GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
+      --armor --export-secret-keys)
+    rm -rf "$PGP_HOME"
+  fi
+
   # Write runtime-discovered values to a temp file
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mongodb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
@@ -76,6 +91,13 @@ $(echo "$CA_B" | sed 's/^/      /')
     cluster-a-token: "${TOKEN_A}"
     cluster-b-token: "${TOKEN_B}"
 EOF
+  if [[ -n "$PGP_PRIV" ]]; then
+    cat >> "$RUNTIME_VALUES" <<EOF
+aqsh:
+  pgpKey: |
+$(echo "$PGP_PRIV" | sed 's/^/    /')
+EOF
+  fi
 
   # Second apply: inject real runtime values. Helm updates only the
   # resources whose values changed (Secret, ConfigMaps). Drift-free.

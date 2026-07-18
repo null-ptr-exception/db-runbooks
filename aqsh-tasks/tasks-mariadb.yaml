@@ -864,3 +864,138 @@ tasks:
         required: false
         type: string
         default: "false"
+  # Secrets gateway — safe CRUD for K8s Secrets in the DB namespace (see
+  # docs/mariadb/secrets.md). Values arrive PGP-encrypted against the
+  # deployment key (secrets/pubkey); plaintext never crosses the gateway.
+  # Upsert is plan -> apply with a stateless CAS plan_hash (reconfig model);
+  # delete is confirm-gated. The PGP key path and the protected-secret list
+  # are deliberately NOT task inputs — internal config + live auto-detect
+  # only (CLAUDE.md "Configuration Layers").
+  secrets/pubkey:
+    script: secrets/pubkey.sh
+    description: "Return the deployment PGP public key callers encrypt secrets payloads against"
+    timeout: 1m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/get:
+    script: secrets/get.sh
+    description: "Describe a Secret: key names + value sha256 fingerprints (values never returned)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/plan:
+    script: secrets/plan.sh
+    description: "Read-only upsert preview for a PGP-encrypted secret payload (returns plan_hash)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: payload
+        env: SECRETS_PAYLOAD
+        required: true
+        type: string
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/apply:
+    script: secrets/apply.sh
+    description: "Execute a planned secret upsert (CAS on plan_hash; merge-only, values stdin-only)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: payload
+        env: SECRETS_PAYLOAD
+        required: true
+        type: string
+      - name: plan_hash
+        env: SECRETS_PLAN_HASH
+        required: true
+        type: string
+        pattern: '^sec[0-9a-f]{24}$'
+      - name: requested_by
+        env: REQUESTED_BY
+        required: false
+        type: string
+        default: ""
+      - name: request_id
+        env: REQUEST_ID
+        required: false
+        type: string
+        default: ""
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/delete:
+    script: secrets/delete.sh
+    description: "Delete a Secret (confirm=false previews key names/fingerprints; confirm=true deletes)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

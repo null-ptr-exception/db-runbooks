@@ -102,7 +102,14 @@ and the PBM gateway tasks (`pbm/status`, `pbm/backup`, `pbm/list`,
 `pbm/restore`, `pbm/delete`, `pbm/pitr`, `pbm/logs`, `pbm/cancel-backup`,
 `pbm/schedule`, `pbm/config`; see `docs/mongodb/pbm.md` — these also keep the agent
 container name, storage location, and S3 credentials internal-config/
-auto-detect only, and never load MongoDB credentials at all) —
+auto-detect only, and never load MongoDB credentials at all) and the
+DB-agnostic secrets gateway tasks (`secrets/pubkey`, `secrets/get`,
+`secrets/plan`, `secrets/apply`, `secrets/delete`; served by BOTH gateways
+from the shared `scripts/secrets/` + `lib/secrets.sh`; see
+`docs/mongodb/secrets.md` / `docs/mariadb/secrets.md` — the deployment PGP
+key path and the protected-secret list are internal-config/auto-detect only,
+and secret VALUES arrive PGP-encrypted against the deployment key, never as
+plaintext task inputs) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as

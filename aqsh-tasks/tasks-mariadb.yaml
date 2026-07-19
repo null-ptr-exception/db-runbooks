@@ -674,9 +674,9 @@ tasks:
         required: false
         type: string
         default: "false"
-  migration/get-db-env:
-    script: mariadb/migration/get-db-env.sh
-    description: "Read named environment variable values from a MariaDB pod"
+  migration/write-db-env-to-vault:
+    script: mariadb/migration/write-db-env-to-vault.sh
+    description: "Read named environment variables from a specific MariaDB pod and write them to a Vault KV-v2 path — values are never returned in the task result or logged, since this task is reachable by any system:serviceaccounts caller. Each envs entry may be VAR or VAR=vault_key to store it under a different Vault key than the pod's env var name; multiple entries land in one Vault write. Requires Vault AppRole to be configured as deploy-time internal config (VAULT_ADDR/VAULT_MOUNT/VAULT_ROLE_ID/VAULT_SECRET_ID); fails clearly with VAULT_NOT_CONFIGURED otherwise."
     timeout: 2m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -695,19 +695,32 @@ tasks:
       #   required: false
       #   type: string
       #   default: mariadb
+      # mdb is required (not auto-detected): this task reads credentials off a
+      # specific instance on purpose, so the caller must name it explicitly.
       - name: mdb
         env: MARIADB_NAME
-        required: false
+        required: true
         type: string
       # - name: container
       #   env: MARIADB_CONTAINER
       #   required: false
       #   type: string
       #   default: mariadb
+      # Comma-separated; each entry is VAR or VAR=vault_key (e.g.
+      # "MARIADB_ROOT_PASSWORD=root_password,MARIADB_DATABASE").
       - name: envs
         env: ENVS_STR
         required: true
         type: string
+      # vault_path is where the values land, not who can write them: Vault
+      # identity (VAULT_ROLE_ID/VAULT_SECRET_ID) stays deploy-time-only config
+      # (see script header) so a caller can never redirect writes under a
+      # different Vault identity than this deployment's.
+      - name: vault_path
+        env: VAULT_PATH
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9._/-]+$'
   migration/preflight:
     script: mariadb/migration/migration-preflight.sh
     description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"

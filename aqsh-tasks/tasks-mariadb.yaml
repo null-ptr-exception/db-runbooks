@@ -723,7 +723,7 @@ tasks:
         pattern: '^[A-Za-z0-9._/-]+$'
   migration/preflight:
     script: mariadb/migration/migration-preflight.sh
-    description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity"
+    description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity. MinIO options fall back to this deployment's MINIO_*_DEFAULT internal config when omitted."
     timeout: 3m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -751,6 +751,9 @@ tasks:
         required: false
         type: string
         default: mariadb
+      # Each falls back to this deployment's MINIO_*_DEFAULT internal config
+      # (aqsh-tasks/config/mariadb.env) when omitted; MinIO checks are skipped
+      # with WARN only if still unset after that.
       - name: minio_endpoint
         env: MINIO_ENDPOINT
         required: false

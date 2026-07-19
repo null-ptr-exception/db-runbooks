@@ -194,6 +194,65 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# MinIO checks — deploy-time MINIO_*_DEFAULT fallback
+# ---------------------------------------------------------------------------
+
+@test "falls back to MINIO_ENDPOINT_DEFAULT when --minio-endpoint is omitted" {
+  export MINIO_ENDPOINT_DEFAULT="http://minio.minio.svc:9000"
+  export MINIO_TCP_EXIT=0
+  export MINIO_HTTP_EXIT=0
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
+
+  [ "$status" -eq 0 ]
+  # The "minio" WARN check only fires when the endpoint is still unset —
+  # the default should route into the real TCP/HTTP checks instead.
+  [ "$(printf '%s' "$output" | jq 'any(.checks[]; .name == "minio")')" = "false" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .status')" = "PASS" ]
+  [ "$(printf '%s' "$output" | jq -r '.minio.endpoint')" = "http://minio.minio.svc:9000" ]
+}
+
+@test "an explicit --minio-endpoint overrides MINIO_ENDPOINT_DEFAULT" {
+  export MINIO_ENDPOINT_DEFAULT="http://default.minio.svc:9000"
+  export MINIO_TCP_EXIT=0
+  export MINIO_HTTP_EXIT=0
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb \
+    --minio-endpoint http://explicit.minio.svc:9000 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.minio.endpoint')" = "http://explicit.minio.svc:9000" ]
+}
+
+@test "falls back to MINIO_ACCESS_KEY_DEFAULT/MINIO_SECRET_KEY_DEFAULT/MINIO_BUCKET_DEFAULT" {
+  export MINIO_ENDPOINT_DEFAULT="http://minio.minio.svc:9000"
+  export MINIO_ACCESS_KEY_DEFAULT="minioadmin"
+  export MINIO_SECRET_KEY_DEFAULT="minioadmin123"
+  export MINIO_BUCKET_DEFAULT="db-backups"
+  export MINIO_TCP_EXIT=0
+  export MINIO_HTTP_EXIT=0
+  export MC_ALIAS_SET_EXIT=0
+  export MC_LS_EXIT=0
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_auth") | .status')" = "PASS" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_bucket") | .status')" = "PASS" ]
+  [ "$(printf '%s' "$output" | jq -r '.minio.bucket')" = "db-backups" ]
+}
+
+@test "still warns MINIO_ENDPOINT_NOT_PROVIDED when neither input nor default is set" {
+  unset MINIO_ENDPOINT_DEFAULT || true
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
+
+  [ "$status" -eq 0 ]
+  reason=$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio") | .reason_code')
+  [ "$reason" = "MINIO_ENDPOINT_NOT_PROVIDED" ]
+}
+
+# ---------------------------------------------------------------------------
 # MinIO checks — endpoint supplied, TCP reachable
 # ---------------------------------------------------------------------------
 

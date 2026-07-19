@@ -10,6 +10,12 @@ set -euo pipefail
 #   2. MinIO TCP reachability  — run inside the pod so the pod's network is tested
 #   3. MinIO HTTP health check — curl to /minio/health/live from inside the pod
 #   4. MinIO credential check  — mc alias set + ls run from the aqsh-tasks context
+#
+# MinIO options resolve task input -> deploy-time internal config
+# (MINIO_*_DEFAULT in /etc/aqsh/config/mariadb.env) -> skip with WARN if
+# still unset. The *_DEFAULT names are deliberate: sourcing the config file
+# can never silently clobber an explicit --minio-endpoint override, because
+# it writes to a different variable name.
 # =============================================================================
 
 MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
@@ -25,6 +31,10 @@ source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
 
+# Deploy-time config: MINIO_ENDPOINT_DEFAULT / MINIO_ACCESS_KEY_DEFAULT /
+# MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT.
+[[ -f /etc/aqsh/config/mariadb.env ]] && source /etc/aqsh/config/mariadb.env
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -39,7 +49,9 @@ Target options:
   --mdb <name>                  MariaDB CR / StatefulSet name. Default: auto-detected.
   --container <name>            MariaDB container name. Default: mariadb
 
-MinIO options (omit --minio-endpoint to skip all MinIO checks):
+MinIO options (each falls back to this deployment's MINIO_*_DEFAULT config
+when omitted; MinIO checks are skipped with WARN only if still unset after
+that):
   --minio-endpoint <url>        MinIO server URL (e.g. http://minio.svc:9000).
   --minio-access-key <key>      MinIO access key for credential verification.
   --minio-secret-key <key>      MinIO secret key for credential verification.
@@ -105,6 +117,13 @@ fi
 source "${LIB_DIR}/k8s.sh"
 # shellcheck source=../../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
+
+# Fall back to deploy-time config for any MinIO option the caller didn't
+# supply. Resolved after CLI parsing so an explicit flag always wins.
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-${MINIO_ENDPOINT_DEFAULT:-}}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-${MINIO_ACCESS_KEY_DEFAULT:-}}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-${MINIO_SECRET_KEY_DEFAULT:-}}"
+MINIO_BUCKET="${MINIO_BUCKET:-${MINIO_BUCKET_DEFAULT:-}}"
 
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 

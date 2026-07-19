@@ -23,7 +23,10 @@ set -Eeuo pipefail
 #   minio_secret_key is used once for the backup existence check (mc alias set),
 #   then written to a temporary Kubernetes Secret and the env var is unset.
 #   The MariaDB CR references the Secret directly; the raw value never appears
-#   in logs or result JSON. The temporary Secret is deleted on exit.
+#   in logs or result JSON. The temporary Secret is deleted on exit — so
+#   wait_timeout must be non-zero: the operator needs the Secret to still
+#   exist when it reads it, and this script has no way to know that has
+#   happened other than waiting for the restore to reach Ready.
 #
 # image and storage_size are auto-detected from any existing MariaDB instance
 # in the target namespace. For a fresh (migration-destination) namespace they
@@ -106,6 +109,14 @@ mdbt_required "minio_bucket" "$MINIO_BUCKET" "$OP"
 mdbt_validate_s3_bucket "minio_bucket" "$MINIO_BUCKET" "$OP"
 mdbt_validate_endpoint "minio_endpoint" "$MINIO_ENDPOINT" "$OP"
 mdbt_validate_s3_prefix "backup_file" "$BACKUP_FILE" "$OP"
+
+# wait_timeout=0 would return before the operator has necessarily read the
+# temporary credential Secret, which is deleted on this process's exit.
+if [[ "$WAIT_TIMEOUT" == "0" ]]; then
+  mdbt_fail "$OP" \
+    "wait_timeout=0 is not supported: the MinIO credential Secret is temporary and deleted when this task exits, so the operator must be given time to consume it" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+fi
 
 if [[ -n "$K8S_CONTEXT" ]]; then
   mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
@@ -298,7 +309,10 @@ if [[ "$_BACKUP_EXISTS" != "true" ]]; then
 fi
 
 # Step 2: Create temp K8s Secret with credentials; unset raw secret key.
-TEMP_SECRET_NAME="migration-restore-creds-$(date +%Y%m%d%H%M%S)"
+# Name includes a random suffix (not just a timestamp) so concurrent calls in
+# the same second can't collide; created atomically (no dry-run|apply) so a
+# collision fails loudly instead of silently overwriting another run's Secret.
+TEMP_SECRET_NAME="migration-restore-creds-$(date +%Y%m%d%H%M%S)-${RANDOM}-$$"
 
 _cleanup_temp_secret() {
   if [[ -n "${TEMP_SECRET_NAME:-}" ]]; then
@@ -307,10 +321,14 @@ _cleanup_temp_secret() {
 }
 trap _cleanup_temp_secret EXIT
 
-_kubectl create secret generic "$TEMP_SECRET_NAME" \
-  --from-literal="${_CRED_ACCESS_KEY_NAME}=${MINIO_ACCESS_KEY}" \
-  --from-literal="${_CRED_SECRET_KEY_NAME}=${MINIO_SECRET_KEY}" \
-  --dry-run=client -o json | _kubectl apply -f - >/dev/null
+if ! _kubectl create secret generic "$TEMP_SECRET_NAME" \
+    --from-literal="${_CRED_ACCESS_KEY_NAME}=${MINIO_ACCESS_KEY}" \
+    --from-literal="${_CRED_SECRET_KEY_NAME}=${MINIO_SECRET_KEY}" >/dev/null; then
+  trap - ERR
+  mdbt_fail "$OP" "failed to create temporary credential secret '${TEMP_SECRET_NAME}'" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" \
+       '{namespace: $ns, target: $target}')" 1
+fi
 
 unset MINIO_SECRET_KEY
 
@@ -338,13 +356,14 @@ if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
        '{namespace: $ns, target: $target}')" 3
 fi
 
-if [[ "$WAIT_TIMEOUT" != "0" ]]; then
-  if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
-    mdbt_write_result "$(response_err "$OP" \
-      "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" \
-      "$(restore_result true false)" 1)"
-    exit 1
-  fi
+# wait_timeout=0 is rejected above, so this always waits: the temp credential
+# Secret must outlive the operator's read of it, and Ready is the only signal
+# this script has that the read already happened.
+if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
+  mdbt_write_result "$(response_err "$OP" \
+    "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" \
+    "$(restore_result true false)" 1)"
+  exit 1
 fi
 
 mdbt_write_result "$(response_ok "$OP" \

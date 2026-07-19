@@ -9,7 +9,9 @@
 #   - confirm=true is mandatory to apply (dry_run renders without it)
 #   - an existing target is never overwritten in place
 #   - minio_secret_key never appears in the result JSON
-#   - wait_timeout="0" skips the Ready wait; a timeout still returns a partial result
+#   - wait_timeout="0" is rejected: the temp credential Secret is deleted on
+#     exit, so the operator must be given time to read it first
+#   - a Ready-wait timeout still returns a partial result
 #   - the result returns the connection endpoint + credential reference
 #   - the bootstrapFrom.s3.prefix is exactly the backup_file input value
 
@@ -370,13 +372,15 @@ result_field() { jq -r "$1" "${RESULT}"; }
     = "mariadb-migrated-primary.mariadb-dest.svc.cluster.local" ]
 }
 
-@test "migration/restore with wait_timeout=0 applies without waiting for Ready" {
+@test "migration/restore rejects wait_timeout=0" {
   run_migration_restore DRY_RUN=false CONFIRM=true \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
     WAIT_TIMEOUT=0 MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 MOCK_WAIT_FAIL=1
-  [ "$status" -eq 0 ]
-  [ "$(result_field '.data.restored')" = "true" ]
-  [ -f "${CAPTURE}" ]
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"wait_timeout=0"* ]]
+  # Rejected before anything is applied.
+  [ ! -f "${CAPTURE}" ]
 }
 
 @test "migration/restore accepts a well-formed context" {

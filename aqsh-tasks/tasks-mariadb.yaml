@@ -935,8 +935,9 @@ tasks:
         required: false
         type: string
         default: "true"
-      # wait_timeout doubles as the wait switch: "0" returns without waiting,
-      # any positive duration (e.g. 10m) waits up to that long for Ready.
+      # Unlike other wait_timeout inputs, "0" (skip-wait) is rejected: the
+      # MinIO credential Secret is temporary and deleted when this task exits,
+      # so the operator must be given time to read it before that happens.
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false
@@ -1006,8 +1007,9 @@ tasks:
         required: false
         type: string
         default: "true"
-      # wait_timeout doubles as the wait switch: "0" returns without waiting,
-      # any positive duration (e.g. 10m) waits up to that long for Complete.
+      # Unlike other wait_timeout inputs, "0" (skip-wait) is rejected: the
+      # MinIO credential Secret is temporary and deleted when this task exits,
+      # so the operator must be given time to read it before that happens.
       - name: wait_timeout
         env: WAIT_TIMEOUT
         required: false

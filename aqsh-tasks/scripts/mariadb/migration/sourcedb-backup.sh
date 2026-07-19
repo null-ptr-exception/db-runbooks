@@ -16,7 +16,10 @@ set -euo pipefail
 #   written immediately to a temporary Kubernetes Secret in the target
 #   namespace, then the env var is unset. The PhysicalBackup CR references
 #   that Secret directly; the raw value never appears in logs or result JSON.
-#   The temporary Secret is deleted on task exit (EXIT trap).
+#   The temporary Secret is deleted on task exit (EXIT trap) — so wait_timeout
+#   must be non-zero: the operator needs the Secret to still exist when it
+#   reads it, and this script has no way to know that has happened other than
+#   waiting for the PhysicalBackup to reach Complete.
 #
 # The backup name defaults to <mariadb>-migration-<timestamp>. The S3 prefix
 # defaults to mariadb/<namespace> (compatible with the platform restore task).
@@ -74,6 +77,14 @@ mdbt_required "minio_secret_key" "$MINIO_SECRET_KEY" "$OP"
 mdbt_required "minio_bucket" "$MINIO_BUCKET" "$OP"
 mdbt_validate_s3_bucket "minio_bucket" "$MINIO_BUCKET" "$OP"
 mdbt_validate_endpoint "minio_endpoint" "$MINIO_ENDPOINT" "$OP"
+
+# wait_timeout=0 would return before the operator has necessarily read the
+# temporary credential Secret, which is deleted on this process's exit.
+if [[ "$WAIT_TIMEOUT" == "0" ]]; then
+  mdbt_fail "$OP" \
+    "wait_timeout=0 is not supported: the MinIO credential Secret is temporary and deleted when this task exits, so the operator must be given time to consume it" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+fi
 
 if [[ -n "$K8S_CONTEXT" ]]; then
   mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
@@ -172,9 +183,10 @@ if [[ "$READY" != "True" ]]; then
 fi
 
 # --- Create temporary K8s Secret with MinIO credentials ----------------------
-# The secret is created with --dry-run=client | apply so a concurrent collision
-# on the same name is a no-op rather than an error. Exit trap cleans it up.
-TEMP_SECRET_NAME="migration-backup-creds-$(date +%Y%m%d%H%M%S)"
+# Name includes a random suffix (not just a timestamp) so concurrent calls in
+# the same second can't collide; created atomically (no dry-run|apply) so a
+# collision fails loudly instead of silently overwriting another run's Secret.
+TEMP_SECRET_NAME="migration-backup-creds-$(date +%Y%m%d%H%M%S)-${RANDOM}-$$"
 
 _cleanup_temp_secret() {
   if [[ -n "${TEMP_SECRET_NAME:-}" ]]; then
@@ -183,10 +195,12 @@ _cleanup_temp_secret() {
 }
 trap _cleanup_temp_secret EXIT
 
-_kubectl create secret generic "$TEMP_SECRET_NAME" \
-  --from-literal="${_CRED_ACCESS_KEY_NAME}=${MINIO_ACCESS_KEY}" \
-  --from-literal="${_CRED_SECRET_KEY_NAME}=${MINIO_SECRET_KEY}" \
-  --dry-run=client -o json | _kubectl apply -f - >/dev/null
+if ! _kubectl create secret generic "$TEMP_SECRET_NAME" \
+    --from-literal="${_CRED_ACCESS_KEY_NAME}=${MINIO_ACCESS_KEY}" \
+    --from-literal="${_CRED_SECRET_KEY_NAME}=${MINIO_SECRET_KEY}" >/dev/null; then
+  mdbt_fail "$OP" "failed to create temporary credential secret '${TEMP_SECRET_NAME}'" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+fi
 
 # Clear the raw secret key from memory — the operator reads it from the Secret.
 unset MINIO_SECRET_KEY
@@ -206,35 +220,35 @@ MANIFEST="$(mdbt_physical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_
 printf '%s\n' "$MANIFEST" | _kubectl apply -f -
 
 # --- Wait for completion -----------------------------------------------------
-# wait_timeout="0" → return immediately without waiting.
-if [[ "$WAIT_TIMEOUT" != "0" ]]; then
-  if ! _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" \
-      --timeout="$WAIT_TIMEOUT" >/dev/null 2>&1; then
-    status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json \
-      | jq -c '.status // {}' 2>/dev/null || printf '{}')"
-    mdbt_write_result "$(response_err "$OP" \
-      "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}" \
-      "$(_backup_result true false | jq \
-        --argjson s "$status_json" \
-        '. + {physicalBackupStatus: $s.status, physicalBackupConditions: ($s.conditions // [])}')" 1)"
-    exit 1
-  fi
-
+# wait_timeout=0 is rejected above, so this always waits: the temp credential
+# Secret must outlive the operator's read of it, and Complete is the only
+# signal this script has that the read already happened.
+if ! _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" \
+    --timeout="$WAIT_TIMEOUT" >/dev/null 2>&1; then
   status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json \
-    2>/dev/null | jq -c '.status // {}' 2>/dev/null || printf '{}')"
-  if jq -e '
-    (.status == "Failed") or
-    any(.conditions[]?; .type == "Complete" and .status == "True" and .reason == "JobFailed")
-  ' <<<"$status_json" >/dev/null; then
-    reason="$(jq -r '.conditions[]? | select(.type == "Complete") | .reason // empty' \
-      <<<"$status_json" | tail -1)"
-    mdbt_write_result "$(response_err "$OP" \
-      "PhysicalBackup ${BACKUP_NAME} failed${reason:+: ${reason}}" \
-      "$(_backup_result true false | jq \
-        --argjson s "$status_json" \
-        '. + {physicalBackupStatus: $s.status, physicalBackupConditions: ($s.conditions // [])}')" 1)"
-    exit 1
-  fi
+    | jq -c '.status // {}' 2>/dev/null || printf '{}')"
+  mdbt_write_result "$(response_err "$OP" \
+    "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}" \
+    "$(_backup_result true false | jq \
+      --argjson s "$status_json" \
+      '. + {physicalBackupStatus: $s.status, physicalBackupConditions: ($s.conditions // [])}')" 1)"
+  exit 1
+fi
+
+status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json \
+  2>/dev/null | jq -c '.status // {}' 2>/dev/null || printf '{}')"
+if jq -e '
+  (.status == "Failed") or
+  any(.conditions[]?; .type == "Complete" and .status == "True" and .reason == "JobFailed")
+' <<<"$status_json" >/dev/null; then
+  reason="$(jq -r '.conditions[]? | select(.type == "Complete") | .reason // empty' \
+    <<<"$status_json" | tail -1)"
+  mdbt_write_result "$(response_err "$OP" \
+    "PhysicalBackup ${BACKUP_NAME} failed${reason:+: ${reason}}" \
+    "$(_backup_result true false | jq \
+      --argjson s "$status_json" \
+      '. + {physicalBackupStatus: $s.status, physicalBackupConditions: ($s.conditions // [])}')" 1)"
+  exit 1
 fi
 
 mdbt_write_result "$(response_ok "$OP" \

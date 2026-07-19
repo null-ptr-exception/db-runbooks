@@ -15,6 +15,10 @@ set -euo pipefail
 #   SECRETS_PAYLOAD — PGP ciphertext (armored or base64(armored)) of
 #                     {"keys": {"KEY": "value", ...}}, encrypted against the
 #                     key secrets/pubkey returns
+#   SECRETS_MODE    — "" / "upsert" (default) or "add_only": existing values
+#                     may never be overwritten, only new keys added
+#                     (conflicts fail KEY_CONFLICT; mode is plan_hash
+#                     material so it cannot change between plan and apply)
 #
 # The deployment PGP key path and the protected-secret list are NOT task
 # inputs (see CLAUDE.md "Configuration Layers") — internal config +
@@ -36,47 +40,28 @@ log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
 DB_NAMESPACE="${DB_NAMESPACE:?DB_NAMESPACE is required}"
 SECRET_NAME="${SECRET_NAME:?SECRET_NAME is required}"
 SECRETS_PAYLOAD="${SECRETS_PAYLOAD:?SECRETS_PAYLOAD is required}"
+MODE="${SECRETS_MODE:-upsert}"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 
-log_info "secrets-plan" "namespace=${DB_NAMESPACE} secret=${SECRET_NAME}"
+log_info "secrets-plan" "namespace=${DB_NAMESPACE} secret=${SECRET_NAME} mode=${MODE}"
 
-if secrets_is_protected "$SECRET_NAME"; then
-  secrets_fail "PROTECTED_SECRET" \
-    "refusing to plan writes to a protected secret (root credentials); no per-call override exists" \
-    "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
-fi
+secrets_load_payload_or_fail "$SECRET_NAME" "$SECRETS_PAYLOAD"
 
-plaintext=$(secrets_decrypt_payload "$SECRETS_PAYLOAD") && rc=0 || rc=$?
-if (( rc == 1 )); then
-  secrets_fail "PGP_KEY_UNAVAILABLE" "deployment PGP private key is missing or unreadable"
-elif (( rc != 0 )); then
-  secrets_fail "DECRYPT_FAILED" \
-    "payload does not decrypt with the deployment key (wrong recipient key, corrupt message, or not PGP at all) — fetch the current key via secrets/pubkey"
-fi
+payload_digest=$(secrets_payload_digest "$SECRETS_CANONICAL")
+resource_version=$(secrets_resource_version_of "$SECRETS_EXISTING")
+plan_hash=$(secrets_plan_hash "$DB_NAMESPACE" "$SECRET_NAME" "$payload_digest" "$resource_version" "$MODE")
+diff=$(secrets_diff "$SECRETS_EXISTING" "$SECRETS_CANONICAL")
 
-canonical=$(secrets_validate_payload "$plaintext") && rc=0 || rc=$?
-unset plaintext
-if (( rc == 2 )); then
-  secrets_fail "INVALID_INPUT" "payload contains a data key name outside [-._a-zA-Z0-9]"
-elif (( rc != 0 )); then
-  secrets_fail "PAYLOAD_INVALID" \
-    'decrypted payload is not {"keys": {name: string-value, ...}} with at least one entry'
-fi
-
-existing=$(secrets_get_existing "$SECRET_NAME") \
-  || secrets_fail "OPERATION_FAILED" "cannot read live secret state (API error or RBAC denial)"
-
-payload_digest=$(secrets_payload_digest "$canonical")
-resource_version=$(secrets_resource_version_of "$existing")
-plan_hash=$(secrets_plan_hash "$DB_NAMESPACE" "$SECRET_NAME" "$payload_digest" "$resource_version")
-diff=$(secrets_diff "$existing" "$canonical")
+secrets_enforce_mode "$MODE" "$diff"
 
 secrets_write_result "$(jq -nc \
   --arg namespace "$DB_NAMESPACE" \
   --arg secret_name "$SECRET_NAME" \
-  --argjson secret_exists "$([[ -n "$existing" ]] && echo true || echo false)" \
+  --arg mode "$MODE" \
+  --argjson secret_exists "$SECRETS_EXISTS" \
   --argjson diff "$diff" \
   --arg payload_digest "sha256:${payload_digest}" \
   --arg plan_hash "$plan_hash" \
-  '{namespace: $namespace, secret_name: $secret_name, secret_exists: $secret_exists,
-    payload_digest: $payload_digest, plan_hash: $plan_hash} + $diff')"
+  '{namespace: $namespace, secret_name: $secret_name, mode: $mode,
+    secret_exists: $secret_exists, payload_digest: $payload_digest,
+    plan_hash: $plan_hash} + $diff')"

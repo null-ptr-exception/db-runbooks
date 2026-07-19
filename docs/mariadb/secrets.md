@@ -37,9 +37,14 @@ CAS; delete is confirm-gated.
 |---|---|---|
 | Gateway host (sandbox) | `aqsh-mongodb.kind-a.test:30080` | `aqsh-mariadb.kind-a.test:30080` |
 | Internal config file | `mongodb.env` | `mariadb.env` |
-| Protected-secret auto-detect | Live, from StatefulSet env (official + Bitnami conventions) | **None** — operator CR conventions (`rootPasswordSecretKeyRef`) have no single live signal this detection trusts, so protection is config-list only |
+| Protected-secret auto-detect | Live, from StatefulSet env (official + Bitnami conventions) | **None** — operator CR conventions (`rootPasswordSecretKeyRef`) have no single live signal this detection trusts, so protection is config-list only; `SECRETS_AUTODETECT_DEFAULT=false` skips the doomed detection's two kubectl calls per write task |
 | Protected list in this sandbox | `minio` (+ auto-detected `mongodb-credentials`) | `mariadb` (operator root password), `minio` (S3 credentials) |
 | RBAC template | `mongodb-rbac.yaml` (rule added for this family) | `mariadb-rbac.yaml` — **already had** namespace-wide `get/create/patch/delete` on secrets (account-password rule); no change needed |
+
+`mode=add_only` (existing values may never be overwritten — `KEY_CONFLICT`,
+hash-bound so it can't be dropped between plan and apply) and the
+read-refusal of protected secrets by `secrets/get` behave identically on
+both gateways — see the MongoDB page.
 
 Because there is no live auto-detect tier here, **an unlisted root secret is
 unprotected**: every MariaDB deployment must put its operator root-password
@@ -78,12 +83,14 @@ Secret the app mounts. Verify later with `secrets/get` (per-key
 | Key | Sandbox value | Meaning |
 |---|---|---|
 | `SECRETS_PGP_KEY_PATH_DEFAULT` | `/etc/aqsh/pgp/private.asc` | deployment private key mount path |
-| `SECRETS_PROTECTED_NAMES_DEFAULT` | `mariadb,minio` | Secrets this family refuses to touch — **must** include the operator root-password Secret |
+| `SECRETS_PROTECTED_NAMES_DEFAULT` | `mariadb,minio` | Secrets this family refuses to touch — **must** include the operator root-password Secret (names pair with the chart's `mariadb.yaml` Secret manifests; rename together) |
+| `SECRETS_AUTODETECT_DEFAULT` | `false` | root-credential auto-detect reads MongoDB env conventions and can never succeed here — skip its two kubectl calls |
 | `LOG_LEVEL_DEFAULT` | `INFO` | baseline verbosity (`log_level` input per call) |
 
-Keypair provisioning is identical to the MongoDB gateway (chart value
-`aqsh.pgpKey` → Secret `aqsh-pgp`; both `db-ops` aqsh releases on the two
-clusters receive the same suite-generated key in e2e).
+Keypair provisioning is identical to the MongoDB gateway (`aqsh.pgpKey`
+helm value for the suites, `aqsh.pgpSecretName` for out-of-band provisioned
+keys; both `db-ops` aqsh releases on the two clusters receive the same
+suite-generated key in e2e).
 
 ## RBAC Requirements
 

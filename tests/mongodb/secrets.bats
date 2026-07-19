@@ -6,46 +6,25 @@
 # encrypts {"keys":{...}} locally, then plan -> apply upserts the Secret in
 # mongo-1. Values must never appear in task results — only key names,
 # actions and sha256 fingerprints. Failure paths cover decrypt/schema/CAS/
-# protected-secret refusals; a 0-replica Bitnami-style StatefulSet fixture
-# proves the protected-secret auto-detect reads the MONGODB_ROOT_* env
-# convention too (official MONGO_INITDB_ROOT_* is covered by mongo-1 itself).
+# mode/protected-secret refusals; a 0-replica Bitnami-style StatefulSet
+# fixture proves the protected-secret auto-detect reads the MONGODB_ROOT_*
+# env convention too (official MONGO_INITDB_ROOT_* is covered by mongo-1
+# itself). Shared plumbing: tests/test_helper/secrets_helpers.bash.
 # =============================================================================
 
 setup_file() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+  load '../test_helper/secrets_helpers'
 
   CTX_A="kind-cluster-a"
   CTX_B="kind-cluster-b"
   NS="mongo-core"
   AQSH_URL="http://aqsh-mongodb.kind-a.test:30080"
   DB_NS="mongo-1"
+  export CTX_A CTX_B NS AQSH_URL DB_NS
 
-  kubectl --context "$CTX_B" -n "$NS" wait pod \
-    -l app=test-client --for=condition=Ready --timeout=120s
-  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
-    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
-  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
-
-  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
-
-  export CTX_A CTX_B NS AQSH_URL DB_NS TEST_POD TOKEN
-
-  # Import the deployment public key once for the whole file. Local gpg is
-  # required for every encrypting test (same guard as account_lifecycle's
-  # encrypted-payload tests).
-  SECRETS_GNUPG=""
-  SECRETS_FPR=""
-  if command -v gpg >/dev/null 2>&1; then
-    run_secrets_task "pubkey" '{}' || return 1
-    [[ "$TASK_STATUS" == "completed" ]] || { echo "secrets/pubkey failed: ${RESULT_DATA}" >&2; return 1; }
-    SECRETS_GNUPG=$(mktemp -d)
-    chmod 700 "$SECRETS_GNUPG"
-    echo "$RESULT_DATA" | jq -r '.public_key' \
-      | GNUPGHOME="$SECRETS_GNUPG" gpg --batch --import 2>/dev/null
-    SECRETS_FPR=$(echo "$RESULT_DATA" | jq -r '.fingerprint')
-  fi
-  export SECRETS_GNUPG SECRETS_FPR
+  secrets_suite_setup_file
 }
 
 teardown_file() {
@@ -59,116 +38,18 @@ teardown_file() {
 setup() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+  load '../test_helper/secrets_helpers'
   if [[ -z "${SECRETS_GNUPG:-}" ]]; then
     skip "gpg is required for secrets/* e2e"
   fi
-}
-
-# ---------------------------------------------------------------------------
-# Helpers (same pattern as reconfig.bats / pbm_helpers.bash)
-# ---------------------------------------------------------------------------
-
-kexec() {
-  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
-}
-
-http_post() {
-  local url="$1" body="$2"
-  local response
-  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
-    -X POST '${url}' \
-    -H 'Authorization: Bearer ${TOKEN}' \
-    -H 'Content-Type: application/json' \
-    -d '${body}'")
-
-  HTTP_CODE=$(echo "$response" | tail -1)
-  HTTP_BODY=$(echo "$response" | sed '$d')
-  export HTTP_CODE HTTP_BODY
-}
-
-wait_for_task_any() {
-  local base_url="$1" task_id="$2" max_wait="${3:-180}"
-  local elapsed=0 status
-  while (( elapsed < max_wait )); do
-    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
-      -H 'Authorization: Bearer ${TOKEN}' \
-      '${base_url}/executions/${task_id}'")
-    export TASK_RESPONSE
-    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
-    if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-      TASK_STATUS="$status"
-      export TASK_STATUS
-      return 0
-    fi
-    sleep 5
-    elapsed=$((elapsed + 5))
-  done
-  echo "Task ${task_id} still not terminal after ${max_wait}s (status: ${status})" >&2
-  return 1
-}
-
-_task_result_data() {
-  echo "$TASK_RESPONSE" | jq -c '
-    .result.data as $data |
-    (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))
-  '
-}
-
-# Submit to a secrets endpoint and wait for a terminal state; exports
-# TASK_STATUS + RESULT_DATA. Echo gives failed assertions the actual result.
-run_secrets_task() {
-  local endpoint="$1" body="$2" max_wait="${3:-180}"
-  http_post "${AQSH_URL}/tasks/secrets%2F${endpoint}" "$body"
-  [[ "$HTTP_CODE" == "202" ]] || { echo "submit secrets/${endpoint} got HTTP ${HTTP_CODE}: ${HTTP_BODY}" >&2; return 1; }
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task_any "$AQSH_URL" "$task_id" "$max_wait" || return 1
-  RESULT_DATA=$(_task_result_data)
-  export RESULT_DATA
-  echo "secrets/${endpoint} -> ${TASK_STATUS}: ${RESULT_DATA:0:1000}"
-}
-
-# _encrypt_payload <json> — armored PGP for the deployment key, base64'd to
-# one line (survives the single-quoted curl -d in kexec).
-_encrypt_payload() {
-  printf '%s' "$1" | GNUPGHOME="$SECRETS_GNUPG" gpg --batch --yes --trust-model always \
-    --armor --recipient "$SECRETS_FPR" --encrypt 2>/dev/null | base64 | tr -d '\n'
 }
 
 _sha256_of() {
   printf '%s' "$1" | sha256sum | awk '{print $1}'
 }
 
-_secret_value() {
-  local name="$1" key="$2"
-  kubectl --context "$CTX_A" -n "$DB_NS" get secret "$name" \
-    -o "jsonpath={.data.${key}}" | base64 -d
-}
-
 _delete_secret() {
   kubectl --context "$CTX_A" -n "$DB_NS" delete secret "$1" --ignore-not-found
-}
-
-_plan_payload() {
-  local secret_name="$1" ciphertext="$2"
-  jq -nc --arg ns "$DB_NS" --arg name "$secret_name" --arg payload "$ciphertext" \
-    '{namespace: $ns, secret_name: $name, payload: $payload, log_level: "DEBUG"}'
-}
-
-_apply_payload() {
-  local secret_name="$1" ciphertext="$2" plan_hash="$3"
-  jq -nc --arg ns "$DB_NS" --arg name "$secret_name" --arg payload "$ciphertext" \
-    --arg plan_hash "$plan_hash" \
-    '{namespace: $ns, secret_name: $name, payload: $payload, plan_hash: $plan_hash,
-      requested_by: "bats", request_id: "secrets-e2e", log_level: "DEBUG"}'
-}
-
-# plan + assert completed + return plan_hash on stdout
-_plan_hash_for() {
-  local secret_name="$1" ciphertext="$2"
-  run_secrets_task "plan" "$(_plan_payload "$secret_name" "$ciphertext")" >&2 || return 1
-  [[ "$TASK_STATUS" == "completed" ]] || return 1
-  echo "$RESULT_DATA" | jq -r '.plan_hash'
 }
 
 # --- Tests ---
@@ -192,6 +73,7 @@ _plan_hash_for() {
   run_secrets_task "plan" "$(_plan_payload e2e-secrets-app "$ct")"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.secret_exists')" "false"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.mode')" "upsert"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.summary.create')" "2"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '[.changes[].action] | unique | join(",")')" "create"
   # No value may leak into the result. ([[ ]] instead of `! grep`: bash
@@ -264,6 +146,37 @@ _plan_hash_for() {
   assert_equal "$(_secret_value e2e-secrets-app password)" "user-chosen-pass-2"
 }
 
+@test "add_only refuses overwriting an existing value and allows pure additions" {
+  # e2e-secrets-app now holds username=monitor, password=user-chosen-pass-2
+  local ct hash
+  ct=$(_encrypt_payload '{"keys":{"password":"clobber-attempt"}}')
+  run_secrets_task "plan" "$(_plan_payload e2e-secrets-app "$ct" add_only)"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "KEY_CONFLICT"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.details.conflicting_keys | join(",")')" "password"
+  # The refusal changed nothing
+  assert_equal "$(_secret_value e2e-secrets-app password)" "user-chosen-pass-2"
+
+  # New keys and byte-identical re-pushes pass under add_only
+  ct=$(_encrypt_payload '{"keys":{"username":"monitor","extra-token":"added-later"}}')
+  hash=$(_plan_hash_for e2e-secrets-app "$ct" add_only)
+  run_secrets_task "apply" "$(_apply_payload e2e-secrets-app "$ct" "$hash" add_only)"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.action')" "patched"
+  assert_equal "$(_secret_value e2e-secrets-app extra-token)" "added-later"
+  assert_equal "$(_secret_value e2e-secrets-app password)" "user-chosen-pass-2"
+}
+
+@test "mode is plan_hash material: an add_only plan cannot be applied as upsert" {
+  local ct hash
+  ct=$(_encrypt_payload '{"keys":{"another-key":"v1"}}')
+  hash=$(_plan_hash_for e2e-secrets-app "$ct" add_only)
+
+  run_secrets_task "apply" "$(_apply_payload e2e-secrets-app "$ct" "$hash")"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PLAN_STALE"
+}
+
 @test "merge preserves keys the payload does not mention" {
   _delete_secret e2e-secrets-merge
   kubectl --context "$CTX_A" -n "$DB_NS" create secret generic e2e-secrets-merge \
@@ -333,7 +246,7 @@ _plan_hash_for() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
 }
 
-@test "apply without or with malformed plan_hash is rejected at submission" {
+@test "apply without or with malformed plan_hash or mode is rejected at submission" {
   local ct
   ct=$(_encrypt_payload '{"keys":{"a":"b"}}')
 
@@ -346,9 +259,14 @@ _plan_hash_for() {
     "$(jq -nc --arg ns "$DB_NS" --arg payload "$ct" \
       '{namespace: $ns, secret_name: "e2e-secrets-app", payload: $payload, plan_hash: "not-a-hash"}')"
   [[ "$HTTP_CODE" != "202" ]]
+
+  http_post "${AQSH_URL}/tasks/secrets%2Fplan" \
+    "$(jq -nc --arg ns "$DB_NS" --arg payload "$ct" \
+      '{namespace: $ns, secret_name: "e2e-secrets-app", payload: $payload, mode: "replace"}')"
+  [[ "$HTTP_CODE" != "202" ]]
 }
 
-@test "plan/apply/delete against protected secrets fail PROTECTED_SECRET" {
+@test "plan/apply/get/delete against protected secrets fail PROTECTED_SECRET" {
   local ct
   ct=$(_encrypt_payload '{"keys":{"MONGO_ROOT_PASS":"evil"}}')
 
@@ -359,6 +277,13 @@ _plan_hash_for() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_SECRET"
 
   run_secrets_task "apply" "$(_apply_payload mongodb-credentials "$ct" "sec000000000000000000000000")"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_SECRET"
+
+  # Even read-only: fingerprints of root credentials enable offline
+  # dictionary checks against a weak password
+  run_secrets_task "get" "$(jq -nc --arg ns "$DB_NS" \
+    '{namespace: $ns, secret_name: "mongodb-credentials"}')"
   assert_equal "$TASK_STATUS" "failed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_SECRET"
 

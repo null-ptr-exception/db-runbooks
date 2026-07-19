@@ -28,17 +28,17 @@ spec:
             - sh
             - -c
             - until redis-cli -h redis -p 6379 ping | grep -q PONG; do sleep 1; done
-      {{- if or .Values.aqsh.config .Values.aqsh.pgpKey }}
+      {{- if or .Values.aqsh.config .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
       volumes:
         {{- if .Values.aqsh.config }}
         - name: aqsh-config
           configMap:
             name: aqsh-config
         {{- end }}
-        {{- if .Values.aqsh.pgpKey }}
+        {{- if or .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
         - name: aqsh-pgp
           secret:
-            secretName: aqsh-pgp
+            secretName: {{ .Values.aqsh.pgpSecretName | default "aqsh-pgp" }}
             defaultMode: 0400
         {{- end }}
       {{- end }}
@@ -61,14 +61,14 @@ spec:
               value: "true"
             - name: AQSH_WORKER_QUEUES
               value: {{ .Values.aqsh.workerQueues }}
-          {{- if or .Values.aqsh.config .Values.aqsh.pgpKey }}
+          {{- if or .Values.aqsh.config .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
           volumeMounts:
             {{- if .Values.aqsh.config }}
             - name: aqsh-config
               mountPath: /etc/aqsh/config
               readOnly: true
             {{- end }}
-            {{- if .Values.aqsh.pgpKey }}
+            {{- if or .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
             - name: aqsh-pgp
               mountPath: /etc/aqsh/pgp
               readOnly: true

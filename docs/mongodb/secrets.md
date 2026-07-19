@@ -89,9 +89,9 @@ strings (binary content is out of scope — see Future Work).
 ### plan_hash: stateless CAS, borrowed from reconfig
 
 `secrets/plan` returns `plan_hash = "sec" + sha256(namespace | secret_name |
-payload_digest | live resourceVersion-or-"absent")[0:24]`. `secrets/apply`
-recomputes that hash from **live** state and refuses on mismatch
-(`PLAN_STALE`). Consequences, identical to `reconfig/apply`'s CAS
+payload_digest | live resourceVersion-or-"absent" | mode)[0:24]`.
+`secrets/apply` recomputes that hash from **live** state and refuses on
+mismatch (`PLAN_STALE`). Consequences, identical to `reconfig/apply`'s CAS
 ([reconfig.md](reconfig.md#how-it-works)):
 
 - No stored plan, no token table, no TTL — the hash *is* the binding.
@@ -100,6 +100,8 @@ recomputes that hash from **live** state and refuses on mismatch
 - Changing the payload between plan and apply also invalidates it
   (payload_digest moved) — you cannot plan an innocuous change and apply a
   different one.
+- Switching `mode` between plan and apply also invalidates it — an
+  `add_only` plan cannot be applied as a clobbering upsert.
 
 ### Merge-only writes
 
@@ -112,6 +114,16 @@ When every key is already `unchanged`, apply writes nothing and returns
 `action: "unchanged"` — re-applying is free and idempotent. There is no
 replace/prune mode by design; deleting keys means deleting the Secret
 (`secrets/delete`) or using direct kubectl with your own RBAC.
+
+**`mode=add_only` — existing values may never be clobbered.** For Secrets
+several parties write into (each adds its own keys, nobody may overwrite
+anyone else's), pass `mode: "add_only"`: any key whose live value would
+*change* fails `KEY_CONFLICT` (details name the conflicting keys — never
+values). New keys and byte-identical re-pushes still pass, so add_only
+stays idempotent. The check is server-enforced in both plan AND apply, and
+`mode` is plan_hash material, so a caller cannot take an add_only plan_hash
+and apply it as an upsert. Default (`mode` omitted or `"upsert"`) keeps the
+normal merge-overwrite behavior.
 
 ### Protected secrets: auto-detected, no per-call override
 
@@ -168,7 +180,10 @@ Returns `{public_key, fingerprint, content_type}`. Fails
 | `log_level` | no | per-call verbosity |
 
 Returns `{secret_name, namespace, type, resource_version, created_at,
-keys: [{key, value_sha256}]}`. Fails `NOT_FOUND` / `OPERATION_FAILED`.
+keys: [{key, value_sha256}]}`. Fails `PROTECTED_SECRET` (protected secrets
+are refused even read-only — fingerprints of root credentials would enable
+offline dictionary checks against a weak password), `NOT_FOUND`,
+`OPERATION_FAILED`.
 
 ### secrets/plan
 
@@ -177,24 +192,26 @@ keys: [{key, value_sha256}]}`. Fails `NOT_FOUND` / `OPERATION_FAILED`.
 | `namespace` | yes | target namespace |
 | `secret_name` | yes | Secret to create or merge into |
 | `payload` | yes | PGP ciphertext (armored or base64) of `{"keys": {...}}` |
+| `mode` | no | `upsert` (default) or `add_only` — refuse changing existing values |
 | `log_level` | no | per-call verbosity |
 
-Read-only. Returns `{namespace, secret_name, secret_exists, changes:
+Read-only. Returns `{namespace, secret_name, mode, secret_exists, changes:
 [{key, action: create|update|unchanged}], retained_keys, summary,
 payload_digest, plan_hash}`. Fails `PROTECTED_SECRET`,
 `PGP_KEY_UNAVAILABLE`, `DECRYPT_FAILED`, `PAYLOAD_INVALID`,
-`INVALID_INPUT`, `OPERATION_FAILED`.
+`INVALID_INPUT`, `KEY_CONFLICT` (add_only; details carry
+`conflicting_keys`), `OPERATION_FAILED`.
 
 ### secrets/apply
 
 | Input | Required | Meaning |
 |---|---|---|
-| `namespace`, `secret_name`, `payload` | yes | same as plan |
+| `namespace`, `secret_name`, `payload`, `mode` | as plan | same as plan (mode must MATCH the plan's — it is hash material) |
 | `plan_hash` | yes | token from `secrets/plan` (`^sec[0-9a-f]{24}$`) |
 | `requested_by`, `request_id` | no | audit passthrough, echoed in the result |
 | `log_level` | no | per-call verbosity |
 
-Returns plan's diff fields plus `{action: created|patched|unchanged,
+Returns plan's diff fields plus `{action: created|patched|unchanged, mode,
 plan_hash, requested_by, request_id}`. Fails everything plan can, plus
 `PLAN_STALE` (details carry `given_plan_hash` vs `live_plan_hash`) and
 `APPLY_FAILED`.
@@ -251,6 +268,16 @@ Encrypt a payload containing only `{"keys": {"password": "new-pass"}}` and
 plan/apply against the same Secret: `password` shows `update`, every other
 key appears in `retained_keys` and survives untouched.
 
+### 2b. Shared Secret, several writers, nobody may clobber anybody
+
+Add `"mode": "add_only"` to both plan and apply. Adding a brand-new key or
+re-pushing an identical value succeeds; a payload that would *change* an
+existing key's value fails `KEY_CONFLICT` with the offending key names in
+`details.conflicting_keys` — in plan (early warning) and again in apply
+(server-enforced even if the caller ignored the plan). Because `mode` is
+part of the plan_hash, the add_only guarantee cannot be dropped between the
+two steps.
+
 ### 3. Drift check without reading values
 
 `secrets/get` returns `value_sha256` per key — compare against
@@ -276,15 +303,22 @@ commented reference):
 | Key | Default | Meaning |
 |---|---|---|
 | `SECRETS_PGP_KEY_PATH_DEFAULT` | `/etc/aqsh/pgp/private.asc` | where the deployment private key is mounted |
-| `SECRETS_PROTECTED_NAMES_DEFAULT` | *(empty)* | extra protected Secret names, on top of the auto-detected root-credential Secret |
+| `SECRETS_PROTECTED_NAMES_DEFAULT` | *(empty)* | extra protected Secret names, on top of the auto-detected root-credential Secret. These repeat names the chart values own (`mongodb.backupSecret`) — rename them together |
+| `SECRETS_AUTODETECT_DEFAULT` | `true` | `false` skips the live root-credential detection (2 kubectl calls per write task) — for deployments where it cannot succeed anyway |
 | `LOG_LEVEL_DEFAULT` | `INFO` | baseline verbosity (`log_level` input overrides per call) |
 
-**Keypair provisioning:** the chart mounts Secret `aqsh-pgp` (key
-`private.asc`) when `aqsh.pgpKey` is set (`tests/chart/templates/aqsh.yaml`);
-the e2e suites generate a throwaway key in `setup_suite.bash` and inject it
-via the runtime-values second `helmfile apply`. A real deployment generates
-the keypair in its provisioning pipeline and creates the Secret out-of-band;
-rotating it is: create new key Secret → restart aqsh → callers re-fetch via
+**Keypair provisioning:** two chart paths
+(`tests/chart/templates/aqsh.yaml`), both mounting `/etc/aqsh/pgp`:
+
+- `aqsh.pgpKey` — armored private key as a helm value, rendered into Secret
+  `aqsh-pgp`. Used by the e2e suites (throwaway per-run key injected via the
+  runtime-values second `helmfile apply`). Convenient, but the key material
+  transits helm values and release storage.
+- `aqsh.pgpSecretName` — name of a **pre-created** Secret (key
+  `private.asc`), provisioned out-of-band. The production path: key
+  material never touches helm.
+
+Rotating either way: new key Secret → restart aqsh → callers re-fetch via
 `secrets/pubkey` (old ciphertexts stop decrypting, by design).
 
 ## RBAC Requirements
@@ -314,7 +348,9 @@ ClusterRole (the pbm/secrets test fixtures show the shape).
   `payload_digest` in results is a digest of the canonical payload JSON, so
   low-entropy payloads could in principle be brute-forced offline by someone
   holding both the result *and* a candidate list; treat task results as
-  internal, as with the account family's fingerprints.
+  internal, as with the account family's fingerprints. For protected
+  (root-credential) secrets even the read-only fingerprints are refused —
+  `secrets/get` fails `PROTECTED_SECRET` like the write tasks.
 - **Relationship to account delivery** ([account-lifecycle.md](account-lifecycle.md)):
   that flow's "Why PGP + Not K8s Secret?" argues against K8s Secrets for
   **human** delivery — unchanged. This family is **app** delivery; PGP

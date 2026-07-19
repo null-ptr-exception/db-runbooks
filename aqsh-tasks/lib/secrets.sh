@@ -18,7 +18,11 @@
 #   secrets_validate_payload    — schema/key-name checks -> canonical JSON
 #   secrets_get_existing        — live Secret JSON ("" when absent)
 #   secrets_diff                — per-key create/update/unchanged report
-#   secrets_plan_hash           — stateless CAS token (reconfig plan_hash model)
+#   secrets_plan_hash           — stateless CAS token (reconfig plan_hash model;
+#                                 mode is hash material)
+#   secrets_enforce_mode        — add_only: refuse overwriting existing values
+#   secrets_load_payload_or_fail — shared plan/apply front half (gate/decrypt/
+#                                 validate/read + reason-code mapping)
 #   secrets_write               — create via stdin manifest / merge-patch via
 #                                 --patch-file /dev/stdin (values never in argv)
 #   secrets_describe            — read-side report: key names + value sha256
@@ -27,11 +31,12 @@
 #   secrets_resolve_protected_names — root-credential Secrets writes must refuse
 #   secrets_fail / secrets_write_result — account-style task result helpers
 #
-# Depends on: logging.sh, response.sh, k8s.sh (sourced by callers).
-# mongodb-recovery.sh is sourced lazily inside
+# Depends on: logging.sh, k8s.sh (sourced by callers; k8s.sh itself needs
+# response.sh). mongodb-recovery.sh is sourced lazily inside
 # secrets_resolve_protected_names (read-only reuse of its credential
 # detection; in a non-MongoDB namespace detection fails soft and only the
-# internal-config list applies).
+# internal-config list applies, and SECRETS_AUTODETECT_DEFAULT=false skips
+# it entirely).
 # =============================================================================
 
 [[ -n "${_SECRETS_LIB_LOADED:-}" ]] && return 0
@@ -50,6 +55,7 @@ _SECRETS_LIB_LOADED=1
 
 _SECRETS_PGP_KEY_PATH="${SECRETS_PGP_KEY_PATH_DEFAULT:-/etc/aqsh/pgp/private.asc}"
 _SECRETS_PROTECTED_EXPLICIT="${SECRETS_PROTECTED_NAMES_DEFAULT:-}"
+_SECRETS_AUTODETECT="${SECRETS_AUTODETECT_DEFAULT:-true}"
 
 # K8s Secret data key charset (DNS-subdomain-ish, same rule the API server
 # enforces) — validated up front so a bad key fails as INVALID_INPUT instead
@@ -59,9 +65,11 @@ _SECRETS_KEY_NAME_RE='^[-._a-zA-Z0-9]+$'
 # ---------------------------------------------------------------------------
 # Task result helpers — same JSON shape as the account family
 # ({status, reason_code, summary, details}) so callers/tests assert failures
-# uniformly across gateways. Local copies rather than sourcing
-# mongodb-account.sh: that lib drags in mongo-only helpers and this family
-# must stay DB-agnostic.
+# uniformly across gateways. Local copies of mongodb-account.sh's
+# write_task_result/fail_task/bool_enabled: sourcing a mongo-named lib from
+# a DB-agnostic family would misstate the dependency, and no shared
+# task-common lib exists yet (extracting one touches the account family —
+# tracked as future work, needs its own discussion).
 # ---------------------------------------------------------------------------
 secrets_bool_enabled() {
   case "${1:-false}" in
@@ -253,20 +261,42 @@ secrets_get_existing() {
 }
 
 # ---------------------------------------------------------------------------
-# secrets_plan_hash <namespace> <secret_name> <payload_digest> <resource_version>
+# secrets_plan_hash <namespace> <secret_name> <payload_digest> <resource_version> <mode>
 # Stateless CAS token, same model as _reconfig_plan_hash: apply recomputes it
 # from live state and refuses on mismatch (PLAN_STALE). resource_version is
 # the live Secret's metadata.resourceVersion, or "absent" when it does not
 # exist — so both an external edit AND a create-in-between invalidate a plan.
-# No storage, no TTL.
+# mode is part of the hash material so a plan made under add_only cannot be
+# applied as an upsert (or vice versa). No storage, no TTL.
 # ---------------------------------------------------------------------------
 secrets_plan_hash() {
-  local namespace="${1:?}" secret_name="${2:?}" payload_digest="${3:?}" resource_version="${4:?}"
+  local namespace="${1:?}" secret_name="${2:?}" payload_digest="${3:?}" resource_version="${4:?}" mode="${5:?}"
   local h
-  h=$(printf '%s|%s|%s|%s' "$namespace" "$secret_name" "$payload_digest" "$resource_version" \
+  h=$(printf '%s|%s|%s|%s|%s' "$namespace" "$secret_name" "$payload_digest" "$resource_version" "$mode" \
     | sha256sum | cut -c1-24)
-  log_debug "secrets" "plan_hash inputs: ns=${namespace} secret=${secret_name} payload_digest=${payload_digest} rv=${resource_version}"
+  log_debug "secrets" "plan_hash inputs: ns=${namespace} secret=${secret_name} payload_digest=${payload_digest} rv=${resource_version} mode=${mode}"
   printf 'sec%s' "$h"
+}
+
+# ---------------------------------------------------------------------------
+# secrets_enforce_mode <mode> <diff_json>
+# add_only: refuse (KEY_CONFLICT) when the payload would change an EXISTING
+# key's value. New keys (create) and byte-identical re-pushes (unchanged)
+# pass — add_only is "existing values may never be clobbered", not
+# "the secret may never be touched".
+# ---------------------------------------------------------------------------
+secrets_enforce_mode() {
+  local mode="${1:?}" diff="${2:?}"
+  local conflicts
+
+  [[ "$mode" == "add_only" ]] || return 0
+  conflicts=$(printf '%s' "$diff" | jq -c '[.changes[] | select(.action=="update") | .key]')
+  if [[ "$conflicts" != "[]" ]]; then
+    secrets_fail "KEY_CONFLICT" \
+      "add_only mode: payload would overwrite existing values for the keys in details; re-plan without those keys or use mode=upsert deliberately" \
+      "$(jq -nc --argjson keys "$conflicts" '{conflicting_keys: $keys}')"
+  fi
+  log_debug "secrets" "add_only check passed (no existing value would change)"
 }
 
 secrets_resource_version_of() {
@@ -363,18 +393,21 @@ secrets_write() {
 # ---------------------------------------------------------------------------
 secrets_describe() {
   local existing_json="${1:?secret json is required}"
-  local key value_sha entries='[]'
+  local key b64 sha rows="" keys_json
 
-  while IFS= read -r key; do
-    key="${key%$'\r'}"   # jq emits CRLF on Windows hosts (local dev runs)
+  # One jq pass emits key<TAB>base64; the loop only hashes (2 subprocesses
+  # per key) and accumulates plain lines; one final jq assembles the array —
+  # instead of re-parsing the Secret and the growing array per key.
+  while IFS=$'\t' read -r key b64 || [[ -n "$key" ]]; do
+    key="${key%$'\r'}"; b64="${b64%$'\r'}"   # jq emits CRLF on Windows hosts (local dev runs)
     [[ -z "$key" ]] && continue
-    value_sha=$(printf '%s' "$existing_json" \
-      | jq -r --arg k "$key" '.data[$k]' | base64 -d | sha256sum | awk '{print $1}')
-    entries=$(printf '%s' "$entries" | jq -c --arg k "$key" --arg sha "$value_sha" \
-      '. + [{key: $k, value_sha256: $sha}]')
-  done < <(printf '%s' "$existing_json" | jq -r '.data // {} | keys[]')
+    sha=$(printf '%s' "$b64" | base64 -d | sha256sum)
+    rows+="${key}"$'\t'"${sha%% *}"$'\n'
+  done < <(printf '%s' "$existing_json" | jq -r '.data // {} | to_entries[] | "\(.key)\t\(.value)"')
 
-  printf '%s' "$existing_json" | jq -c --argjson keys "$entries" \
+  keys_json=$(printf '%s' "$rows" | jq -Rn \
+    '[inputs | select(length > 0) | split("\t") | {key: .[0], value_sha256: .[1]}]')
+  printf '%s' "$existing_json" | jq -c --argjson keys "$keys_json" \
     '{secret_name: .metadata.name,
       namespace: .metadata.namespace,
       type: .type,
@@ -417,15 +450,20 @@ secrets_delete() {
 # recovery/* auto-detect tier.
 # ---------------------------------------------------------------------------
 secrets_resolve_protected_names() {
-  local name detected_sts cred_row detected_secret
+  local detected_sts cred_row detected_secret
 
   if [[ -n "$_SECRETS_PROTECTED_EXPLICIT" ]]; then
-    # `|| [[ -n ... ]]`: tr's output has no trailing newline, and read alone
-    # would drop that final unterminated entry at EOF.
-    while IFS= read -r name || [[ -n "$name" ]]; do
-      [[ -n "$name" ]] && printf '%s\n' "$name"
-    done < <(printf '%s' "$_SECRETS_PROTECTED_EXPLICIT" | tr ', ' '\n')
+    printf '%s\n' "$_SECRETS_PROTECTED_EXPLICIT" | tr ', ' '\n' | awk 'NF'
     log_debug "secrets" "protected (internal config): ${_SECRETS_PROTECTED_EXPLICIT}"
+  fi
+
+  # Deployments that know detection cannot succeed (e.g. MariaDB gateways —
+  # operator root credentials carry no env signal this detector reads) set
+  # SECRETS_AUTODETECT_DEFAULT=false and save two kubectl round trips per
+  # plan/apply/delete call.
+  if [[ "$_SECRETS_AUTODETECT" != "true" ]]; then
+    log_debug "secrets" "root-credential auto-detect disabled by internal config"
+    return 0
   fi
 
   # shellcheck source=aqsh-tasks/lib/mongodb-recovery.sh
@@ -451,4 +489,47 @@ secrets_is_protected() {
   local secret_name="${1:?}" protected
   protected=$(secrets_resolve_protected_names)
   grep -Fxq "$secret_name" <<< "$protected"
+}
+
+# ---------------------------------------------------------------------------
+# secrets_load_payload_or_fail <secret_name> <payload_ciphertext>
+# The shared front half of plan and apply: protected gate → decrypt →
+# validate → read live state, with the reason-code mapping in ONE place so
+# both tasks report identical codes for identical inputs. Exits via
+# secrets_fail on any failure. On success sets globals:
+#   SECRETS_CANONICAL — canonical payload JSON
+#   SECRETS_EXISTING  — live Secret JSON ("" when absent)
+#   SECRETS_EXISTS    — "true" | "false"
+# ---------------------------------------------------------------------------
+secrets_load_payload_or_fail() {
+  local secret_name="${1:?}" ciphertext="${2:?}"
+  local plaintext rc
+
+  if secrets_is_protected "$secret_name"; then
+    secrets_fail "PROTECTED_SECRET" \
+      "refusing to touch a protected secret (root credentials); no per-call override exists" \
+      "$(jq -nc --arg name "$secret_name" '{secret_name: $name}')"
+  fi
+
+  plaintext=$(secrets_decrypt_payload "$ciphertext") && rc=0 || rc=$?
+  if (( rc == 1 )); then
+    secrets_fail "PGP_KEY_UNAVAILABLE" "deployment PGP private key is missing or unreadable"
+  elif (( rc != 0 )); then
+    secrets_fail "DECRYPT_FAILED" \
+      "payload does not decrypt with the deployment key (wrong recipient key, corrupt message, or not PGP at all) — fetch the current key via secrets/pubkey"
+  fi
+
+  SECRETS_CANONICAL=$(secrets_validate_payload "$plaintext") && rc=0 || rc=$?
+  unset plaintext
+  if (( rc == 2 )); then
+    secrets_fail "INVALID_INPUT" "payload contains a data key name outside [-._a-zA-Z0-9]"
+  elif (( rc != 0 )); then
+    secrets_fail "PAYLOAD_INVALID" \
+      'decrypted payload is not {"keys": {name: string-value, ...}} with at least one entry'
+  fi
+
+  SECRETS_EXISTING=$(secrets_get_existing "$secret_name") \
+    || secrets_fail "OPERATION_FAILED" "cannot read live secret state (API error or RBAC denial)"
+  if [[ -n "$SECRETS_EXISTING" ]]; then SECRETS_EXISTS="true"; else SECRETS_EXISTS="false"; fi
+  export SECRETS_CANONICAL SECRETS_EXISTING SECRETS_EXISTS
 }

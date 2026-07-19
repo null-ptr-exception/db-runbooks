@@ -5,42 +5,25 @@
 # The scripts are shared with the MongoDB gateway verbatim; this file proves
 # the family works against mariadb-1 and that the MariaDB deployment's
 # protected list (SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio — no live
-# auto-detect for operator-managed root credentials) refuses root/infra
-# secrets. Full failure-path coverage lives in tests/mongodb/secrets.bats.
+# auto-detect for operator-managed root credentials, and
+# SECRETS_AUTODETECT_DEFAULT=false) refuses root/infra secrets. Full
+# failure-path coverage lives in tests/mongodb/secrets.bats. Shared
+# plumbing: tests/test_helper/secrets_helpers.bash.
 # =============================================================================
 
 setup_file() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+  load '../test_helper/secrets_helpers'
 
   CTX_A="kind-cluster-a"
   CTX_B="kind-cluster-b"
   NS="db-ops"
   AQSH_URL="http://aqsh-mariadb.kind-a.test:30080"
   DB_NS="mariadb-1"
+  export CTX_A CTX_B NS AQSH_URL DB_NS
 
-  kubectl --context "$CTX_B" -n "$NS" wait pod \
-    -l app=test-client --for=condition=Ready --timeout=120s
-  TEST_POD=$(kubectl --context "$CTX_B" -n "$NS" \
-    get pod -l app=test-client -o jsonpath='{.items[0].metadata.name}')
-  [[ -n "$TEST_POD" ]] || { echo "test-client pod not found in $NS" >&2; return 1; }
-
-  TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=30m)
-
-  export CTX_A CTX_B NS AQSH_URL DB_NS TEST_POD TOKEN
-
-  SECRETS_GNUPG=""
-  SECRETS_FPR=""
-  if command -v gpg >/dev/null 2>&1; then
-    run_secrets_task "pubkey" '{}' || return 1
-    [[ "$TASK_STATUS" == "completed" ]] || { echo "secrets/pubkey failed: ${RESULT_DATA}" >&2; return 1; }
-    SECRETS_GNUPG=$(mktemp -d)
-    chmod 700 "$SECRETS_GNUPG"
-    echo "$RESULT_DATA" | jq -r '.public_key' \
-      | GNUPGHOME="$SECRETS_GNUPG" gpg --batch --import 2>/dev/null
-    SECRETS_FPR=$(echo "$RESULT_DATA" | jq -r '.fingerprint')
-  fi
-  export SECRETS_GNUPG SECRETS_FPR
+  secrets_suite_setup_file
 }
 
 teardown_file() {
@@ -52,101 +35,10 @@ teardown_file() {
 setup() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+  load '../test_helper/secrets_helpers'
   if [[ -z "${SECRETS_GNUPG:-}" ]]; then
     skip "gpg is required for secrets/* e2e"
   fi
-}
-
-# --- Helpers (same pattern as create_account.bats + reconfig.bats) ---
-
-kexec() {
-  kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
-}
-
-http_post() {
-  local url="$1" body="$2"
-  local response
-  response=$(kexec "curl -s --connect-timeout 5 -m 30 -w '\\n%{http_code}' \
-    -X POST '${url}' \
-    -H 'Authorization: Bearer ${TOKEN}' \
-    -H 'Content-Type: application/json' \
-    -d '${body}'")
-
-  HTTP_CODE=$(echo "$response" | tail -1)
-  HTTP_BODY=$(echo "$response" | sed '$d')
-  export HTTP_CODE HTTP_BODY
-}
-
-wait_for_task_any() {
-  local base_url="$1" task_id="$2" max_wait="${3:-180}"
-  local elapsed=0 status
-  while (( elapsed < max_wait )); do
-    TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
-      -H 'Authorization: Bearer ${TOKEN}' \
-      '${base_url}/executions/${task_id}'")
-    export TASK_RESPONSE
-    status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
-    if [[ "$status" == "completed" || "$status" == "failed" ]]; then
-      TASK_STATUS="$status"
-      export TASK_STATUS
-      return 0
-    fi
-    sleep 5
-    elapsed=$((elapsed + 5))
-  done
-  echo "Task ${task_id} still not terminal after ${max_wait}s (status: ${status})" >&2
-  return 1
-}
-
-_task_result_data() {
-  echo "$TASK_RESPONSE" | jq -c '
-    .result.data as $data |
-    (($data | try fromjson catch null) // (if ($data | type) == "object" then $data else .result end))
-  '
-}
-
-run_secrets_task() {
-  local endpoint="$1" body="$2" max_wait="${3:-180}"
-  http_post "${AQSH_URL}/tasks/secrets%2F${endpoint}" "$body"
-  [[ "$HTTP_CODE" == "202" ]] || { echo "submit secrets/${endpoint} got HTTP ${HTTP_CODE}: ${HTTP_BODY}" >&2; return 1; }
-  local task_id
-  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
-  wait_for_task_any "$AQSH_URL" "$task_id" "$max_wait" || return 1
-  RESULT_DATA=$(_task_result_data)
-  export RESULT_DATA
-  echo "secrets/${endpoint} -> ${TASK_STATUS}: ${RESULT_DATA:0:1000}"
-}
-
-_encrypt_payload() {
-  printf '%s' "$1" | GNUPGHOME="$SECRETS_GNUPG" gpg --batch --yes --trust-model always \
-    --armor --recipient "$SECRETS_FPR" --encrypt 2>/dev/null | base64 | tr -d '\n'
-}
-
-_secret_value() {
-  local name="$1" key="$2"
-  kubectl --context "$CTX_A" -n "$DB_NS" get secret "$name" \
-    -o "jsonpath={.data.${key}}" | base64 -d
-}
-
-_plan_payload() {
-  local secret_name="$1" ciphertext="$2"
-  jq -nc --arg ns "$DB_NS" --arg name "$secret_name" --arg payload "$ciphertext" \
-    '{namespace: $ns, secret_name: $name, payload: $payload, log_level: "DEBUG"}'
-}
-
-_apply_payload() {
-  local secret_name="$1" ciphertext="$2" plan_hash="$3"
-  jq -nc --arg ns "$DB_NS" --arg name "$secret_name" --arg payload "$ciphertext" \
-    --arg plan_hash "$plan_hash" \
-    '{namespace: $ns, secret_name: $name, payload: $payload, plan_hash: $plan_hash,
-      requested_by: "bats", request_id: "secrets-e2e", log_level: "DEBUG"}'
-}
-
-_plan_hash_for() {
-  local secret_name="$1" ciphertext="$2"
-  run_secrets_task "plan" "$(_plan_payload "$secret_name" "$ciphertext")" >&2 || return 1
-  [[ "$TASK_STATUS" == "completed" ]] || return 1
-  echo "$RESULT_DATA" | jq -r '.plan_hash'
 }
 
 # --- Tests ---
@@ -177,6 +69,15 @@ _plan_hash_for() {
 
   assert_equal "$(_secret_value e2e-secrets-app monitor-pass)" "user-chosen-pass"
   assert_equal "$(_secret_value e2e-secrets-app pre-existing)" "keepme"
+}
+
+@test "add_only refuses overwriting an existing value (KEY_CONFLICT)" {
+  local ct
+  ct=$(_encrypt_payload '{"keys":{"monitor-pass":"clobber-attempt"}}')
+  run_secrets_task "plan" "$(_plan_payload e2e-secrets-app "$ct" add_only)"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "KEY_CONFLICT"
+  assert_equal "$(_secret_value e2e-secrets-app monitor-pass)" "user-chosen-pass"
 }
 
 @test "secrets/get reports fingerprints; missing secret fails NOT_FOUND" {
@@ -214,6 +115,11 @@ _plan_hash_for() {
 
   # "mariadb" holds the operator root password (rootPasswordSecretKeyRef)
   run_secrets_task "plan" "$(_plan_payload mariadb "$ct")"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_SECRET"
+
+  # Even read-only fingerprints are refused for protected secrets
+  run_secrets_task "get" "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, secret_name: "mariadb"}')"
   assert_equal "$TASK_STATUS" "failed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_SECRET"
 

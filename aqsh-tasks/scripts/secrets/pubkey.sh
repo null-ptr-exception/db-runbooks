@@ -10,12 +10,10 @@ set -euo pipefail
 # =============================================================================
 
 LIB_DIR="/tasks/lib"
+# No k8s.sh/response.sh: this task never touches the cluster — its imports
+# should say so.
 # shellcheck source=aqsh-tasks/lib/logging.sh
 source "${LIB_DIR}/logging.sh"
-# shellcheck source=aqsh-tasks/lib/response.sh
-source "${LIB_DIR}/response.sh"
-# shellcheck source=aqsh-tasks/lib/k8s.sh
-source "${LIB_DIR}/k8s.sh"
 # shellcheck source=aqsh-tasks/lib/secrets.sh
 source "${LIB_DIR}/secrets.sh"
 

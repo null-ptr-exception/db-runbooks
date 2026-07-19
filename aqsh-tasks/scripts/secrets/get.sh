@@ -31,6 +31,14 @@ export K8S_NAMESPACE="${DB_NAMESPACE}"
 
 log_info "secrets-get" "namespace=${DB_NAMESPACE} secret=${SECRET_NAME}"
 
+# Protected secrets are refused even read-only: their value fingerprints
+# would enable offline dictionary checks against a weak root password.
+if secrets_is_protected "$SECRET_NAME"; then
+  secrets_fail "PROTECTED_SECRET" \
+    "refusing to describe a protected secret (root credentials); no per-call override exists" \
+    "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
+fi
+
 existing=$(secrets_get_existing "$SECRET_NAME") \
   || secrets_fail "OPERATION_FAILED" "cannot read live secret state (API error or RBAC denial)"
 [[ -z "$existing" ]] \

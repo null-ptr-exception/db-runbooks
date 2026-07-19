@@ -925,6 +925,12 @@ tasks:
         env: SECRETS_PAYLOAD
         required: true
         type: string
+      - name: mode
+        env: SECRETS_MODE
+        required: false
+        type: string
+        default: ""
+        pattern: '^(upsert|add_only)?$'
       - name: log_level
         env: LOG_LEVEL
         required: false
@@ -951,6 +957,12 @@ tasks:
         env: SECRETS_PAYLOAD
         required: true
         type: string
+      - name: mode
+        env: SECRETS_MODE
+        required: false
+        type: string
+        default: ""
+        pattern: '^(upsert|add_only)?$'
       - name: plan_hash
         env: SECRETS_PLAN_HASH
         required: true

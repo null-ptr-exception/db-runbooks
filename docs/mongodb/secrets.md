@@ -115,15 +115,21 @@ When every key is already `unchanged`, apply writes nothing and returns
 replace/prune mode by design; deleting keys means deleting the Secret
 (`secrets/delete`) or using direct kubectl with your own RBAC.
 
-**`mode=add_only` — existing values may never be clobbered.** For Secrets
-several parties write into (each adds its own keys, nobody may overwrite
-anyone else's), pass `mode: "add_only"`: any key whose live value would
-*change* fails `KEY_CONFLICT` (details name the conflicting keys — never
-values). New keys and byte-identical re-pushes still pass, so add_only
-stays idempotent. The check is server-enforced in both plan AND apply, and
-`mode` is plan_hash material, so a caller cannot take an add_only plan_hash
-and apply it as an upsert. Default (`mode` omitted or `"upsert"`) keeps the
-normal merge-overwrite behavior.
+**Three write modes**, all merge-only, all server-enforced in plan AND
+apply, all bound into the plan_hash (a plan made under one mode cannot be
+applied under another):
+
+| `mode` | Existing key, different value | Existing key, same value | New key |
+|---|---|---|---|
+| `upsert` (default) | overwritten (`update`) | `unchanged` | written (`create`) |
+| `add_only` | **whole call fails `KEY_CONFLICT`** (details name the keys, never values) | `unchanged` — idempotent re-push passes | written (`create`) |
+| `skip_existing` | silently skipped (`skipped`), value untouched | `skipped` | written (`create`) |
+
+`add_only` is for shared Secrets where clobbering must be an *error*
+(several writers, nobody may overwrite anyone else's keys).
+`skip_existing` is SQL's INSERT IGNORE: seed defaults without disturbing
+whatever is already there — plan/apply report the skipped keys by name and
+`summary.skipped`, and apply writes only the `create` keys.
 
 ### Protected secrets: auto-detected, no per-call override
 
@@ -192,12 +198,12 @@ offline dictionary checks against a weak password), `NOT_FOUND`,
 | `namespace` | yes | target namespace |
 | `secret_name` | yes | Secret to create or merge into |
 | `payload` | yes | PGP ciphertext (armored or base64) of `{"keys": {...}}` |
-| `mode` | no | `upsert` (default) or `add_only` — refuse changing existing values |
+| `mode` | no | `upsert` (default) / `add_only` (changing an existing value fails `KEY_CONFLICT`) / `skip_existing` (existing keys silently skipped, only new keys written) |
 | `log_level` | no | per-call verbosity |
 
 Read-only. Returns `{namespace, secret_name, mode, secret_exists, changes:
-[{key, action: create|update|unchanged}], retained_keys, summary,
-payload_digest, plan_hash}`. Fails `PROTECTED_SECRET`,
+[{key, action: create|update|unchanged|skipped}], retained_keys, summary
+(incl. `skipped`), payload_digest, plan_hash}`. Fails `PROTECTED_SECRET`,
 `PGP_KEY_UNAVAILABLE`, `DECRYPT_FAILED`, `PAYLOAD_INVALID`,
 `INVALID_INPUT`, `KEY_CONFLICT` (add_only; details carry
 `conflicting_keys`), `OPERATION_FAILED`.
@@ -277,6 +283,13 @@ existing key's value fails `KEY_CONFLICT` with the offending key names in
 (server-enforced even if the caller ignored the plan). Because `mode` is
 part of the plan_hash, the add_only guarantee cannot be dropped between the
 two steps.
+
+### 2c. Seed defaults without touching anything that already exists
+
+`"mode": "skip_existing"` (INSERT IGNORE): send the full desired key set;
+keys that already exist — with any value — are reported as `skipped` and
+left exactly as they are, only genuinely new keys get written. No error,
+idempotent, safe to run on every deploy.
 
 ### 3. Drift check without reading values
 

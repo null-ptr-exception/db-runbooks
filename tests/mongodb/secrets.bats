@@ -167,6 +167,26 @@ _delete_secret() {
   assert_equal "$(_secret_value e2e-secrets-app password)" "user-chosen-pass-2"
 }
 
+@test "skip_existing writes only new keys and silently skips existing ones" {
+  # e2e-secrets-app: username=monitor, password=user-chosen-pass-2, extra-token
+  local ct hash
+  ct=$(_encrypt_payload '{"keys":{"password":"ignored-attempt","fresh-key":"fresh-value"}}')
+
+  run_secrets_task "plan" "$(_plan_payload e2e-secrets-app "$ct" skip_existing)"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.changes[] | select(.key=="password") | .action')" "skipped"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.changes[] | select(.key=="fresh-key") | .action')" "create"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.summary.skipped')" "1"
+  hash=$(echo "$RESULT_DATA" | jq -r '.plan_hash')
+
+  run_secrets_task "apply" "$(_apply_payload e2e-secrets-app "$ct" "$hash" skip_existing)"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.action')" "patched"
+  # skipped key untouched, new key written
+  assert_equal "$(_secret_value e2e-secrets-app password)" "user-chosen-pass-2"
+  assert_equal "$(_secret_value e2e-secrets-app fresh-key)" "fresh-value"
+}
+
 @test "mode is plan_hash material: an add_only plan cannot be applied as upsert" {
   local ct hash
   ct=$(_encrypt_payload '{"keys":{"another-key":"v1"}}')

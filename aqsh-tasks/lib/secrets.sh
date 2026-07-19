@@ -21,6 +21,8 @@
 #   secrets_plan_hash           — stateless CAS token (reconfig plan_hash model;
 #                                 mode is hash material)
 #   secrets_enforce_mode        — add_only: refuse overwriting existing values
+#   secrets_effective_diff      — skip_existing: existing keys become "skipped"
+#   secrets_filter_canonical    — skip_existing: write only the "create" keys
 #   secrets_load_payload_or_fail — shared plan/apply front half (gate/decrypt/
 #                                 validate/read + reason-code mapping)
 #   secrets_write               — create via stdin manifest / merge-patch via
@@ -283,7 +285,9 @@ secrets_plan_hash() {
 # add_only: refuse (KEY_CONFLICT) when the payload would change an EXISTING
 # key's value. New keys (create) and byte-identical re-pushes (unchanged)
 # pass — add_only is "existing values may never be clobbered", not
-# "the secret may never be touched".
+# "the secret may never be touched". skip_existing never fails here — its
+# would-be overwrites are silently dropped instead
+# (secrets_effective_diff/secrets_filter_canonical).
 # ---------------------------------------------------------------------------
 secrets_enforce_mode() {
   local mode="${1:?}" diff="${2:?}"
@@ -297,6 +301,46 @@ secrets_enforce_mode() {
       "$(jq -nc --argjson keys "$conflicts" '{conflicting_keys: $keys}')"
   fi
   log_debug "secrets" "add_only check passed (no existing value would change)"
+}
+
+# ---------------------------------------------------------------------------
+# secrets_effective_diff <mode> <diff_json>
+# skip_existing (SQL INSERT IGNORE semantics): every key that already exists
+# — same value or not — becomes action "skipped" and will not be written;
+# only "create" keys remain actionable. Other modes pass the diff through.
+# ---------------------------------------------------------------------------
+secrets_effective_diff() {
+  local mode="${1:?}" diff="${2:?}"
+
+  if [[ "$mode" != "skip_existing" ]]; then
+    printf '%s' "$diff"
+    return 0
+  fi
+  printf '%s' "$diff" | jq -c '
+    (.changes | map(if .action == "create" then . else {key: .key, action: "skipped"} end)) as $changes
+    | .changes = $changes
+    | .summary = {create:    ($changes | map(select(.action=="create"))  | length),
+                  update:    0,
+                  unchanged: 0,
+                  skipped:   ($changes | map(select(.action=="skipped")) | length)}'
+}
+
+# ---------------------------------------------------------------------------
+# secrets_filter_canonical <mode> <canonical_payload> <effective_diff>
+# The payload that actually gets written: under skip_existing only the keys
+# the effective diff marks "create" survive; other modes write the payload
+# as-is.
+# ---------------------------------------------------------------------------
+secrets_filter_canonical() {
+  local mode="${1:?}" canonical="${2:?}" diff="${3:?}"
+
+  if [[ "$mode" != "skip_existing" ]]; then
+    printf '%s' "$canonical"
+    return 0
+  fi
+  jq -nc --argjson payload "$canonical" --argjson diff "$diff" '
+    ($diff.changes | map(select(.action=="create") | .key)) as $keep
+    | {keys: ($payload.keys | with_entries(select(.key as $k | $keep | index($k))))}'
 }
 
 secrets_resource_version_of() {
@@ -341,7 +385,8 @@ secrets_diff() {
        retained_keys: ($existing | keys - ($payload.keys | keys)),
        summary: {create:    ($changes | map(select(.action=="create"))    | length),
                  update:    ($changes | map(select(.action=="update"))    | length),
-                 unchanged: ($changes | map(select(.action=="unchanged")) | length)}}')
+                 unchanged: ($changes | map(select(.action=="unchanged")) | length),
+                 skipped:   0}}')
   log_debug "secrets" "diff: $(printf '%s' "$diff" | jq -c '{summary, retained: (.retained_keys | length)}')"
   printf '%s' "$diff"
 }

@@ -930,7 +930,7 @@ tasks:
         required: false
         type: string
         default: ""
-        pattern: '^(upsert|add_only)?$'
+        pattern: '^(upsert|add_only|skip_existing)?$'
       - name: log_level
         env: LOG_LEVEL
         required: false
@@ -962,7 +962,7 @@ tasks:
         required: false
         type: string
         default: ""
-        pattern: '^(upsert|add_only)?$'
+        pattern: '^(upsert|add_only|skip_existing)?$'
       - name: plan_hash
         env: SECRETS_PLAN_HASH
         required: true

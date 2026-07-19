@@ -41,10 +41,11 @@ CAS; delete is confirm-gated.
 | Protected list in this sandbox | `minio` (+ auto-detected `mongodb-credentials`) | `mariadb` (operator root password), `minio` (S3 credentials) |
 | RBAC template | `mongodb-rbac.yaml` (rule added for this family) | `mariadb-rbac.yaml` — **already had** namespace-wide `get/create/patch/delete` on secrets (account-password rule); no change needed |
 
-`mode=add_only` (existing values may never be overwritten — `KEY_CONFLICT`,
-hash-bound so it can't be dropped between plan and apply) and the
-read-refusal of protected secrets by `secrets/get` behave identically on
-both gateways — see the MongoDB page.
+The three write modes (`upsert` insert+overwrite / `add_only` overwrite →
+`KEY_CONFLICT` / `skip_existing` INSERT-IGNORE, all hash-bound so mode
+can't change between plan and apply) and the read-refusal of protected
+secrets by `secrets/get` behave identically on both gateways — see the
+MongoDB page.
 
 Because there is no live auto-detect tier here, **an unlisted root secret is
 unprotected**: every MariaDB deployment must put its operator root-password

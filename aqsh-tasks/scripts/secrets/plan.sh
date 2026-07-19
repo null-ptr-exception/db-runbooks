@@ -15,10 +15,12 @@ set -euo pipefail
 #   SECRETS_PAYLOAD — PGP ciphertext (armored or base64(armored)) of
 #                     {"keys": {"KEY": "value", ...}}, encrypted against the
 #                     key secrets/pubkey returns
-#   SECRETS_MODE    — "" / "upsert" (default) or "add_only": existing values
-#                     may never be overwritten, only new keys added
-#                     (conflicts fail KEY_CONFLICT; mode is plan_hash
-#                     material so it cannot change between plan and apply)
+#   SECRETS_MODE    — "" / "upsert" (default): insert + overwrite;
+#                     "add_only": overwriting an existing value fails
+#                     KEY_CONFLICT; "skip_existing": existing keys are
+#                     silently skipped (INSERT IGNORE), only new keys are
+#                     written. mode is plan_hash material so it cannot
+#                     change between plan and apply.
 #
 # The deployment PGP key path and the protected-secret list are NOT task
 # inputs (see CLAUDE.md "Configuration Layers") — internal config +
@@ -53,6 +55,7 @@ plan_hash=$(secrets_plan_hash "$DB_NAMESPACE" "$SECRET_NAME" "$payload_digest" "
 diff=$(secrets_diff "$SECRETS_EXISTING" "$SECRETS_CANONICAL")
 
 secrets_enforce_mode "$MODE" "$diff"
+diff=$(secrets_effective_diff "$MODE" "$diff")
 
 secrets_write_result "$(jq -nc \
   --arg namespace "$DB_NAMESPACE" \

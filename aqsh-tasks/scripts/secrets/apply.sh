@@ -9,7 +9,9 @@ set -euo pipefail
 # delete or create between plan and apply invalidates the plan
 # (PLAN_STALE), exactly like reconfig/apply's CAS; so does switching mode.
 # Merge-only: keys absent from the payload are left untouched; under
-# mode=add_only existing values may not change at all (KEY_CONFLICT).
+# mode=add_only existing values may not change at all (KEY_CONFLICT);
+# under mode=skip_existing existing keys are silently skipped (INSERT
+# IGNORE) and only new keys are written.
 # Values travel stdin-only into kubectl (create -f - / patch --patch-file
 # /dev/stdin), never argv, never logs.
 #
@@ -58,12 +60,14 @@ fi
 diff=$(secrets_diff "$SECRETS_EXISTING" "$SECRETS_CANONICAL")
 
 secrets_enforce_mode "$MODE" "$diff"
+diff=$(secrets_effective_diff "$MODE" "$diff")
 
 if [[ "$(printf '%s' "$diff" | jq -r '.summary.create + .summary.update')" == "0" ]]; then
   action="unchanged"
-  log_info "secrets-apply" "all keys already match — nothing to write"
+  log_info "secrets-apply" "nothing to write (all keys already match or are skipped)"
 else
-  action=$(secrets_write "$DB_NAMESPACE" "$SECRET_NAME" "$SECRETS_CANONICAL" "$SECRETS_EXISTS") \
+  write_canonical=$(secrets_filter_canonical "$MODE" "$SECRETS_CANONICAL" "$diff")
+  action=$(secrets_write "$DB_NAMESPACE" "$SECRET_NAME" "$write_canonical" "$SECRETS_EXISTS") \
     || secrets_fail "APPLY_FAILED" "kubectl write failed (see task logs)" \
          "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
 fi

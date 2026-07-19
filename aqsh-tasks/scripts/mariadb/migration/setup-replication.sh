@@ -206,6 +206,15 @@ build_sql_plan_json() {
   printf '[%s]' "$out"
 }
 
+json_number_or_null() {
+  local value="${1:-}"
+  if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf 'null'
+  fi
+}
+
 errors_json() {
   local out="" sep="" item
   for item in "${ERRORS[@]}"; do
@@ -229,8 +238,8 @@ result_json() {
     "$(json_escape "$pod")" \
     "$(json_escape "$REPL_CHANNEL")" \
     "$(json_escape "$REPL_HOST")" \
-    "$REPL_PORT" \
-    "${REPL_DELAY:-null}" \
+    "$(json_number_or_null "$REPL_PORT")" \
+    "$(json_number_or_null "$REPL_DELAY")" \
     "$(bool_enabled "$REPL_ASYNC" && printf true || printf false)" \
     "$(bool_enabled "$DRY_RUN" && printf true || printf false)" \
     "$sql_plan" \

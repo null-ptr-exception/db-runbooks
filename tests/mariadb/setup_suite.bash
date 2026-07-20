@@ -127,16 +127,8 @@ setup_suite() {
   # by both clusters' aqsh releases; callers fetch the public half through
   # the secrets/pubkey task). No gpg on the host → no key; the secrets.bats
   # file skips itself instead of failing the whole suite.
-  local PGP_HOME PGP_PRIV=""
-  if command -v gpg >/dev/null 2>&1; then
-    PGP_HOME=$(mktemp -d)
-    chmod 700 "$PGP_HOME"
-    GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
-      --quick-generate-key "aqsh-secrets-e2e" rsa3072 encr 7d
-    PGP_PRIV=$(GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
-      --armor --export-secret-keys)
-    rm -rf "$PGP_HOME"
-  fi
+  local PGP_PRIV
+  PGP_PRIV=$(provision_ephemeral_pgp_key)
 
   # Write runtime-discovered values to a temp file
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mariadb/runtime-values.yaml"

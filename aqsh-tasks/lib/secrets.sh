@@ -247,17 +247,22 @@ secrets_payload_digest() {
 # ---------------------------------------------------------------------------
 secrets_get_existing() {
   local secret_name="${1:?secret name is required}"
-  local out rc
+  local out err rc
 
-  out=$(_kubectl get secret "$secret_name" -o json 2>&1) && rc=0 || rc=$?
+  err=$(mktemp)
+  out=$(_kubectl get secret "$secret_name" -o json 2>"$err") && rc=0 || rc=$?
   if (( rc != 0 )); then
-    if printf '%s' "$out" | grep -qi 'NotFound'; then
+    local err_out
+    err_out=$(cat "$err")
+    rm -f "$err"
+    if printf '%s' "$err_out" | grep -qi 'NotFound'; then
       log_debug "secrets" "secret ${secret_name} does not exist"
       return 0
     fi
-    log_debug "secrets" "kubectl get secret ${secret_name} failed: ${out}"
+    log_debug "secrets" "kubectl get secret ${secret_name} failed: ${err_out}"
     return 1
   fi
+  rm -f "$err"
   log_debug "secrets" "secret ${secret_name} exists resourceVersion=$(printf '%s' "$out" | jq -r '.metadata.resourceVersion')"
   printf '%s' "$out"
 }
@@ -278,6 +283,23 @@ secrets_plan_hash() {
     | sha256sum | cut -c1-24)
   log_debug "secrets" "plan_hash inputs: ns=${namespace} secret=${secret_name} payload_digest=${payload_digest} rv=${resource_version} mode=${mode}"
   printf 'sec%s' "$h"
+}
+
+# ---------------------------------------------------------------------------
+# secrets_validate_mode <mode>
+# Fail INVALID_INPUT unless mode is exactly upsert/add_only/skip_existing —
+# called by both plan and apply so a typo'd mode (e.g. "addonly") can never
+# silently behave like upsert and defeat add_only's overwrite protection.
+# ---------------------------------------------------------------------------
+secrets_validate_mode() {
+  local mode="${1:?}"
+
+  case "$mode" in
+    upsert|add_only|skip_existing) return 0 ;;
+  esac
+  secrets_fail "INVALID_INPUT" \
+    "mode must be one of upsert, add_only, skip_existing (got: ${mode})" \
+    "$(jq -nc --arg mode "$mode" '{mode: $mode}')"
 }
 
 # ---------------------------------------------------------------------------

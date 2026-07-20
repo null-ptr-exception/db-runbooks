@@ -1,4 +1,7 @@
 {{- if .Values.aqsh.enabled }}
+{{- if and .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
+{{- fail "aqsh.pgpKey and aqsh.pgpSecretName are mutually exclusive — set exactly one" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

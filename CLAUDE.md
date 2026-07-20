@@ -103,13 +103,9 @@ and the PBM gateway tasks (`pbm/status`, `pbm/backup`, `pbm/list`,
 `pbm/schedule`, `pbm/config`; see `docs/mongodb/pbm.md` — these also keep the agent
 container name, storage location, and S3 credentials internal-config/
 auto-detect only, and never load MongoDB credentials at all) and the
-DB-agnostic secrets gateway tasks (`secrets/pubkey`, `secrets/get`,
-`secrets/plan`, `secrets/apply`, `secrets/delete`; served by BOTH gateways
-from the shared `scripts/secrets/` + `lib/secrets.sh`; see
-`docs/mongodb/secrets.md` / `docs/mariadb/secrets.md` — the deployment PGP
-key path and the protected-secret list are internal-config/auto-detect only,
-and secret VALUES arrive PGP-encrypted against the deployment key, never as
-plaintext task inputs) —
+`sts/orphan-delete` task (see `docs/mongodb/sts-orphan-delete.md` — detaches
+a StatefulSet from its Pods via `kubectl delete --cascade=orphan`; step 1 of
+the standard PVC-enlarge workaround, PVC resize/STS recreate stay manual) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
@@ -131,7 +127,12 @@ to force-wipe a healthy pod or to override the auto-selected candidate. Resoluti
    `MONGODB_ROOT_USER/PASSWORD`, or the Bitnami file-mounted-secret
    convention — a `*_FILE`-suffixed env var holding a path into a
    Secret-backed volume mount), `recovery_configmap` from the
-   `data-recovery` init container's own volume binding, and
+   `data-recovery` init container's own volume binding, the headless
+   Service used to build pod seed FQDNs (`<sts>-0.<headless-svc>.<ns>.svc.
+   cluster.local`) from the StatefulSet's own `spec.serviceName` — never
+   assumed to equal the StatefulSet's name, since e.g. Bitnami's chart
+   commonly names it `<release>-headless`; tier-1 override is
+   `MONGO_HEADLESS_SVC_DEFAULT` — and
    `data_path`/`mount_path` by asking mongod itself for its real dbPath
    (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
    mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
@@ -162,6 +163,19 @@ nor the hardcoded fallback can resolve it (e.g. credentials provisioned with
 no live signal in the StatefulSet spec at all), internal config remains the
 only override — there is no per-call escape hatch for `recovery/*` tasks by
 design.
+
+**Secrets gateway (`secrets/*`)**: a separate, DB-agnostic task family —
+`secrets/pubkey`, `secrets/get`, `secrets/plan`, `secrets/apply`,
+`secrets/delete` — served by BOTH gateways from the shared
+`scripts/secrets/` + `lib/secrets.sh`; see `docs/mongodb/secrets.md` /
+`docs/mariadb/secrets.md`. None of the recovery-tier rules above apply here:
+there is no `target_pod`, no destructive-wipe semantics, and no
+StatefulSet/credential resolution chain. Its task inputs are `namespace`,
+`secret_name`, and a PGP-encrypted `payload` (plus `mode` and, for
+`secrets/apply`, `plan_hash`). The deployment PGP key path and the
+protected-secret list are internal-config/auto-detect only, and secret
+VALUES arrive PGP-encrypted against the deployment key, never as plaintext
+task inputs.
 
 **G1 self-heal**: `wipe`/`recover` (gate mode only — `pre-check` stays
 read-only) go one step further than detection when the `data-recovery` init

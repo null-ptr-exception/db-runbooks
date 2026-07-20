@@ -712,8 +712,7 @@ k8s_port_forward() {
 
 # ---------------------------------------------------------------------------
 # k8s_sts_pod_names <sts_name>
-# List all pod names that belong to a StatefulSet (by label selector derived
-# from the STS spec).  Falls back to name-prefix matching.
+# List all pod names that belong to a StatefulSet.
 # Returns: JSON response with array of pod names.
 # ---------------------------------------------------------------------------
 k8s_sts_pod_names() {
@@ -721,31 +720,11 @@ k8s_sts_pod_names() {
   local op="k8s_sts_pod_names"
   log_info "$op" "Listing pod names for StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE'"
 
-  # Retrieve match-labels from the STS spec
-  local selector_out
-  selector_out=$(_kubectl get statefulset "$sts_name" \
-    -o jsonpath='{range .spec.selector.matchLabels}{@}{"\n"}{end}' 2>&1) || true
-
   local pod_out
-  # Try label selector first; fall back to name prefix if selector is empty
-  if [[ -n "$selector_out" ]]; then
-    local label_selector
-    label_selector=$(_kubectl get statefulset "$sts_name" \
-      -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>&1 | sed 's/,$//')
-    if ! pod_out=$(_kubectl get pods -l "$label_selector" \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1); then
-      log_error "$op" "Failed to list pods for STS '$sts_name': $pod_out"
-      response_err "$op" "Failed to list STS pods" "{\"sts\":\"$sts_name\",\"detail\":\"$pod_out\"}" 1
-      return 1
-    fi
-  else
-    if ! pod_out=$(_kubectl get pods \
-        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>&1 | \
-        grep "^${sts_name}-" || true); then
-      log_error "$op" "Failed to list pods for STS '$sts_name': $pod_out"
-      response_err "$op" "Failed to list STS pods" "{\"sts\":\"$sts_name\",\"detail\":\"$pod_out\"}" 1
-      return 1
-    fi
+  if ! pod_out=$(_k8s_sts_owned_pod_names "$sts_name"); then
+    log_error "$op" "Failed to list pods for STS '$sts_name' in namespace '$K8S_NAMESPACE'"
+    response_err "$op" "Failed to list STS pods" "{\"sts\":\"$sts_name\"}" 1
+    return 1
   fi
 
   local json_array=""
@@ -754,6 +733,27 @@ k8s_sts_pod_names() {
   fi
   response_ok "$op" "STS pod names retrieved" \
     "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"pods\":[${json_array}]}"
+}
+
+# ---------------------------------------------------------------------------
+# _k8s_sts_owned_pod_names <sts_name>
+# Newline-separated names of the pods whose ownerReferences name this
+# StatefulSet — exact ownership. Deliberately NOT label-selector based: a
+# reconstructed selector over-matches other workloads sharing the same
+# labels, can't express matchExpressions, and an empty selector matches the
+# whole namespace; name-prefix guessing has the same over-match problem
+# (e.g. "mongodb-arbiter-0" matches "^mongodb-"). Empty output when the
+# StatefulSet owns no pods; returns 1 only when the pod listing itself
+# fails (kubectl stderr passes through to the caller's stderr).
+# ---------------------------------------------------------------------------
+_k8s_sts_owned_pod_names() {
+  local sts_name="${1:?sts_name is required}"
+  local pods_raw
+  pods_raw=$(_kubectl get pods -o json) || return 1
+  jq -r --arg sts "$sts_name" \
+    '.items[]
+     | select(any(.metadata.ownerReferences[]?; .kind == "StatefulSet" and .name == $sts))
+     | .metadata.name' <<< "$pods_raw"
 }
 
 # ---------------------------------------------------------------------------
@@ -1038,6 +1038,109 @@ k8s_sts_restart() {
 }
 
 # ---------------------------------------------------------------------------
+# k8s_get_sts_pods <sts_name>
+# Read-only: replica count + the live Pod names currently OWNED by a
+# StatefulSet (matched on pod ownerReferences, not on a reconstructed label
+# selector — exact ownership, so pods of other workloads sharing the same
+# labels are never counted, and matchExpressions-style selectors need no
+# special handling). Shared building block for
+# k8s_delete_sts_cascade_orphan's pre-delete snapshot and for any caller
+# that wants to preview what an orphan-cascade delete would leave running
+# before actually doing it (see mongodb/sts/orphan-delete.sh's dry_run).
+# A failed pod listing is a hard error, NOT an empty list — for this
+# function's callers, "no pods" green-lights a delete, so it must never be
+# fabricated from a lookup failure.
+# Returns: JSON response with sts, namespace, replicas, pods[]
+# ---------------------------------------------------------------------------
+k8s_get_sts_pods() {
+  local sts_name="${1:?sts_name is required}"
+  local op="k8s_get_sts_pods"
+
+  # stderr goes to a temp file, not 2>&1: kubectl can emit exit-0 stderr in
+  # shapes we can't enumerate (admission "Warning:" lines, client-go
+  # throttling notices, plugin output), and any of it merged into stdout
+  # would corrupt the JSON parsed below.
+  local sts_json stderr_tmp err_detail
+  stderr_tmp=$(mktemp)
+  if ! sts_json=$(_kubectl get statefulset "$sts_name" -o json 2>"$stderr_tmp"); then
+    err_detail=$(head -1 "$stderr_tmp")
+    rm -f "$stderr_tmp"
+    log_error "$op" "Failed to read StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE': $err_detail"
+    response_err "$op" "Failed to read StatefulSet" \
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$err_detail")\"}" 1
+    return 1
+  fi
+  rm -f "$stderr_tmp"
+
+  local replicas
+  replicas=$(echo "$sts_json" | jq -r '.spec.replicas // 0')
+  log_debug "$op" "StatefulSet '$sts_name': replicas=${replicas}"
+
+  # Same separate stderr capture as above — here a stray exit-0 stderr line
+  # merged into stdout wouldn't just break a parse, it would be counted as a
+  # pod name in the preview.
+  local pod_names pods_json
+  stderr_tmp=$(mktemp)
+  if ! pod_names=$(_k8s_sts_owned_pod_names "$sts_name" 2>"$stderr_tmp"); then
+    err_detail=$(head -1 "$stderr_tmp")
+    rm -f "$stderr_tmp"
+    log_error "$op" "Failed to list pods in namespace '$K8S_NAMESPACE': $err_detail"
+    response_err "$op" "Failed to list pods" \
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$err_detail")\"}" 1
+    return 1
+  fi
+  rm -f "$stderr_tmp"
+  pods_json=$(printf '%s\n' "$pod_names" | jq -Rsc '[splits("\n") | select(length > 0)]')
+
+  response_ok "$op" "StatefulSet pods retrieved" \
+    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"replicas\":${replicas},\"pods\":${pods_json}}"
+}
+
+# ---------------------------------------------------------------------------
+# k8s_delete_sts_cascade_orphan <sts_name>
+# Delete a StatefulSet with `--cascade=orphan`: the controller object is
+# removed but its Pods and PVCs are left running, untouched and now
+# ownerless. This is step one of the standard workaround for enlarging a
+# PVC bound by an immutable volumeClaimTemplate (resize the now-orphaned
+# PVCs directly, then recreate the StatefulSet with the new size so it
+# adopts the existing PVCs by naming convention instead of provisioning new
+# ones) — this function only performs the orphan-cascade delete itself;
+# resizing PVCs and recreating the StatefulSet are deliberately NOT its job.
+# Returns: JSON response with sts, namespace, replicas, and orphaned_pods[]
+# (the pods now running with no owning controller) — logged loudly both
+# before and after the delete since that's exactly the fact a caller needs
+# to see.
+# ---------------------------------------------------------------------------
+k8s_delete_sts_cascade_orphan() {
+  local sts_name="${1:?sts_name is required}"
+  local op="k8s_delete_sts_cascade_orphan"
+
+  # Pre-delete snapshot: this is deliberately taken BEFORE the delete —
+  # --cascade=orphan strips the pods' ownerReferences, so afterwards there is
+  # nothing left to match on. The snapshot names the pods that WERE managed
+  # and are now orphaned.
+  local preview
+  preview=$(k8s_get_sts_pods "$sts_name") || { printf '%s' "$preview"; return 1; }
+  local replicas pod_count pod_list pods_json
+  { read -r replicas; read -r pod_count; read -r pod_list; read -r pods_json; } < <(
+    echo "$preview" | jq -r '.data.replicas, (.data.pods | length), (.data.pods | join(", ")), (.data.pods | tojson)')
+
+  log_info "$op" "About to orphan-delete StatefulSet '$sts_name' in namespace '$K8S_NAMESPACE' — ${pod_count} pod(s) will keep running with no owning controller: ${pod_list}"
+
+  local out
+  if ! out=$(_kubectl delete statefulset "$sts_name" --cascade=orphan 2>&1); then
+    log_error "$op" "Failed to orphan-delete StatefulSet '$sts_name': $out"
+    response_err "$op" "Failed to delete StatefulSet" \
+      "{\"sts\":\"$sts_name\",\"detail\":\"$(_escape_json_string "$(echo "$out" | head -1)")\"}" 1
+    return 1
+  fi
+
+  log_info "$op" "StatefulSet '$sts_name' deleted with --cascade=orphan; ${pod_count} pod(s) remain running, unmanaged, until a new StatefulSet adopts them"
+  response_ok "$op" "StatefulSet orphan-deleted" \
+    "{\"sts\":\"$sts_name\",\"namespace\":\"$K8S_NAMESPACE\",\"replicas\":${replicas},\"orphaned_pods\":${pods_json}}"
+}
+
+# ---------------------------------------------------------------------------
 # check_k8s_layer
 # Layer 1 of the MongoDB sanity check: Kubernetes infrastructure health.
 # Checks cluster connectivity, node readiness, STS pod readiness, pod
@@ -1125,24 +1228,30 @@ check_k8s_layer() {
   fi
 
   # 1d. Pod conditions + restart counts ──────────────────────────────────────
-  local pod_json
-  pod_json=$(_kubectl get pods -l "app=${STS_NAME}" -o json 2>/dev/null) || \
-  pod_json=$(_kubectl get pods -o json 2>/dev/null) || pod_json=""
+  # Pods are matched on ownerReferences, not on an assumed "app=<sts>" label
+  # (Bitnami charts label pods app.kubernetes.io/name=... with no app= label)
+  # and not by name prefix (which also matches e.g. "<sts>-arbiter-0" pods of
+  # a different StatefulSet).
+  local pod_names=""
+  if pod_names=$(_k8s_sts_owned_pod_names "$STS_NAME" 2>/dev/null); then
+    pod_names=$(printf '%s\n' "$pod_names" | head -20)
+  else
+    pod_names=""
+  fi
 
-  if [[ -n "$pod_json" ]]; then
-    local pod_names
-    pod_names=$(echo "$pod_json" | grep -o '"name":"[^"]*"' | \
-      awk -F'"' '{print $4}' | grep "^${STS_NAME}-" | head -20 || true)
-    if [[ -z "$pod_names" ]]; then
-      pod_names=$(echo "$pod_json" | grep -o '"name":"[^"]*"' | \
-        awk -F'"' '{print $4}' | grep -v 'kubernetes.io' | head -20 || true)
-    fi
-
+  if [[ -n "$pod_names" ]]; then
     local p
     for p in $pod_names; do
+      local pod_detail
+      pod_detail=$(_kubectl get pod "$p" -o json 2>/dev/null) || pod_detail=""
+      if [[ -z "$pod_detail" ]]; then
+        _sc_warn "Pod '$p': could not retrieve pod detail for condition/restart checks"
+        continue
+      fi
+
       local restart_count
-      restart_count=$(echo "$pod_json" | grep -A 50 "\"name\":\"${p}\"" | \
-        grep -o '"restartCount":[0-9]*' | head -1 | cut -d':' -f2 || echo "0")
+      restart_count=$(echo "$pod_detail" | \
+        jq -r '[.status.containerStatuses[]?.restartCount] | max // 0' 2>/dev/null) || restart_count=0
       restart_count="${restart_count:-0}"
       if (( restart_count >= RESTART_WARN_COUNT )); then
         _sc_warn "Pod '$p': high restart count (${restart_count} >= ${RESTART_WARN_COUNT})" \
@@ -1151,22 +1260,18 @@ check_k8s_layer() {
         _sc_pass "Pod '$p': restart count OK (${restart_count})"
       fi
 
-      local pod_detail
-      pod_detail=$(_kubectl get pod "$p" -o json 2>/dev/null) || pod_detail=""
-      if [[ -n "$pod_detail" ]]; then
-        local containers_ready scheduled
-        containers_ready=$(echo "$pod_detail" | \
-          jq -r '.status.conditions[] | select(.type == "ContainersReady") | .status' 2>/dev/null) || containers_ready=""
-        scheduled=$(echo "$pod_detail" | \
-          jq -r '.status.conditions[] | select(.type == "PodScheduled") | .status' 2>/dev/null) || scheduled=""
-        if [[ "$scheduled" != "True" ]]; then
-          _sc_fail "Pod '$p': not scheduled (PodScheduled=${scheduled:-unknown})" \
-            "Check node resources, taints, or PVC binding"
-        fi
-        if [[ "$containers_ready" != "True" ]]; then
-          _sc_warn "Pod '$p': containers not ready (ContainersReady=${containers_ready:-unknown})" \
-            "Pod may be in init or a container is still starting"
-        fi
+      local containers_ready scheduled
+      containers_ready=$(echo "$pod_detail" | \
+        jq -r '.status.conditions[] | select(.type == "ContainersReady") | .status' 2>/dev/null) || containers_ready=""
+      scheduled=$(echo "$pod_detail" | \
+        jq -r '.status.conditions[] | select(.type == "PodScheduled") | .status' 2>/dev/null) || scheduled=""
+      if [[ "$scheduled" != "True" ]]; then
+        _sc_fail "Pod '$p': not scheduled (PodScheduled=${scheduled:-unknown})" \
+          "Check node resources, taints, or PVC binding"
+      fi
+      if [[ "$containers_ready" != "True" ]]; then
+        _sc_warn "Pod '$p': containers not ready (ContainersReady=${containers_ready:-unknown})" \
+          "Pod may be in init or a container is still starting"
       fi
     done
   else

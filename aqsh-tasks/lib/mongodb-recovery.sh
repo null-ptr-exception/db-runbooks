@@ -117,13 +117,15 @@ _recovery_pod_ordinal() {
 # ---------------------------------------------------------------------------
 _recovery_list_pods() {
   local sts_name="$1"
-  local label_sel
-  label_sel=$(_kubectl get statefulset "$sts_name" \
-    -o go-template='{{range $k,$v := .spec.selector.matchLabels}}{{$k}}={{$v}},{{end}}' 2>/dev/null \
-    | sed 's/,$//') || true
-  [[ -z "$label_sel" ]] && return 1
-  _kubectl get pods -l "$label_sel" \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true
+  # Contract kept from the original label-selector implementation: return 1
+  # when the StatefulSet itself can't be read (callers treat that as "can't
+  # enumerate"), success with empty output when it owns no pods. The listing
+  # itself matches pod ownerReferences (via _k8s_sts_owned_pod_names in
+  # k8s.sh) — exact ownership, instead of a reconstructed label selector
+  # that over-matches other workloads sharing the same labels and can't
+  # express matchExpressions.
+  _kubectl get statefulset "$sts_name" -o name >/dev/null 2>&1 || return 1
+  _k8s_sts_owned_pod_names "$sts_name" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -230,6 +232,48 @@ _recovery_detect_sts_name() {
   [[ -z "$names" ]] && return 1
   [[ "$(wc -w <<< "$names")" -eq 1 ]] || return 1
   printf '%s' "$names"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# _recovery_detect_headless_service <sts_name>
+# A StatefulSet's pod DNS is <pod>.<spec.serviceName>.<ns>.svc.cluster.local
+# — spec.serviceName is NOT guaranteed to equal the StatefulSet's own name
+# (e.g. Bitnami's chart commonly names it "<release>-headless" while the STS
+# itself is "<release>"). Read it back from the STS spec instead of assuming
+# they match. Fails soft (empty output) on any lookup problem so callers can
+# fall back to sts_name unchanged, exactly like every other detector here.
+# ---------------------------------------------------------------------------
+_recovery_detect_headless_service() {
+  local sts_name="${1:?sts_name is required}"
+  local svc
+  svc=$(_kubectl get statefulset "$sts_name" -o jsonpath='{.spec.serviceName}' 2>/dev/null) || return 1
+  [[ -z "$svc" ]] && return 1
+  printf '%s' "$svc"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# recovery_resolve_headless_service <sts_name>
+# Standard 3-tier resolution (CLAUDE.md "Configuration Layers") for the
+# headless Service name used in pod seed FQDNs:
+#   1. MONGO_HEADLESS_SVC_DEFAULT (internal config) — the escape hatch when
+#      live detection can't run (e.g. RBAC denies the STS get)
+#   2. live auto-detect from the StatefulSet's own spec.serviceName
+#   3. sts_name itself — the conventional layout where they match
+# Always succeeds; logs when the resolved name differs from sts_name.
+# ---------------------------------------------------------------------------
+recovery_resolve_headless_service() {
+  local sts_name="${1:?sts_name is required}"
+  local svc="${MONGO_HEADLESS_SVC_DEFAULT:-}"
+  if [[ -z "$svc" ]]; then
+    svc=$(_recovery_detect_headless_service "$sts_name") || svc="$sts_name"
+  fi
+  if [[ "$svc" != "$sts_name" ]]; then
+    log_info "recovery_resolve_headless_service" \
+      "headless service resolved: ${svc} (sts=${sts_name})"
+  fi
+  printf '%s' "$svc"
   return 0
 }
 
@@ -1685,6 +1729,8 @@ try {
   # Re-add other Running pods using host from original config
   local pods_raw
   pods_raw=$(_recovery_list_pods "$sts_name") || pods_raw=""
+  local headless_svc
+  headless_svc=$(recovery_resolve_headless_service "$sts_name")
   local re_add_json=""
   while IFS= read -r pod; do
     [[ -z "$pod" || "$pod" == "$force_pod" ]] && continue
@@ -1693,7 +1739,7 @@ try {
     [[ "$phase" != "Running" ]] && continue
     local pod_host
     pod_host=$(printf '%s' "$cfg_raw" | grep -o "\"host\":\"[^\"]*${pod}[^\"]*\"" | head -1 | cut -d'"' -f4)
-    [[ -z "$pod_host" ]] && pod_host="${pod}.${sts_name}.${K8S_NAMESPACE}.svc.cluster.local:27017"
+    [[ -z "$pod_host" ]] && pod_host="${pod}.${headless_svc}.${K8S_NAMESPACE}.svc.cluster.local:27017"
     local add_out
     add_out=$(_recovery_mongosh_pod "$force_pod" "$user" "$pass" \
       "try{print(JSON.stringify(rs.add('${pod_host}')));}catch(e){print(JSON.stringify({ok:0,errmsg:e.message}));}" \

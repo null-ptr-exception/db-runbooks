@@ -45,6 +45,8 @@ SECRETS_PAYLOAD="${SECRETS_PAYLOAD:?SECRETS_PAYLOAD is required}"
 MODE="${SECRETS_MODE:-upsert}"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 
+secrets_validate_mode "$MODE"
+
 log_info "secrets-plan" "namespace=${DB_NAMESPACE} secret=${SECRET_NAME} mode=${MODE}"
 
 secrets_load_payload_or_fail "$SECRET_NAME" "$SECRETS_PAYLOAD"

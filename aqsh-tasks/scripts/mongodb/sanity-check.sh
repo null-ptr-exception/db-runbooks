@@ -108,7 +108,11 @@ _resolve_primary_with_retry() {
   return 1
 }
 
-_SEED_HOST="${_STS_NAME}-0.${_STS_NAME}.${DB_NAMESPACE}.svc.cluster.local"
+# The STS's own spec.serviceName governs pod DNS and is not guaranteed to
+# equal the StatefulSet's name (e.g. Bitnami commonly uses "<sts>-headless").
+_HEADLESS_SVC=$(recovery_resolve_headless_service "$_STS_NAME")
+
+_SEED_HOST="${_STS_NAME}-0.${_HEADLESS_SVC}.${DB_NAMESPACE}.svc.cluster.local"
 _SEED_PORT="27017"
 log_debug "mongo-sanity-check" "resolving primary via seed: ${_SEED_HOST}:${_SEED_PORT}"
 

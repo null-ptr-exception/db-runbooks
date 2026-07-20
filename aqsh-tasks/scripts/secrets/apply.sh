@@ -42,6 +42,8 @@ REQUESTED_BY="${REQUESTED_BY:-}"
 REQUEST_ID="${REQUEST_ID:-}"
 export K8S_NAMESPACE="${DB_NAMESPACE}"
 
+secrets_validate_mode "$MODE"
+
 log_info "secrets-apply" "namespace=${DB_NAMESPACE} secret=${SECRET_NAME} mode=${MODE} plan_hash=${SECRETS_PLAN_HASH}"
 
 secrets_load_payload_or_fail "$SECRET_NAME" "$SECRETS_PAYLOAD"

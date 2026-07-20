@@ -7,7 +7,10 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     resourceNames: [{{ .Values.mongodb.stsName | default "mongodb" | quote }}]
-    verbs: ["get", "patch"]
+    # delete is for sts/orphan-delete (--cascade=orphan): removes the STS
+    # controller object only, Pods/PVCs are untouched (see
+    # docs/mongodb/sts-orphan-delete.md).
+    verbs: ["get", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list", "watch"]

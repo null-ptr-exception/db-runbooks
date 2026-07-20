@@ -58,10 +58,17 @@ caller workstation                        cluster-a
                                       values stdin-only, never argv)
 ```
 
-Plaintext exists in exactly two places: the caller's machine and the aqsh
-pod's process memory during a task run. The HTTP body, gateway/audit logs,
-aqsh execution records and task results only ever contain ciphertext, key
-*names*, actions and sha256 digests.
+Through the gateway, plaintext is transiently exposed in only two places:
+the caller's machine and the aqsh pod's process memory during a task run.
+The HTTP body, gateway/audit logs, aqsh execution records and task results
+only ever contain ciphertext, key *names*, actions and sha256 digests. This
+is a guarantee about the gateway's own transit and logging path only —
+`secrets/apply` writes the decrypted values into the target Kubernetes
+Secret's `data` as its actual job, so from that point on the values also
+live wherever the cluster stores Secrets (etcd, potentially unencrypted
+unless the cluster has encryption-at-rest enabled) and are readable by
+anyone RBAC permits to `get` that Secret; see "At rest" under Security Notes
+below.
 
 ## How It Works
 
@@ -133,8 +140,10 @@ whatever is already there — plan/apply report the skipped keys by name and
 
 ### Protected secrets: auto-detected, no per-call override
 
-`plan`, `apply` and `delete` refuse (`PROTECTED_SECRET`) to touch Secrets
-that belong to other machinery, resolved without any caller input:
+`get`, `plan`, `apply` and `delete` refuse (`PROTECTED_SECRET`) to touch
+Secrets that belong to other machinery, resolved without any caller input —
+`get` is included so protected Secrets cannot be fingerprinted through the
+read API either:
 
 1. **Internal config** — `SECRETS_PROTECTED_NAMES_DEFAULT`, a comma/space
    list (the PBM S3 credentials Secret `minio` in this deployment).

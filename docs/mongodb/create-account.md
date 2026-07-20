@@ -42,7 +42,9 @@ All mutation tasks run the same order:
 
 1. Input validation
 2. Read root secret from Kubernetes (`mongodb-credentials` by default)
-3. Resolve primary from headless service seed
+3. Resolve primary from headless service seed (headless Service name is read
+   from the StatefulSet's own `spec.serviceName`, not assumed to equal the
+   StatefulSet's name)
 4. Connectivity check (`mongo_check`)
 5. Account existence check
 6. State guard check

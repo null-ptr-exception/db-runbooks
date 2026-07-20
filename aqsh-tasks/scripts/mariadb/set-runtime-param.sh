@@ -137,7 +137,13 @@ if [[ -z "$MDB" ]]; then
   MDB="$MARIADB_NAME"
 fi
 
-mapfile -t ALL_PODS < <(mariadb_list_pods)
+if ! MEMBER_PODS="$(mariadb_list_member_pods)"; then
+  emit BLOCKED POD_TARGETS_UNRESOLVED "cannot resolve a positive replica count for MariaDB '${MDB}'; refusing broad pod discovery for a mutating task" false
+  exit 0
+fi
+
+# A mutating scope must use the workload's exact ordinal members.
+mapfile -t ALL_PODS <<<"$MEMBER_PODS"
 [[ ${#ALL_PODS[@]} -gt 0 ]] || { emit BLOCKED NO_PODS "no MariaDB pods found in '${NAMESPACE}'" false; exit 0; }
 # CURRENT_PRIMARY is the REAL primary (may be empty on a standalone or mid-reconcile
 # cluster); QUERY_POD is just "any ready pod" for read-only queries (root password,

@@ -11,17 +11,21 @@ setup() {
   MOCK_DIR="$(mktemp -d)"
   RESULT="${MOCK_DIR}/result.json"
   STATE="${MOCK_DIR}/state"; mkdir -p "$STATE"
+  EXEC_LOG="${MOCK_DIR}/exec.log"
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
 args="$*"
-[[ "$args" == *"get pods"* ]] && { printf 'mariadb-0\nmariadb-1\nmariadb-2\n'; exit 0; }
+[[ "$args" == *"get mariadb"*".spec.replicas"* ]] && { printf '%s' "${MOCK_CR_REPLICAS-3}"; exit 0; }
+[[ "$args" == *"get statefulset"*".spec.replicas"* ]] && { printf '%s' "${MOCK_STS_REPLICAS-}"; exit 0; }
+[[ "$args" == *"get pods"* ]] && { printf 'mariadb-0\nmariadb-1\nmariadb-2\nmariadb-metrics\nmariadb-query-exporter\n'; exit 0; }
 # MOCK_PRIMARY defaults to mariadb-0 only when UNSET; set it to "" to simulate no primary
 [[ "$args" == *"get mariadb"*"currentPrimary"* ]] && { printf '%s' "${MOCK_PRIMARY-mariadb-0}"; exit 0; }
 [[ "$args" == *"get mariadb"*"metadata.name"* ]] && { printf 'mariadb'; exit 0; }
 if [[ " ${args} " == *" exec "* ]]; then
   [[ "$args" == *"printenv MARIADB_ROOT_PASSWORD"* ]] && { printf 'testpass'; exit 0; }
   pod=""; prev=""; for a in "$@"; do [[ "$prev" == "exec" ]] && { pod="$a"; break; }; prev="$a"; done
+  printf '%s\n' "$pod" >> "${MOCK_EXEC_LOG}"
   q=""; prev=""
   for a in "$@"; do [[ "$prev" == "-e" ]] && { q="$a"; break; }; prev="$a"; done
   case "$q" in
@@ -44,7 +48,7 @@ MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
   export DB_NAMESPACE="mariadb-1" MARIADB_NAME="mariadb" MARIADB_ROOT_PASSWORD="testpass"
-  export MOCK_STATE="$STATE"
+  export MOCK_STATE="$STATE" MOCK_EXEC_LOG="$EXEC_LOG"
 }
 teardown() { rm -rf "${MOCK_DIR}"; }
 
@@ -101,6 +105,23 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.results | length')" = "3" ]
   [ "$(field '.results | all(.applied == true)')" = "true" ]
   [ "$(field '.results[0].value')" = "500" ]
+  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+}
+
+@test "set-runtime-param scope=all excludes auxiliary pods sharing the instance label" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  [ "$(field '.results | map(.pod) | sort | join(",")')" = "mariadb-0,mariadb-1,mariadb-2" ]
+  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+}
+
+@test "set-runtime-param fails closed when exact workload members cannot be resolved" {
+  run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 \
+    MOCK_CR_REPLICAS= MOCK_STS_REPLICAS=
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = "POD_TARGETS_UNRESOLVED" ]
+  [ "$(field '.changed')" = "false" ]
+  [ ! -s "$EXEC_LOG" ]
 }
 
 @test "set-runtime-param scope=primary targets only the primary" {

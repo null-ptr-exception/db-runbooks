@@ -91,11 +91,12 @@ _on_none() {
 mariadb_autodetect_target false _on_ambiguous _on_none
 MDB="$MARIADB_NAME"
 
-mapfile -t PODS < <(mariadb_list_pods)
-if [[ ${#PODS[@]} -eq 0 ]]; then
-  emit BLOCKED NO_PODS "no MariaDB pods found for '${MDB}' in '${NAMESPACE}'" false
+if ! MEMBER_PODS="$(mariadb_list_member_pods)"; then
+  emit BLOCKED POD_TARGETS_UNRESOLVED \
+    "cannot resolve exact member pods for MariaDB '${MDB}' in '${NAMESPACE}'" false
   exit 0
 fi
+mapfile -t PODS <<<"$MEMBER_PODS"
 
 CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}' 2>/dev/null || true)"
 ROOT_PASSWORD="$(mariadb_read_root_password "$CURRENT_PRIMARY" "${PODS[@]}")" || {

@@ -242,8 +242,13 @@ secrets_payload_digest() {
 # ---------------------------------------------------------------------------
 # secrets_get_existing <secret_name>
 # Print the live Secret as JSON, or nothing when it does not exist.
-# Returns 1 on any error other than NotFound (RBAC denial, API outage) so
-# callers do not mistake "cannot read" for "absent" and plan a create.
+# Returns 1 on any error other than NotFound (RBAC denial, API outage) — and
+# prints kubectl's stderr text in that case (instead of only log_debug'ing
+# it) so the caller can surface the real API error in OPERATION_FAILED's
+# details, not just a generic "API error or RBAC denial" guess. Task logs
+# (where log_debug lands) aren't captured by CI/most callers, so this was
+# previously a silent failure mode with no way to diagnose it after the
+# fact.
 # ---------------------------------------------------------------------------
 secrets_get_existing() {
   local secret_name="${1:?secret name is required}"
@@ -260,6 +265,7 @@ secrets_get_existing() {
       return 0
     fi
     log_debug "secrets" "kubectl get secret ${secret_name} failed: ${err_out}"
+    printf '%s' "$err_out"
     return 1
   fi
   rm -f "$err"
@@ -595,8 +601,12 @@ secrets_load_payload_or_fail() {
       'decrypted payload is not {"keys": {name: string-value, ...}} with at least one entry'
   fi
 
-  SECRETS_EXISTING=$(secrets_get_existing "$secret_name") \
-    || secrets_fail "OPERATION_FAILED" "cannot read live secret state (API error or RBAC denial)"
+  local get_rc
+  SECRETS_EXISTING=$(secrets_get_existing "$secret_name") && get_rc=0 || get_rc=$?
+  if (( get_rc != 0 )); then
+    secrets_fail "OPERATION_FAILED" "cannot read live secret state (API error or RBAC denial)" \
+      "$(jq -nc --arg detail "$SECRETS_EXISTING" '{detail: $detail}')"
+  fi
   if [[ -n "$SECRETS_EXISTING" ]]; then SECRETS_EXISTS="true"; else SECRETS_EXISTS="false"; fi
   export SECRETS_CANONICAL SECRETS_EXISTING SECRETS_EXISTS
 }

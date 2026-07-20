@@ -205,6 +205,22 @@ jobs:
       - name: Run mongodb test suite
         run: bats tests/mongodb/
 
+      - name: Dump aqsh logs and runner resource state on failure
+        if: failure()
+        run: |
+          echo "::group::disk usage"
+          df -h
+          echo "::endgroup::"
+          echo "::group::docker system df"
+          docker system df -v 2>/dev/null || true
+          echo "::endgroup::"
+          echo "::group::aqsh-mongodb pod logs (mongo-core, cluster-a)"
+          kubectl --context kind-cluster-a -n mongo-core logs -l app=aqsh --all-containers --tail=500 2>/dev/null || true
+          echo "::endgroup::"
+          echo "::group::aqsh-mongodb pod describe (mongo-core, cluster-a)"
+          kubectl --context kind-cluster-a -n mongo-core describe pod -l app=aqsh 2>/dev/null || true
+          echo "::endgroup::"
+
       - name: Tear down clusters
         if: always()
         run: |

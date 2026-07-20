@@ -249,6 +249,11 @@ EOF
 # Argument validation
 # ---------------------------------------------------------------------------
 
+@test "exits 2 when --namespace is missing" {
+  run "${SCRIPT}" --mdb mariadb --ip 10.0.0.1 --json
+  [ "$status" -eq 2 ]
+}
+
 @test "exits 2 when --ip is missing" {
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
   [ "$status" -eq 2 ]

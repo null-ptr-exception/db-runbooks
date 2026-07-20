@@ -48,6 +48,10 @@ Namespace-local database gateway (cluster-a / mariadb-1)
     └─ :3307 → mariadb-operator secondary Service
 ```
 
+The database gateway is a separate Envoy Deployment and Service owned by the
+MariaDB namespace. It models database-namespace lifecycle and ownership; it
+does not add MariaDB routes to the shared control-plane gateway.
+
 Cross-cluster DNS: `*.kind-a.test` → cluster-a IP, `*.kind-b.test` → cluster-b
 IP (via CoreDNS) — this only resolves *inside* the clusters, so API calls are
 made from a pod (e.g. `test-client`), not from the host.

@@ -87,28 +87,31 @@ wait_for_replica_value() {
   return 1
 }
 
-@test "database gateway resources are namespace-local and select their own workload" {
+@test "database gateway resources are namespace-local and select the gateway workload" {
   run kubectl --context "$CTX" -n "$DB_NS" get deployment "$GATEWAY" \
-    -o jsonpath='{.spec.template.metadata.labels.app}/{.spec.template.metadata.labels.istio}'
+    -o jsonpath='{.spec.template.metadata.labels.app}'
   assert_success
-  assert_output "${GATEWAY}/${GATEWAY}"
+  assert_output "$GATEWAY"
 
   run kubectl --context "$CTX" -n "$DB_NS" get gateways.networking.istio.io "$GATEWAY" \
-    -o jsonpath='{.spec.selector.app}/{.spec.selector.istio}'
+    -o json
   assert_success
-  assert_output "${GATEWAY}/${GATEWAY}"
+  assert_equal "$(echo "$output" | jq -c '.spec.selector')" \
+    "{\"app\":\"$GATEWAY\"}"
 
   run kubectl --context "$CTX" -n "$DB_NS" get service "$GATEWAY" -o json
   assert_success
   assert_equal "$(echo "$output" | jq -r '.spec.type')" "ClusterIP"
   assert_equal "$(echo "$output" | jq -c '[.spec.ports[] | {name,port}] | sort_by(.port)')" \
-    '[{"name":"http","port":80},{"name":"https","port":443},{"name":"tcp-mariadb-rw","port":3306},{"name":"tcp-mariadb-ro","port":3307},{"name":"status-port","port":15021}]'
+    '[{"name":"tcp-mariadb-rw","port":3306},{"name":"tcp-mariadb-ro","port":3307},{"name":"status-port","port":15021}]'
 }
 
 @test "database gateway routes target the operator-native primary and secondary Services" {
   run kubectl --context "$CTX" -n "$DB_NS" get virtualservices.networking.istio.io "$GATEWAY" -o json
   assert_success
 
+  assert_equal "$(echo "$output" | jq -r '.spec.gateways[0]')" \
+    "$DB_NS/$GATEWAY"
   assert_equal "$(echo "$output" | jq -r '.spec.tcp[] | select(.match[0].port == 3306) | .route[0].destination.host')" \
     "mariadb-primary"
   assert_equal "$(echo "$output" | jq -r '.spec.tcp[] | select(.match[0].port == 3307) | .route[0].destination.host')" \

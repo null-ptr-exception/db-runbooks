@@ -1,3 +1,6 @@
+{{- if and .Values.databaseGateway.enabled (le (int .Values.mariadb.replicas) 1) }}
+{{- fail "databaseGateway.enabled requires mariadb.replicas > 1 for the secondary Service" }}
+{{- end }}
 {{- if .Values.databaseGateway.enabled }}
 apiVersion: networking.istio.io/v1
 kind: Gateway
@@ -7,22 +10,7 @@ metadata:
 spec:
   selector:
     app: {{ .Values.databaseGateway.name }}
-    istio: {{ .Values.databaseGateway.name }}
   servers:
-    - hosts:
-{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
-      port:
-        name: http
-        number: {{ .Values.databaseGateway.ports.http }}
-        protocol: HTTP
-    - hosts:
-{{ toYaml .Values.databaseGateway.hosts | indent 8 }}
-      port:
-        name: https
-        number: {{ .Values.databaseGateway.ports.https }}
-        protocol: HTTPS
-      tls:
-        mode: PASSTHROUGH
     - hosts:
 {{ toYaml .Values.databaseGateway.hosts | indent 8 }}
       port:
@@ -45,7 +33,7 @@ spec:
   hosts:
 {{ toYaml .Values.databaseGateway.hosts | indent 4 }}
   gateways:
-    - {{ .Values.databaseGateway.name }}
+    - {{ .Release.Namespace }}/{{ .Values.databaseGateway.name }}
   tcp:
     - match:
         - port: {{ .Values.databaseGateway.ports.readWrite }}

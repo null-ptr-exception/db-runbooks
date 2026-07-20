@@ -202,6 +202,20 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
+      - name: Clean slate — remove any leftover clusters from a prior run
+        run: |
+          # This runs on a persistent self-hosted runner, not ephemeral
+          # GitHub-hosted infra. "Tear down clusters" below swallows its own
+          # failures (`|| true`), so a run that gets killed/cancelled mid-way
+          # can leave cluster-a/cluster-b/registry alive for the NEXT run to
+          # silently reuse via ctlptl's idempotent apply — including
+          # whatever stale Helm-deployed RBAC objects (ClusterRoles etc.)
+          # that earlier run's checkout had, not this run's. Force a clean
+          # slate unconditionally before creating anything.
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true
+
       - name: Run mongodb test suite
         run: bats tests/mongodb/
 

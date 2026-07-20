@@ -212,14 +212,12 @@ jobs:
           df -h
           echo "::endgroup::"
           echo "::group::docker system df"
-          docker system df -v 2>/dev/null || true
+          docker system df -v
           echo "::endgroup::"
-          echo "::group::aqsh-mongodb pod logs (mongo-core, cluster-a)"
-          kubectl --context kind-cluster-a -n mongo-core logs -l app=aqsh --all-containers --tail=500 2>/dev/null || true
+          echo "::group::aqsh-mongodb pod logs (captured by teardown_suite before namespace deletion)"
+          cat /tmp/aqsh-mongodb-teardown.log
           echo "::endgroup::"
-          echo "::group::aqsh-mongodb pod describe (mongo-core, cluster-a)"
-          kubectl --context kind-cluster-a -n mongo-core describe pod -l app=aqsh 2>/dev/null || true
-          echo "::endgroup::"
+        continue-on-error: true
 
       - name: Tear down clusters
         if: always()

@@ -120,6 +120,16 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
+  # Namespace deletion below is destructive to the aqsh pod's logs, and CI
+  # runs teardown as part of this same `bats tests/mongodb/` step — a
+  # later, separate "dump logs on failure" step would always find the
+  # namespace already gone. Capture unconditionally (cheap, always useful)
+  # before deleting anything, to a fixed path outside any bats tmpdir (bats
+  # deletes BATS_SUITE_TMPDIR itself right after teardown_suite returns) so
+  # a later CI step in the same job can still read it.
+  kubectl --context "$ctx_a" -n mongo-core logs -l app=aqsh --all-containers --tail=2000 --prefix \
+    > /tmp/aqsh-mongodb-teardown.log 2>&1 || true
+
   kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found  || true
   kubectl --context "$ctx_b" delete ns mongo-core minio --ignore-not-found  || true
 

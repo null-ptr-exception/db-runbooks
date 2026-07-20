@@ -283,6 +283,22 @@ Encrypt a payload containing only `{"keys": {"password": "new-pass"}}` and
 plan/apply against the same Secret: `password` shows `update`, every other
 key appears in `retained_keys` and survives untouched.
 
+```bash
+PAYLOAD=$(jq -nc '{keys: {password: "new-pass"}}' \
+  | gpg --encrypt --armor --trust-model always -r "$FPR" | base64 -w0)
+
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" \
+  '{namespace:"mongo-1", secret_name:"monitor-credentials", payload:$p}')" \
+  "$AQSH/tasks/secrets%2Fplan"
+# → {"changes":[{"key":"password","action":"update"}],
+#    "retained_keys":["username"], "plan_hash":"sec...", ...}
+
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" --arg h "sec..." \
+  '{namespace:"mongo-1", secret_name:"monitor-credentials", payload:$p, plan_hash:$h}')" \
+  "$AQSH/tasks/secrets%2Fapply"
+# → {"action":"patched", ...} — username untouched, password rotated
+```
+
 ### 2b. Shared Secret, several writers, nobody may clobber anybody
 
 Add `"mode": "add_only"` to both plan and apply. Adding a brand-new key or
@@ -293,6 +309,19 @@ existing key's value fails `KEY_CONFLICT` with the offending key names in
 part of the plan_hash, the add_only guarantee cannot be dropped between the
 two steps.
 
+```bash
+# Secret already has {username: "monitor", password: "old-pass"}; this
+# payload tries to change password — add_only refuses it.
+PAYLOAD=$(jq -nc '{keys: {password: "new-pass", api_key: "abc123"}}' \
+  | gpg --encrypt --armor --trust-model always -r "$FPR" | base64 -w0)
+
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" \
+  '{namespace:"mongo-1", secret_name:"monitor-credentials", payload:$p, mode:"add_only"}')" \
+  "$AQSH/tasks/secrets%2Fplan"
+# → status ERROR, reason_code "KEY_CONFLICT",
+#    details: {"conflicting_keys":["password"]} — api_key alone would have passed
+```
+
 ### 2c. Seed defaults without touching anything that already exists
 
 `"mode": "skip_existing"` (INSERT IGNORE): send the full desired key set;
@@ -300,20 +329,79 @@ keys that already exist — with any value — are reported as `skipped` and
 left exactly as they are, only genuinely new keys get written. No error,
 idempotent, safe to run on every deploy.
 
+Example: the Secret already has `{a: "111"}`; the payload is
+`{a: "123", b: "456"}`; the desired end state is `{a: "111", b: "456"}`
+(keep the existing `a`, add the missing `b`). Plain `upsert` would
+overwrite `a` to `"123"` — use `skip_existing` instead:
+
+```bash
+PAYLOAD=$(jq -nc '{keys: {a: "123", b: "456"}}' \
+  | gpg --encrypt --armor --trust-model always -r "$FPR" | base64 -w0)
+
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" \
+  '{namespace:"<ns>", secret_name:"<secret>", payload:$p, mode:"skip_existing"}')" \
+  "$AQSH/tasks/secrets%2Fplan"
+# → {"changes":[{"key":"a","action":"skipped"},{"key":"b","action":"create"}],
+#    "summary":{"create":1,"update":0,"unchanged":0,"skipped":1}, "plan_hash":"sec...", ...}
+
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" --arg h "sec..." \
+  '{namespace:"<ns>", secret_name:"<secret>", payload:$p, mode:"skip_existing", plan_hash:$h}')" \
+  "$AQSH/tasks/secrets%2Fapply"
+# → {"action":"patched", ...} — Secret now holds {a: "111", b: "456"}
+```
+
+`mode` must be identical in `plan` and `apply` — it is part of `plan_hash`
+(see "plan_hash: stateless CAS" above), so `apply` with a different `mode`
+than the plan it was given fails `PLAN_STALE`, not a silent mode switch.
+
 ### 3. Drift check without reading values
 
 `secrets/get` returns `value_sha256` per key — compare against
 `sha256(expected-value)` locally. The reconciliation idea mirrors the
 account family's credential fingerprints.
 
+```bash
+curl ... -d '{"namespace":"mongo-1", "secret_name":"monitor-credentials"}' \
+  "$AQSH/tasks/secrets%2Fget"
+# → {"secret_name":"monitor-credentials", "namespace":"mongo-1",
+#    "keys":[{"key":"username","value_sha256":"a1b2..."},
+#            {"key":"password","value_sha256":"c3d4..."}], ...}
+
+# Locally, without ever sending the real value over the wire:
+printf '%s' "new-pass" | sha256sum
+# compare against the "password" entry's value_sha256 above
+```
+
 ### 4. Decommission
 
 `secrets/delete` without `confirm` shows exactly what would go (key names +
 fingerprints); rerun with `confirm: "true"` to delete.
 
+```bash
+curl ... -d '{"namespace":"mongo-1", "secret_name":"monitor-credentials"}' \
+  "$AQSH/tasks/secrets%2Fdelete"
+# → {"keys":[...], "deleted":false, "confirm_required":true}  — preview only
+
+curl ... -d '{"namespace":"mongo-1", "secret_name":"monitor-credentials", "confirm":"true"}' \
+  "$AQSH/tasks/secrets%2Fdelete"
+# → {"keys":[...], "deleted":true}
+```
+
 ### 5. Someone edited the Secret while you were deciding
 
 `apply` fails `PLAN_STALE` and changes nothing (the external edit survives).
+
+```bash
+# plan_hash from an earlier secrets/plan call, but the Secret changed since
+curl ... -d "$(jq -nc --arg p "$PAYLOAD" --arg h "sec_old_hash..." \
+  '{namespace:"mongo-1", secret_name:"monitor-credentials", payload:$p, plan_hash:$h}')" \
+  "$AQSH/tasks/secrets%2Fapply"
+# → status ERROR, reason_code "PLAN_STALE",
+#    details: {"given_plan_hash":"sec_old_hash...", "live_plan_hash":"sec_new_hash..."}
+
+# Nothing was written. Re-plan against current live state, review the new
+# diff, then apply with the fresh plan_hash.
+```
 Re-run `plan`, review the new diff — it now reflects the live state — and
 apply with the fresh hash.
 

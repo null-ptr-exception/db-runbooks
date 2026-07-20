@@ -2,10 +2,10 @@
 #
 # Contract tests for mariadb/migration/restore.sh.
 #
-# Run the script directly with mock `kubectl` and `mc` — no cluster, no MinIO.
+# Run the script directly with mock `kubectl` and `s5cmd` — no cluster, no MinIO.
 # Locked-down behaviours:
 #   - backup_file, minio_* params, image, and storage_size are task inputs
-#   - backup existence is checked via mc BEFORE any K8s resource is created
+#   - backup existence is checked via s5cmd BEFORE any K8s resource is created
 #   - confirm=true is mandatory to apply (dry_run renders without it)
 #   - an existing target is never overwritten in place
 #   - minio_secret_key never appears in the result JSON
@@ -79,26 +79,30 @@ esac
 MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
-  # --- mc mock ----------------------------------------------------------------
-  cat > "${MOCK_DIR}/mc" <<'MOCK'
+  # --- s5cmd mock ---------------------------------------------------------------
+  cat > "${MOCK_DIR}/s5cmd" <<'MOCK'
 #!/usr/bin/env bash
-# Minimal mc mock:
-#   alias set ...  → success (or fail with MOCK_MC_AUTH_FAIL=1)
-#   ls <path>      → one line if MOCK_BACKUP_EXISTS=1, empty if =0 (default: 1)
-#   alias rm ...   → no-op
-args="$*"
-case "$args" in
-  "alias set "*)
-    [[ "${MOCK_MC_AUTH_FAIL:-0}" == "1" ]] && exit 1 || exit 0 ;;
-  "ls "*)
-    [[ "${MOCK_BACKUP_EXISTS:-1}" == "1" ]] && printf '[2026-07-12] backup-file\n' && exit 0
-    exit 0 ;;  # empty output when backup not found
-  "alias rm "*)
-    exit 0 ;;
-  *) exit 0 ;;
-esac
+# Minimal s5cmd mock for the `ls s3://bucket/backup_file/` existence check:
+#   MOCK_BACKUP_EXISTS=1 (default) → one listing line, exit 0
+#   MOCK_BACKUP_EXISTS=0           → "no object found" on stderr, exit 1
+#   MOCK_S5_AUTH_FAIL=1            → a non-"no object found" error, exit 1
+for a in "$@"; do
+  if [[ "$a" == "ls" ]]; then
+    if [[ "${MOCK_S5_AUTH_FAIL:-0}" == "1" ]]; then
+      echo 'ERROR "ls s3://...": AccessDenied' >&2
+      exit 1
+    fi
+    if [[ "${MOCK_BACKUP_EXISTS:-1}" == "1" ]]; then
+      printf '2026/07/12 00:00:00               1234  backup-file\n'
+      exit 0
+    fi
+    echo 'ERROR "ls s3://...": no object found' >&2
+    exit 1
+  fi
+done
+exit 0
 MOCK
-  chmod +x "${MOCK_DIR}/mc"
+  chmod +x "${MOCK_DIR}/s5cmd"
 
   # Required env for every test.
   export DB_NAMESPACE="mariadb-dest"
@@ -154,10 +158,10 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.backupContentType')" = "Physical" ]
 }
 
-@test "migration/restore dry_run does not check MinIO (no mc call needed)" {
-  # Even with mc_auth_fail set, dry run must succeed (mc is never called).
+@test "migration/restore dry_run does not check MinIO (no s5cmd call needed)" {
+  # Even with the auth-fail mock armed, dry run must succeed (s5cmd never runs).
   run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
-    MOCK_MC_AUTH_FAIL=1
+    MOCK_S5_AUTH_FAIL=1
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
 }
@@ -264,13 +268,14 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ ! -f "${CAPTURE}" ]
 }
 
-@test "migration/restore fails when MinIO authentication fails" {
+@test "migration/restore fails when the backup existence check errors (not just not-found)" {
   run_migration_restore DRY_RUN=false CONFIRM=true \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
-    MOCK_MC_AUTH_FAIL=1 MOCK_TARGET_EXISTS=0
+    MOCK_S5_AUTH_FAIL=1 MOCK_TARGET_EXISTS=0
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"authenticate"* ]]
+  [[ "$(result_field '.message')" == *"failed to verify backup"* ]]
+  [[ "$(result_field '.message')" == *"minio_access_key"* ]]
   [ ! -f "${CAPTURE}" ]
 }
 

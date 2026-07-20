@@ -91,29 +91,39 @@ exit 1
 EOF
   chmod +x "${TEST_TMPDIR}/bin/kubectl"
 
-  # Mock mc (MinIO client)
-  cat > "${TEST_TMPDIR}/bin/mc" <<'EOF'
+  # Mock s5cmd (S3/MinIO client)
+  #   `ls` with no s3:// target (after --endpoint-url <url>) = auth-only probe,
+  #   controlled by S5_AUTH_EXIT.
+  #   `ls s3://bucket/` = bucket check, controlled by S5_BUCKET_LS_EXIT — a
+  #   non-zero value emits a generic error (not "no object found"), which the
+  #   script treats as BLOCK rather than an empty-but-accessible bucket.
+  cat > "${TEST_TMPDIR}/bin/s5cmd" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-cmd="${1:-}"
+target=""
+saw_ls=0
+prev=""
+for a in "$@"; do
+  [[ "$prev" == "ls" ]] && target="$a"
+  [[ "$a" == "ls" ]] && saw_ls=1
+  prev="$a"
+done
 
-case "$cmd" in
-  alias)
-    sub="${2:-}"
-    case "$sub" in
-      set) exit "${MC_ALIAS_SET_EXIT:-0}" ;;
-      rm)  exit 0 ;;
-    esac
-    ;;
-  ls)
-    exit "${MC_LS_EXIT:-0}"
-    ;;
-esac
+if [[ "$saw_ls" -eq 1 ]]; then
+  if [[ -z "$target" ]]; then
+    exit "${S5_AUTH_EXIT:-0}"
+  fi
+  if [[ "${S5_BUCKET_LS_EXIT:-0}" != "0" ]]; then
+    echo "ERROR \"ls ${target}\": AccessDenied" >&2
+    exit 1
+  fi
+  exit 0
+fi
 
 exit 0
 EOF
-  chmod +x "${TEST_TMPDIR}/bin/mc"
+  chmod +x "${TEST_TMPDIR}/bin/s5cmd"
 }
 
 # ---------------------------------------------------------------------------
@@ -240,8 +250,8 @@ EOF
   export MINIO_BUCKET_DEFAULT="db-backups"
   export MINIO_TCP_EXIT=0
   export MINIO_HTTP_EXIT=0
-  export MC_ALIAS_SET_EXIT=0
-  export MC_LS_EXIT=0
+  export S5_AUTH_EXIT=0
+  export S5_BUCKET_LS_EXIT=0
 
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --json
 
@@ -317,7 +327,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# MinIO credential checks (mc-based, from aqsh context)
+# MinIO credential checks (s5cmd-based, from aqsh context)
 # ---------------------------------------------------------------------------
 
 @test "minio_auth WARN when credentials are not supplied" {
@@ -329,8 +339,8 @@ EOF
   [ "$auth_status" = "WARN" ]
 }
 
-@test "minio_auth PASS when mc alias set succeeds" {
-  export MC_ALIAS_SET_EXIT=0
+@test "minio_auth PASS when s5cmd auth probe succeeds" {
+  export S5_AUTH_EXIT=0
 
   run "${SCRIPT}" --namespace db-1 --mdb mariadb \
     --minio-endpoint http://minio.minio.svc:9000 \
@@ -342,8 +352,8 @@ EOF
   [ "$auth_status" = "PASS" ]
 }
 
-@test "minio_auth BLOCK when mc alias set fails" {
-  export MC_ALIAS_SET_EXIT=1
+@test "minio_auth BLOCK when s5cmd auth probe fails" {
+  export S5_AUTH_EXIT=1
 
   run "${SCRIPT}" --namespace db-1 --mdb mariadb \
     --minio-endpoint http://minio.minio.svc:9000 \
@@ -359,8 +369,8 @@ EOF
 }
 
 @test "minio_bucket PASS when bucket is accessible" {
-  export MC_ALIAS_SET_EXIT=0
-  export MC_LS_EXIT=0
+  export S5_AUTH_EXIT=0
+  export S5_BUCKET_LS_EXIT=0
 
   run "${SCRIPT}" --namespace db-1 --mdb mariadb \
     --minio-endpoint http://minio.minio.svc:9000 \
@@ -374,8 +384,8 @@ EOF
 }
 
 @test "minio_bucket BLOCK when bucket is not accessible" {
-  export MC_ALIAS_SET_EXIT=0
-  export MC_LS_EXIT=1
+  export S5_AUTH_EXIT=0
+  export S5_BUCKET_LS_EXIT=1
 
   run "${SCRIPT}" --namespace db-1 --mdb mariadb \
     --minio-endpoint http://minio.minio.svc:9000 \
@@ -396,8 +406,8 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "PREFLIGHT_PASS when all checks succeed including MinIO" {
-  export MC_ALIAS_SET_EXIT=0
-  export MC_LS_EXIT=0
+  export S5_AUTH_EXIT=0
+  export S5_BUCKET_LS_EXIT=0
   export MINIO_TCP_EXIT=0
   export MINIO_HTTP_EXIT=0
 

@@ -9,7 +9,7 @@ set -euo pipefail
 #   1. Pod exec accessibility  — kubectl exec reaches the MariaDB container
 #   2. MinIO TCP reachability  — run inside the pod so the pod's network is tested
 #   3. MinIO HTTP health check — curl to /minio/health/live from inside the pod
-#   4. MinIO credential check  — mc alias set + ls run from the aqsh-tasks context
+#   4. MinIO credential check  — s5cmd ls run from the aqsh-tasks context
 #
 # MinIO options resolve task input -> deploy-time internal config
 # (MINIO_*_DEFAULT in /etc/aqsh/config/mariadb.env) -> skip with WARN if
@@ -30,6 +30,8 @@ fi
 source "${LIB_DIR}/logging.sh"
 # shellcheck source=../../../lib/response.sh
 source "${LIB_DIR}/response.sh"
+# shellcheck source=../../../lib/minio-client.sh
+source "${LIB_DIR}/minio-client.sh"  # s5 (s5cmd wrapper) — credentials set inline below, not via setup_minio_client (that reads deploy-time MINIO_ROOT_USER/PASSWORD, not this task's caller-supplied minio_access_key/minio_secret_key)
 
 # Deploy-time config: MINIO_ENDPOINT_DEFAULT / MINIO_ACCESS_KEY_DEFAULT /
 # MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT.
@@ -260,19 +262,25 @@ else
     fi
   fi
 
-  # Check 5: Credential verification from aqsh-tasks context via mc
+  # Check 5: Credential verification from aqsh-tasks context via s5cmd
   if [[ -z "$MINIO_ACCESS_KEY" || -z "$MINIO_SECRET_KEY" ]]; then
     emit_check minio_auth WARN MINIO_CREDS_NOT_PROVIDED \
       "No MinIO credentials supplied; skipping credential check"
   else
-    _mc_alias="preflight-$$"
-    if mc alias set "$_mc_alias" "$MINIO_ENDPOINT" \
-        "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" --api S3v4 >/dev/null 2>&1; then
+    # shellcheck disable=SC2034  # read by s5() in minio-client.sh
+    S5_ENDPOINT="$MINIO_ENDPOINT"
+    export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY"
+    export AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
+
+    # s5cmd is stateless — no mc-style alias step to test credentials without
+    # a specific target. `ls` with no path lists accessible buckets, the
+    # closest equivalent to mc's alias-set credential probe.
+    if s5 ls >/dev/null 2>&1; then
       emit_check minio_auth PASS MINIO_AUTH_OK \
         "MinIO credentials verified against ${MINIO_ENDPOINT}"
 
       if [[ -n "$MINIO_BUCKET" ]]; then
-        if mc ls "${_mc_alias}/${MINIO_BUCKET}" >/dev/null 2>&1; then
+        if _bucket_out="$(s5 ls "s3://${MINIO_BUCKET}/" 2>&1)" || grep -q "no object found" <<<"$_bucket_out"; then
           emit_check minio_bucket PASS MINIO_BUCKET_ACCESSIBLE \
             "Bucket '${MINIO_BUCKET}' accessible on ${MINIO_ENDPOINT}"
         else
@@ -280,10 +288,7 @@ else
             "Bucket '${MINIO_BUCKET}' not accessible on ${MINIO_ENDPOINT}"
         fi
       fi
-
-      mc alias rm "$_mc_alias" >/dev/null 2>&1 || true
     else
-      mc alias rm "$_mc_alias" >/dev/null 2>&1 || true
       emit_check minio_auth BLOCK MINIO_AUTH_FAILED \
         "MinIO credential verification failed against ${MINIO_ENDPOINT}"
     fi

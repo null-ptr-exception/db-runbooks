@@ -14,14 +14,15 @@ set -Eeuo pipefail
 # backup rather than the latest under a broader prefix.
 #
 # The task fails with a clear error if:
-#   - the backup_file path cannot be found in MinIO (checked via mc before
+#   - the backup_file path cannot be found in MinIO (checked via s5cmd before
 #     applying anything — avoids silent operator timeouts)
 #   - the target MariaDB CR already exists (never overwrites in place)
 #   - the restore does not reach Ready within wait_timeout
 #
 # Secure credential handling:
-#   minio_secret_key is used once for the backup existence check (mc alias set),
-#   then written to a temporary Kubernetes Secret and the env var is unset.
+#   minio_secret_key is used once for the backup existence check (s5cmd, via
+#   AWS_* env vars — s5cmd is stateless, unlike mc's alias step), then written
+#   to a temporary Kubernetes Secret and the env var is unset.
 #   The MariaDB CR references the Secret directly; the raw value never appears
 #   in logs or result JSON. The temporary Secret is deleted on exit — so
 #   wait_timeout must be non-zero: the operator needs the Secret to still
@@ -44,6 +45,8 @@ fi
 source "${LIB_DIR}/mariadb-task-common.sh"
 # shellcheck source=../../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
+# shellcheck source=../../../lib/minio-client.sh
+source "${LIB_DIR}/minio-client.sh"  # s5 (s5cmd wrapper) — credentials set inline below, not via setup_minio_client (that reads deploy-time MINIO_ROOT_USER/PASSWORD, not this task's caller-supplied minio_access_key/minio_secret_key)
 
 OP="migration/restore"
 
@@ -282,30 +285,31 @@ fi
 
 # Step 1: Verify backup exists in MinIO BEFORE creating any K8s resources.
 # Fail fast with a clear message rather than letting the operator stall.
-_MC_ALIAS="migration-restore-$$"
-if ! mc alias set "$_MC_ALIAS" "$MINIO_ENDPOINT" \
-    "$MINIO_ACCESS_KEY" "$MINIO_SECRET_KEY" --api S3v4 >/dev/null 2>&1; then
-  mc alias rm "$_MC_ALIAS" >/dev/null 2>&1 || true
-  mdbt_fail "$OP" \
-    "failed to authenticate against MinIO at ${MINIO_ENDPOINT} — check minio_access_key and minio_secret_key" \
-    "$(jq -n --arg ep "$MINIO_ENDPOINT" --arg bucket "$MINIO_BUCKET" \
-       '{endpoint: $ep, bucket: $bucket}')" 2
-fi
+# s5cmd is stateless (no mc-style alias step): credentials via AWS_* env vars,
+# endpoint via --endpoint-url. A single `ls` call distinguishes both failure
+# modes s5cmd can report — 'no object found' means the prefix genuinely isn't
+# there; anything else (auth/network/missing bucket) is a harder failure.
+# shellcheck disable=SC2034  # read by s5() in minio-client.sh
+S5_ENDPOINT="$MINIO_ENDPOINT"
+export AWS_ACCESS_KEY_ID="$MINIO_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$MINIO_SECRET_KEY"
 
-_BACKUP_EXISTS=false
-if mc ls "${_MC_ALIAS}/${MINIO_BUCKET}/${BACKUP_FILE}" 2>/dev/null | grep -q .; then
-  _BACKUP_EXISTS=true
-fi
-mc alias rm "$_MC_ALIAS" >/dev/null 2>&1 || true
-
-if [[ "$_BACKUP_EXISTS" != "true" ]]; then
-  mdbt_fail "$OP" \
-    "backup not found at s3://${MINIO_BUCKET}/${BACKUP_FILE} on ${MINIO_ENDPOINT} — verify backup_file path" \
-    "$(jq -n \
-       --arg ep "$MINIO_ENDPOINT" \
-       --arg bucket "$MINIO_BUCKET" \
-       --arg bf "$BACKUP_FILE" \
-       '{endpoint: $ep, bucket: $bucket, backupFile: $bf}')" 2
+_S3_BACKUP_PATH="s3://${MINIO_BUCKET}/${BACKUP_FILE}/"
+if ! _LS_OUT="$(s5 ls "$_S3_BACKUP_PATH" 2>&1)"; then
+  if grep -q "no object found" <<<"$_LS_OUT"; then
+    mdbt_fail "$OP" \
+      "backup not found at s3://${MINIO_BUCKET}/${BACKUP_FILE} on ${MINIO_ENDPOINT} — verify backup_file path" \
+      "$(jq -n \
+         --arg ep "$MINIO_ENDPOINT" \
+         --arg bucket "$MINIO_BUCKET" \
+         --arg bf "$BACKUP_FILE" \
+         '{endpoint: $ep, bucket: $bucket, backupFile: $bf}')" 2
+  else
+    mdbt_fail "$OP" \
+      "failed to verify backup at s3://${MINIO_BUCKET}/${BACKUP_FILE} on ${MINIO_ENDPOINT} — check minio_access_key and minio_secret_key" \
+      "$(jq -n --arg ep "$MINIO_ENDPOINT" --arg bucket "$MINIO_BUCKET" \
+         '{endpoint: $ep, bucket: $bucket}')" 2
+  fi
 fi
 
 # Step 2: Create temp K8s Secret with credentials; unset raw secret key.

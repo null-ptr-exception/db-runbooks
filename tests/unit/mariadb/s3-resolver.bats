@@ -72,7 +72,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 }
 
 @test "non-credential settings resolve from ConfigMap env and envFrom sources" {
-  MOCK_CONFIG='{"data":{"ENDPOINT":"https://config.example.invalid","S3_BUCKET":"config-bucket"}}'
+  MOCK_CONFIG='{"data":{"ENDPOINT":"https://config.example.invalid","S3_BUCKET":"config-bucket","S3_BACKUP_REGION":"config-region-1"}}'
   MOCK_CR='{"spec":{"env":[
     {"name":"S3_URL","valueFrom":{"configMapKeyRef":{"name":"storage-config","key":"ENDPOINT"}}}
   ],"envFrom":[{"configMapRef":{"name":"storage-config"}}]}}'
@@ -80,6 +80,14 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   mdbt_s3_workload_contract database
   [ "$(jq -r '.endpoint.value' <<<"$MDBT_S3_CONTRACT")" = "https://config.example.invalid" ]
   [ "$(jq -r '.bucket.value' <<<"$MDBT_S3_CONTRACT")" = "config-bucket" ]
+  [ "$(jq -r '.region.value' <<<"$MDBT_S3_CONTRACT")" = "config-region-1" ]
+}
+
+@test "workload region contract does not reuse the internal BACKUP_REGION name" {
+  MOCK_CR='{"spec":{"env":[{"name":"BACKUP_REGION","value":"internal-name"}]}}'
+
+  mdbt_s3_workload_contract database
+  [ "$(jq -r 'has("region")' <<<"$MDBT_S3_CONTRACT")" = "false" ]
 }
 
 @test "literal credentials fail with a redacted actionable error" {
@@ -102,20 +110,32 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   MOCK_SECRET_PRIMARY="$(jq -cn \
     --arg endpoint "$(b64 'https://object.example.invalid')" \
     --arg bucket "$(b64 'workload-bucket')" \
+    --arg region "$(b64 'workload-region-1')" \
     --arg access "$(b64 'private-a')" --arg secret "$(b64 'private-b')" \
-    '{data:{S3_URL:$endpoint,S3_BUCKET:$bucket,S3_ACCESS_KEY:$access,S3_ACCESS_SECRET:$secret}}')"
+    '{data:{S3_URL:$endpoint,S3_BUCKET:$bucket,S3_BACKUP_REGION:$region,S3_ACCESS_KEY:$access,S3_ACCESS_SECRET:$secret}}')"
   MOCK_CR='{"spec":{"envFrom":[{"secretRef":{"name":"storage-primary"}}]}}'
   MINIO_ENDPOINT='https://fallback.example.invalid'
   MINIO_BUCKET='fallback-bucket'
   BACKUP_BUCKET='advanced-bucket'
+  BACKUP_REGION='deploy-region-1'
+  _MDBT_CONFIG_LOADED_KEYS='BACKUP_REGION'
 
   mdbt_resolve_backup_location tenant-a database
   [ "$BACKUP_ENDPOINT" = 'https://object.example.invalid' ]
   [ "$BACKUP_BUCKET" = 'advanced-bucket' ]
+  [ "$BACKUP_REGION" = 'workload-region-1' ]
   [ "$BACKUP_ACCESS_SECRET" = 'storage-primary' ]
   [ "$BACKUP_ACCESS_KEY" = 'S3_ACCESS_KEY' ]
   [ "$BACKUP_SECRET_ACCESS_SECRET" = 'storage-primary' ]
   [ "$BACKUP_SECRET_KEY" = 'S3_ACCESS_SECRET' ]
+}
+
+@test "deploy-time BACKUP_REGION remains the fallback when workload region is absent" {
+  BACKUP_REGION='deploy-region-1'
+  _MDBT_CONFIG_LOADED_KEYS='BACKUP_REGION'
+
+  mdbt_resolve_backup_location tenant-a database
+  [ "$BACKUP_REGION" = 'deploy-region-1' ]
 }
 
 @test "missing envFrom keys fall through but an incomplete credential pair fails" {

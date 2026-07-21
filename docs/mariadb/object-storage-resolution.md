@@ -70,7 +70,7 @@ surface uses this stable set:
 | `S3_URL` | S3-compatible endpoint | value, Secret, or ConfigMap |
 | `S3_BUCKET` | bucket | value, Secret, or ConfigMap |
 | `S3_SUBFOLDER` | complete object prefix | value, Secret, or ConfigMap |
-| `BACKUP_REGION` | region | value, Secret, or ConfigMap |
+| `S3_BACKUP_REGION` | region | value, Secret, or ConfigMap |
 | `S3_ACCESS_KEY` | access-key credential | Secret reference only |
 | `S3_ACCESS_SECRET` | secret-key credential | Secret reference only |
 

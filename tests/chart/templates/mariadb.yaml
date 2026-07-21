@@ -96,7 +96,7 @@ metadata:
 stringData:
   S3_URL: {{ .Values.mariadb.objectStorage.endpoint | quote }}
   S3_BUCKET: {{ .Values.mariadb.objectStorage.bucket | quote }}
-  BACKUP_REGION: {{ .Values.mariadb.objectStorage.region | quote }}
+  S3_BACKUP_REGION: {{ .Values.mariadb.objectStorage.region | quote }}
   S3_SUBFOLDER: {{ required "mariadb.objectStorage.prefix is required when enabled" .Values.mariadb.objectStorage.prefix | quote }}
   S3_ACCESS_KEY: {{ .Values.mariadb.objectStorage.accessKey | quote }}
   S3_ACCESS_SECRET: {{ .Values.mariadb.objectStorage.secretKey | quote }}

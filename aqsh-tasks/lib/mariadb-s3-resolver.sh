@@ -207,7 +207,7 @@ _mdbt_s3_contract_from_container() {
   for pair in \
     'S3_URL:endpoint:false' \
     'S3_BUCKET:bucket:false' \
-    'BACKUP_REGION:region:false' \
+    'S3_BACKUP_REGION:region:false' \
     'S3_SUBFOLDER:prefix:false' \
     'S3_ACCESS_KEY:accessKey:true' \
     'S3_ACCESS_SECRET:secretKey:true'; do
@@ -292,7 +292,8 @@ _mdbt_s3_workload_value() {
 # Precedence per field: explicit BACKUP_* environment override, selected
 # workload contract, deploy-time config, compatibility default.
 mdbt_resolve_backup_location() {
-  local namespace="$1" mariadb workload="{}"
+  local namespace="$1" mariadb workload="{}" configured_region
+  configured_region="${BACKUP_REGION:-}"
   if [[ "$#" -ge 2 ]]; then mariadb="$2"; else mariadb="${MARIADB_NAME:-}"; fi
   local access_json secret_json had_fallback_refs=false
   if [[ -n "${BACKUP_ACCESS_SECRET:-}${BACKUP_ACCESS_KEY:-}${BACKUP_SECRET_ACCESS_SECRET:-}${BACKUP_SECRET_KEY:-}" ]]; then
@@ -319,7 +320,7 @@ mdbt_resolve_backup_location() {
   fi
   if [[ -z "${BACKUP_REGION:-}" ]] || _mdbt_s3_config_loaded BACKUP_REGION; then
     BACKUP_REGION="$(_mdbt_s3_workload_value region)"
-    BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
+    BACKUP_REGION="${BACKUP_REGION:-${configured_region:-us-east-1}}"
   fi
 
   access_json="$(jq -c '.accessKey // empty' <<<"$workload")"

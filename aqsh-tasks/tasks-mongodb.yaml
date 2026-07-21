@@ -1292,6 +1292,210 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Oplog gateway (see docs/mongodb/oplog.md). Oplog size/window is per-node
+  # state — replSetResizeOplog only resizes the node it runs against, so
+  # oplog/resize enumerates every current replica-set member itself rather
+  # than taking a target_pod. sts_name/credentials are deliberately NOT task
+  # inputs — same auto-detect tier as recovery/* (CLAUDE.md "Configuration
+  # Layers").
+  oplog/status:
+    script: mongodb/oplog/status.sh
+    description: "Read-only: oplog size/window across every current replica-set member"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  oplog/resize:
+    script: mongodb/oplog/resize.sh
+    description: "Resize the oplog on every current replica-set member (dry_run -> confirm)"
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_size_mb
+        env: TARGET_SIZE_MB
+        required: true
+        type: string
+        pattern: '^[1-9][0-9]*$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Ops gateway (see docs/mongodb/ops.md). currentOp/killOp are per-node
+  # views — target_pod (optional) pins both list/kill to the same member;
+  # omitted, both default to the elected PRIMARY. sts_name/credentials are
+  # deliberately NOT task inputs — same auto-detect tier as recovery/*
+  # (CLAUDE.md "Configuration Layers").
+  ops/list:
+    script: mongodb/ops/list.sh
+    description: "Read-only: currently active operations on a single node (default: primary)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+      - name: min_secs_running
+        env: MIN_SECS_RUNNING
+        required: false
+        type: string
+        default: "0"
+        pattern: '^[0-9]+$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  ops/kill:
+    script: mongodb/ops/kill.sh
+    description: "Kill a running operation by opid on a single node (dry_run -> confirm); opid must match the target_pod used for ops/list"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+      - name: opid
+        env: OPID
+        required: true
+        type: string
+        pattern: '^[0-9]+$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Profiler gateway (see docs/mongodb/profiler.md). The profiler level is
+  # per-node state — target_pod (optional) defaults to the elected PRIMARY.
+  # sts_name/credentials are deliberately NOT task inputs — same auto-detect
+  # tier as recovery/* (CLAUDE.md "Configuration Layers").
+  profiler/status:
+    script: mongodb/profiler/status.sh
+    description: "Read-only: query profiler level/threshold/sampleRate on a single node (default: primary)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  profiler/set:
+    script: mongodb/profiler/set.sh
+    description: "Set the query profiler level/threshold/sampleRate on a single node (dry_run -> confirm); level=2 profiles every operation"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+      - name: level
+        env: LEVEL
+        required: true
+        type: string
+        pattern: '^[0-2]$'
+      - name: slowms
+        env: SLOWMS
+        required: false
+        type: string
+        default: "100"
+        pattern: '^[0-9]+$'
+      - name: sample_rate
+        env: SAMPLE_RATE
+        required: false
+        type: string
+        default: "1"
+        pattern: '^(0(\.[0-9]+)?|1(\.0+)?)$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   # STS orphan-delete gateway (see docs/mongodb/sts-orphan-delete.md).
   # sts_name is deliberately NOT a task input — same auto-detect tier as
   # recovery/* (CLAUDE.md "Configuration Layers").

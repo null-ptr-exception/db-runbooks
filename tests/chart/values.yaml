@@ -60,6 +60,26 @@ mariadb:
 mariadbRbac:
   enabled: false
 
+# --- namespace-local MariaDB gateway fixture ---
+# The Envoy workload and Service are installed with the official Istio gateway
+# chart in the MariaDB namespace. These values render the matching Gateway CR,
+# TCP VirtualService, and an in-cluster client used by the E2E tests.
+databaseGateway:
+  enabled: false
+  name: database-gateway
+  hosts:
+    - "*.db.test"
+  ports:
+    readWrite: 3306
+    readOnly: 3307
+  destinations:
+    readWriteService: mariadb-primary
+    readOnlyService: mariadb-secondary
+    port: 3306
+  testClient:
+    enabled: false
+    image: mariadb:10.6
+
 # --- mongodb ---
 mongodb:
   enabled: false

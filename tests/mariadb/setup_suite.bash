@@ -163,6 +163,12 @@ EOF
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=900s
 
+  echo "Waiting for namespace-local database gateway..."
+  wait_deployment_rollout "$CTX_A" mariadb-1 database-gateway 180s
+
+  echo "Waiting for database gateway test client..."
+  wait_deployment_rollout "$CTX_A" mariadb-1 database-gateway-client 120s
+
   # Wait for deployments on cluster-b
   echo "Waiting for redis (cluster-b)..."
   wait_deployment_rollout "$CTX_B" "$NS" redis 120s

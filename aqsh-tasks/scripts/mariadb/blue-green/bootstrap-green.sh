@@ -63,7 +63,7 @@ if ! (
   bg_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "blue-green/bootstrap-green"
 ); then
   bg_fail "blue-green/bootstrap-green" "database configuration is unavailable" \
-    '{"stage":"bootstrap","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+    '{"stage":"bootstrap","completed":false}' 1 BACKUP_CONFIGURATION_UNAVAILABLE
 fi
 
 if ! _kubectl apply -f - >/dev/null 2>&1 <<EOF

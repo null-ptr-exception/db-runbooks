@@ -118,8 +118,10 @@ _root_password() {
 }
 
 _mariadb_names() {
-  kubectl --context "$CTX_A" -n mariadb-1 get mariadb \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+  local names
+  names="$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')" || return
+  printf '%s\n' "$names" | sed '/^$/d' | sort
 }
 
 # _sql <mariadb-cr> <sql> — run SQL as root on that instance's primary pod.
@@ -167,7 +169,7 @@ _submit() {
 
   # 3. Restore into a NEW instance from that backup.
   local before_restore
-  before_restore="$(_mariadb_names | sort)"
+  before_restore="$(_mariadb_names)"
   _submit "restore" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   local restore; restore="$(_task_result_data)"
   assert_equal "$(echo "$restore" | jq -c '.data | keys')" \
@@ -182,7 +184,7 @@ _submit() {
   # the newly provisioned CR through the test's privileged cluster fixture.
   RESTORE_TARGET="$(comm -13 \
     <(printf '%s\n' "$before_restore") \
-    <(_mariadb_names | sort))"
+    <(_mariadb_names))"
   export RESTORE_TARGET
   [[ "$RESTORE_TARGET" =~ ^mariadb-1-restore-[0-9]{14}$ ]]
 

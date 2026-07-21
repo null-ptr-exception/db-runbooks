@@ -69,7 +69,7 @@ case "$INTERNAL_STEP" in
     fi
     mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" 2>/dev/null \
       || bg_fail "$OP" "backup configuration is unavailable" \
-        '{"stage":"bootstrap","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+        '{"stage":"bootstrap","completed":false}' 1 BACKUP_CONFIGURATION_UNAVAILABLE
     if ! bg_local_step "$BG_DIR/bootstrap-green.sh" \
       "DB_NAMESPACE=$BG_NAMESPACE" "MARIADB_NAME=$GREEN_NAME" \
       "BLUE_NAME=$BLUE_NAME" "GREEN_IMAGE=$GREEN_IMAGE" \
@@ -122,7 +122,7 @@ BG_MDB="$BLUE_NAME"
 bg_init_target
 if ! mdbt_resolve_backup_location "$BG_NAMESPACE" "$BLUE_NAME" 2>/dev/null; then
   bg_fail "$OP" "backup configuration is unavailable" \
-    '{"stage":"backup","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+    '{"stage":"backup","completed":false}' 1 BACKUP_CONFIGURATION_UNAVAILABLE
 fi
 bg_require_confirm "$OP"
 

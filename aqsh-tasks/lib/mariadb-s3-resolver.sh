@@ -231,23 +231,36 @@ _mdbt_s3_contract_from_container() {
 # storage policy fails closed.
 mdbt_s3_workload_contract() {
   local mariadb="$1" include_credentials="${2:-true}"
-  local cr_json pods_json container candidate normalized baseline="" count=0 cr_found=false
+  local cr_json cr_error cr_stderr_tmp pods_json container candidate normalized baseline="" count=0 cr_found=false
   # Public error state is consumed by task scripts that source this library.
   # shellcheck disable=SC2034
   MDBT_S3_ERROR=""
   MDBT_S3_CONTRACT="{}"
 
-  if cr_json="$(_kubectl get mariadb "$mariadb" -o json 2>&1)"; then
+  cr_stderr_tmp="$(mktemp)" || {
+    _mdbt_s3_set_error "cannot read the selected MariaDB workload spec"
+    return 1
+  }
+  if cr_json="$(_kubectl get mariadb "$mariadb" -o json 2>"$cr_stderr_tmp")"; then
+    rm -f "$cr_stderr_tmp"
     cr_found=true
-    container="$(jq -c '.spec | {env:(.env // []),envFrom:(.envFrom // [])}' <<<"$cr_json")"
+    if ! container="$(jq -c '.spec | {env:(.env // []),envFrom:(.envFrom // [])}' <<<"$cr_json" 2>/dev/null)"; then
+      _mdbt_s3_set_error "cannot read the selected MariaDB workload spec"
+      return 1
+    fi
     _mdbt_s3_contract_from_container "$container" "$include_credentials" || return 1
     candidate="$MDBT_S3_CONTRACT"
     normalized="$(jq -Sc . <<<"$candidate")"
     baseline="$normalized"
     count=1
-  elif [[ "$cr_json" != *NotFound* && "$cr_json" != *"not found"* ]]; then
-    _mdbt_s3_set_error "cannot read the selected MariaDB workload spec"
-    return 1
+  else
+    cr_error="$(<"$cr_stderr_tmp")"
+    rm -f "$cr_stderr_tmp"
+    if [[ "$cr_json" != *NotFound* && "$cr_json" != *"not found"* &&
+          "$cr_error" != *NotFound* && "$cr_error" != *"not found"* ]]; then
+      _mdbt_s3_set_error "cannot read the selected MariaDB workload spec"
+      return 1
+    fi
   fi
 
   # Leave operation-specific NotFound reporting to the caller. There is no

@@ -65,6 +65,15 @@ bg_require_confirm() { :; }
 bg_validate_dns_label() { :; }
 bg_validate_image() { :; }
 bg_validate_url() { :; }
+bg_validate_storage_size() { :; }
+bg_validate_uint() { :; }
+bg_validate_endpoint() { :; }
+bg_validate_s3_bucket() {
+  [[ "${MOCK_INVALID_BACKUP_CONFIG:-0}" != "1" ]] || exit 2
+}
+bg_validate_s3_prefix() { :; }
+bg_validate_region() { :; }
+bg_validate_secret_key() { :; }
 bg_create_physical_backup() {
   BG_BACKUP_DATA='{"bucket":"private-bucket","manifest":"private-manifest","sourceStatus":{"conditions":["private-condition"]}}'
 }
@@ -77,7 +86,9 @@ response_ok() {
     '{status:"success",code:0,operation:$op,message:$message,data:$data}'
 }
 bg_fail() {
-  jq -nc --arg op "$1" --arg message "$2" --argjson data "${3:-{}}" \
+  local data="${3:-}"
+  [[ -n "$data" ]] || data='{}'
+  jq -nc --arg op "$1" --arg message "$2" --argjson data "$data" \
     --argjson code "${4:-1}" --arg reason "${5:-OPERATION_FAILED}" \
     '{status:"error",code:$code,operation:$op,message:$message,data:$data,reason:$reason}'
   exit "${4:-1}"
@@ -182,6 +193,27 @@ FAKE_LIB
   [[ "$output" != *"private-task-id"* ]]
   [[ "$output" != *"private-http-body"* ]]
   [[ "$output" != *"private-token"* ]]
+}
+
+@test "bootstrap configuration failures are operation errors with intact public data" {
+  local fake_lib
+  fake_lib="$(write_create_fake_lib)"
+
+  run env \
+    "LIB_DIR=${fake_lib}" \
+    "DB_NAMESPACE=mariadb-1" \
+    "MARIADB_NAME=mariadb-green" \
+    "BLUE_NAME=mariadb-blue" \
+    "GREEN_IMAGE=mariadb:11.4" \
+    "CONFIRM=true" \
+    "MOCK_INVALID_BACKUP_CONFIG=1" \
+    bash "${REPO_ROOT}/aqsh-tasks/scripts/mariadb/blue-green/bootstrap-green.sh"
+
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.code' <<<"$output")" = "1" ]
+  [ "$(jq -r '.reason' <<<"$output")" = "BACKUP_CONFIGURATION_UNAVAILABLE" ]
+  [ "$(jq -r '.data.stage' <<<"$output")" = "bootstrap" ]
+  [ "$(jq -r '.data.completed' <<<"$output")" = "false" ]
 }
 
 @test "create returns only high-level stage results" {

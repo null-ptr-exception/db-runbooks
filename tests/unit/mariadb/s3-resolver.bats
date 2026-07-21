@@ -8,6 +8,7 @@ setup() {
   unset BACKUP_ENDPOINT BACKUP_BUCKET BACKUP_PREFIX BACKUP_REGION
   unset BACKUP_ACCESS_SECRET BACKUP_ACCESS_KEY BACKUP_SECRET_ACCESS_SECRET BACKUP_SECRET_KEY
   unset MINIO_ENDPOINT MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD _MDBT_CONFIG_LOADED_KEYS
+  unset MOCK_CR_STDERR MOCK_CR_STATUS
   MOCK_CR='{"spec":{"env":[],"envFrom":[]}}'
   MOCK_PODS='{"items":[]}'
   MOCK_SECRET_PRIMARY='{"data":{}}'
@@ -17,7 +18,11 @@ setup() {
 
 _kubectl() {
   case "$1:$2" in
-    get:mariadb) printf '%s' "$MOCK_CR" ;;
+    get:mariadb)
+      [[ -z "${MOCK_CR_STDERR:-}" ]] || printf '%s\n' "$MOCK_CR_STDERR" >&2
+      printf '%s' "$MOCK_CR"
+      return "${MOCK_CR_STATUS:-0}"
+      ;;
     get:pods) printf '%s' "$MOCK_PODS" ;;
     get:secret)
       case "$3" in
@@ -81,6 +86,37 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   [ "$(jq -r '.endpoint.value' <<<"$MDBT_S3_CONTRACT")" = "https://config.example.invalid" ]
   [ "$(jq -r '.bucket.value' <<<"$MDBT_S3_CONTRACT")" = "config-bucket" ]
   [ "$(jq -r '.region.value' <<<"$MDBT_S3_CONTRACT")" = "config-region-1" ]
+}
+
+@test "exit-zero kubectl warnings stay out of MariaDB JSON" {
+  MOCK_CR='{"spec":{"env":[{"name":"S3_BUCKET","value":"warning-safe-bucket"}]}}'
+  MOCK_CR_STDERR='Warning: server-side deprecation notice'
+
+  mdbt_s3_workload_contract database
+  [ "$(jq -r '.bucket.value' <<<"$MDBT_S3_CONTRACT")" = "warning-safe-bucket" ]
+  [[ "$MDBT_S3_CONTRACT" != *"deprecation"* ]]
+}
+
+@test "MariaDB lookup failures stay generic while NotFound remains an empty contract" {
+  local private_error='private transport detail must not escape'
+  MOCK_CR=''
+  MOCK_CR_STATUS=1
+  MOCK_CR_STDERR="$private_error"
+
+  ! mdbt_s3_workload_contract database
+  [ "$MDBT_S3_ERROR" = "cannot read the selected MariaDB workload spec" ]
+  [[ "$MDBT_S3_ERROR" != *"$private_error"* ]]
+
+  MOCK_CR_STDERR='Error from server (NotFound): mariadbs.k8s.mariadb.com "database" not found'
+  mdbt_s3_workload_contract database
+  [ "$MDBT_S3_CONTRACT" = '{}' ]
+  [ -z "$MDBT_S3_ERROR" ]
+
+  MOCK_CR='Error from server (NotFound): mariadbs.k8s.mariadb.com "database" not found'
+  MOCK_CR_STDERR=''
+  mdbt_s3_workload_contract database
+  [ "$MDBT_S3_CONTRACT" = '{}' ]
+  [ -z "$MDBT_S3_ERROR" ]
 }
 
 @test "workload region contract does not reuse the internal BACKUP_REGION name" {

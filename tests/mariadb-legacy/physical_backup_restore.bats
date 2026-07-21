@@ -189,13 +189,17 @@ sql() {
   object="tenant-a/database/${backup}.xb"
   # The legacy direct-client path must honor the workload S3_SUBFOLDER even
   # though the legacy operator-managed logical Backup CRD cannot carry prefix.
-  [[ "$object" == tenant-a/database/*.xb ]]
   run kubectl --context "$CTX_B" -n minio run phase23-s5cmd-ls \
     --image=peakcom/s5cmd:v2.3.0 --restart=Never --rm -i \
     --env=AWS_ACCESS_KEY_ID=minioadmin --env=AWS_SECRET_ACCESS_KEY=minioadmin-changeme-prod \
     --command -- /s5cmd --json --endpoint-url http://minio:9000 ls "s3://db-backups/${object}"
   assert_success
-  assert_output --partial '"size"'
+  run jq -Rse --arg key "s3://db-backups/${object}" '
+    split("\n")
+    | map(fromjson? | select(.type == "file" and .key == $key and (.size // 0) > 0))
+    | length == 1
+  ' <<<"$output"
+  assert_success
 
   # The backup completed before this mutation, so a successful restore must not
   # contain the later row.

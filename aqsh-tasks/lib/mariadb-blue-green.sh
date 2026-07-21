@@ -385,7 +385,7 @@ bg_create_physical_backup() {
     bg_validate_enum "backup_compression" "$BACKUP_COMPRESSION" "$op" bzip2 gzip none
   ); then
     bg_fail "$op" "backup configuration is unavailable" \
-      '{"stage":"backup","completed":false}' 2 BACKUP_CONFIGURATION_UNAVAILABLE
+      '{"stage":"backup","completed":false}' 1 BACKUP_CONFIGURATION_UNAVAILABLE
   fi
 
   local source_json ready_status

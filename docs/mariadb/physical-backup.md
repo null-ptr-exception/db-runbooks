@@ -72,5 +72,5 @@ references, rendered manifests, or platform resource details.
 
 | Backup type | Intended restore task |
 |---|---|
-| Logical | Logical restore |
+| Logical | `logical-restore` |
 | Physical | `restore` |

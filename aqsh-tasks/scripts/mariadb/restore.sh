@@ -95,7 +95,7 @@ restore_unhandled_error() {
   trap - ERR
   mdbt_write_result "$(mdbt_error_response "${OP:-restore}" "restore failed" \
     "$(jq -n --arg namespace "${NAMESPACE:-}" '{namespace: $namespace, restored: false, state: "FAILED"}')" \
-    1 "INTERNAL_ERROR")" || true
+    1 "INTERNAL_ERROR")"
   exit 1
 }
 trap restore_unhandled_error ERR

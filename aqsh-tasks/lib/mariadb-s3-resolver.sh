@@ -203,7 +203,8 @@ _mdbt_s3_descriptor_from_container() {
 }
 
 _mdbt_s3_contract_from_container() {
-  local container="$1" pair env_name field credential descriptor contract="{}"
+  local container="$1" include_credentials="${2:-true}"
+  local pair env_name field credential descriptor contract="{}"
   for pair in \
     'S3_URL:endpoint:false' \
     'S3_BUCKET:bucket:false' \
@@ -212,6 +213,9 @@ _mdbt_s3_contract_from_container() {
     'S3_ACCESS_KEY:accessKey:true' \
     'S3_ACCESS_SECRET:secretKey:true'; do
     IFS=: read -r env_name field credential <<<"$pair"
+    if [[ "$credential" == "true" && "$include_credentials" != "true" ]]; then
+      continue
+    fi
     _mdbt_s3_descriptor_from_container "$container" "$env_name" "$credential" || return 1
     descriptor="$MDBT_S3_DESCRIPTOR"
     if [[ -n "$descriptor" ]]; then
@@ -226,7 +230,8 @@ _mdbt_s3_contract_from_container() {
 # Every non-empty candidate must agree; an in-progress rollout with divergent
 # storage policy fails closed.
 mdbt_s3_workload_contract() {
-  local mariadb="$1" cr_json pods_json container candidate normalized baseline="" count=0 cr_found=false
+  local mariadb="$1" include_credentials="${2:-true}"
+  local cr_json pods_json container candidate normalized baseline="" count=0 cr_found=false
   # Public error state is consumed by task scripts that source this library.
   # shellcheck disable=SC2034
   MDBT_S3_ERROR=""
@@ -235,7 +240,7 @@ mdbt_s3_workload_contract() {
   if cr_json="$(_kubectl get mariadb "$mariadb" -o json 2>&1)"; then
     cr_found=true
     container="$(jq -c '.spec | {env:(.env // []),envFrom:(.envFrom // [])}' <<<"$cr_json")"
-    _mdbt_s3_contract_from_container "$container" || return 1
+    _mdbt_s3_contract_from_container "$container" "$include_credentials" || return 1
     candidate="$MDBT_S3_CONTRACT"
     normalized="$(jq -Sc . <<<"$candidate")"
     baseline="$normalized"
@@ -258,7 +263,7 @@ mdbt_s3_workload_contract() {
   fi
   while IFS= read -r container; do
     [[ -n "$container" ]] || continue
-    _mdbt_s3_contract_from_container "$container" || return 1
+    _mdbt_s3_contract_from_container "$container" "$include_credentials" || return 1
     candidate="$MDBT_S3_CONTRACT"
     normalized="$(jq -Sc . <<<"$candidate")"
     if [[ -n "$baseline" && "$normalized" != "$baseline" ]]; then
@@ -283,24 +288,47 @@ _mdbt_s3_config_loaded() {
   grep -Fxq "$key" <<<"${_MDBT_CONFIG_LOADED_KEYS:-}"
 }
 
+_mdbt_s3_has_explicit_credential_refs() {
+  local key
+  for key in \
+    BACKUP_ACCESS_SECRET BACKUP_ACCESS_KEY \
+    BACKUP_SECRET_ACCESS_SECRET BACKUP_SECRET_KEY; do
+    if [[ -n "${!key:-}" ]] && ! _mdbt_s3_config_loaded "$key"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 _mdbt_s3_workload_value() {
   local field="$1"
   jq -r --arg field "$field" '.[$field].value // empty' <<<"$MDBT_S3_CONTRACT"
 }
 
 # mdbt_resolve_backup_location <namespace> [mariadb]
-# Precedence per field: explicit BACKUP_* environment override, selected
-# workload contract, deploy-time config, compatibility default.
+# Precedence for location fields: explicit BACKUP_* environment override,
+# selected workload contract, deploy-time config, compatibility default.
+# Credential references use the same tiers but resolve as one bundle so a
+# higher-precedence pair is never combined with a lower-precedence pair.
 mdbt_resolve_backup_location() {
-  local namespace="$1" mariadb workload="{}" configured_region
+  local namespace="$1" mariadb workload="{}" configured_region key
   configured_region="${BACKUP_REGION:-}"
   if [[ "$#" -ge 2 ]]; then mariadb="$2"; else mariadb="${MARIADB_NAME:-}"; fi
-  local access_json secret_json had_fallback_refs=false
+  local access_json secret_json had_fallback_refs=false explicit_credential_refs=false
   if [[ -n "${BACKUP_ACCESS_SECRET:-}${BACKUP_ACCESS_KEY:-}${BACKUP_SECRET_ACCESS_SECRET:-}${BACKUP_SECRET_KEY:-}" ]]; then
     had_fallback_refs=true
   fi
+  if _mdbt_s3_has_explicit_credential_refs; then
+    explicit_credential_refs=true
+  fi
   if [[ -n "$mariadb" ]]; then
-    mdbt_s3_workload_contract "$mariadb" || return 1
+    # A higher-precedence explicit credential bundle must not depend on
+    # resolving or validating lower-tier workload credential references.
+    if [[ "$explicit_credential_refs" == "true" ]]; then
+      mdbt_s3_workload_contract "$mariadb" false || return 1
+    else
+      mdbt_s3_workload_contract "$mariadb" || return 1
+    fi
     workload="$MDBT_S3_CONTRACT"
   else
     MDBT_S3_CONTRACT="{}"
@@ -325,7 +353,24 @@ mdbt_resolve_backup_location() {
 
   access_json="$(jq -c '.accessKey // empty' <<<"$workload")"
   secret_json="$(jq -c '.secretKey // empty' <<<"$workload")"
-  if [[ -n "$access_json" || -n "$secret_json" ]]; then
+  if [[ "$explicit_credential_refs" == "true" ]]; then
+    # Credential references are one atomic policy. If the platform process
+    # supplies any explicit reference field, preserve that set instead of
+    # combining it with lower-precedence workload or deploy-time references.
+    # The historical three-field form shares one Secret name for both keys.
+    for key in \
+      BACKUP_ACCESS_SECRET BACKUP_ACCESS_KEY \
+      BACKUP_SECRET_ACCESS_SECRET BACKUP_SECRET_KEY; do
+      if _mdbt_s3_config_loaded "$key"; then
+        printf -v "$key" '%s' ''
+      fi
+    done
+    BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-minio}"
+    BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-access-key-id}"
+    BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-${BACKUP_ACCESS_SECRET}}"
+    BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-secret-access-key}"
+    MDBT_S3_CREDENTIAL_SOURCE="reference-override"
+  elif [[ -n "$access_json" || -n "$secret_json" ]]; then
     if [[ -z "$access_json" || -z "$secret_json" ]]; then
       _mdbt_s3_set_error "selected MariaDB workload must define both S3 credential references"
       return 1

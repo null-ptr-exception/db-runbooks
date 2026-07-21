@@ -130,6 +130,104 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   [ "$BACKUP_SECRET_KEY" = 'S3_ACCESS_SECRET' ]
 }
 
+@test "explicit credential references win as one policy over workload credentials" {
+  MOCK_SECRET_PRIMARY="$(jq -cn \
+    --arg access "$(b64 'workload-access')" --arg secret "$(b64 'workload-secret')" \
+    '{data:{access:$access,secret:$secret}}')"
+  MOCK_CR='{"spec":{"env":[
+    {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"access"}}},
+    {"name":"S3_ACCESS_SECRET","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"secret"}}}
+  ]}}'
+  BACKUP_ACCESS_SECRET='operator-credentials'
+  BACKUP_ACCESS_KEY='operator-access'
+  BACKUP_SECRET_KEY='operator-secret'
+
+  mdbt_resolve_backup_location tenant-a database
+  [ "$BACKUP_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_ACCESS_KEY" = 'operator-access' ]
+  [ "$BACKUP_SECRET_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_SECRET_KEY" = 'operator-secret' ]
+  [ "$MDBT_S3_CREDENTIAL_SOURCE" = 'reference-override' ]
+}
+
+@test "explicit credential bundle does not inherit a deploy-time fourth field" {
+  MOCK_SECRET_PRIMARY="$(jq -cn \
+    --arg access "$(b64 'workload-access')" --arg secret "$(b64 'workload-secret')" \
+    '{data:{access:$access,secret:$secret}}')"
+  MOCK_CR='{"spec":{"env":[
+    {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"access"}}},
+    {"name":"S3_ACCESS_SECRET","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"secret"}}}
+  ]}}'
+  BACKUP_ACCESS_SECRET='operator-credentials'
+  BACKUP_ACCESS_KEY='operator-access'
+  BACKUP_SECRET_ACCESS_SECRET='deploy-credentials'
+  BACKUP_SECRET_KEY='operator-secret'
+  _MDBT_CONFIG_LOADED_KEYS='BACKUP_SECRET_ACCESS_SECRET'
+
+  mdbt_resolve_backup_location tenant-a database
+  [ "$BACKUP_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_ACCESS_KEY" = 'operator-access' ]
+  [ "$BACKUP_SECRET_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_SECRET_KEY" = 'operator-secret' ]
+  [ "$MDBT_S3_CREDENTIAL_SOURCE" = 'reference-override' ]
+}
+
+@test "explicit credential bundle does not depend on invalid workload references" {
+  MOCK_CR='{"spec":{"env":[
+    {"name":"S3_URL","value":"https://object.example.invalid"},
+    {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"missing-workload-secret","key":"access"}}},
+    {"name":"S3_ACCESS_SECRET","valueFrom":{"secretKeyRef":{"name":"missing-workload-secret","key":"secret"}}}
+  ]}}'
+  BACKUP_ACCESS_SECRET='operator-credentials'
+  BACKUP_ACCESS_KEY='operator-access'
+  BACKUP_SECRET_ACCESS_SECRET='operator-credentials'
+  BACKUP_SECRET_KEY='operator-secret'
+
+  mdbt_resolve_backup_location tenant-a database
+  [ "$BACKUP_ENDPOINT" = 'https://object.example.invalid' ]
+  [ "$BACKUP_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_ACCESS_KEY" = 'operator-access' ]
+  [ "$BACKUP_SECRET_ACCESS_SECRET" = 'operator-credentials' ]
+  [ "$BACKUP_SECRET_KEY" = 'operator-secret' ]
+  [ "$MDBT_S3_CREDENTIAL_SOURCE" = 'reference-override' ]
+}
+
+@test "explicit credential bundle still fails closed on workload location conflict" {
+  MOCK_CR='{"spec":{"env":[{"name":"S3_BUCKET","value":"one-bucket"}]}}'
+  MOCK_PODS='{"items":[{"spec":{"containers":[{"name":"mariadb","env":[{"name":"S3_BUCKET","value":"other-bucket"}]}]}}]}'
+  BACKUP_ACCESS_SECRET='operator-credentials'
+  BACKUP_ACCESS_KEY='operator-access'
+  BACKUP_SECRET_ACCESS_SECRET='operator-credentials'
+  BACKUP_SECRET_KEY='operator-secret'
+
+  ! mdbt_resolve_backup_location tenant-a database
+  [[ "$MDBT_S3_ERROR" == *"conflicting"* ]]
+  [[ "$MDBT_S3_ERROR" != *"one-bucket"* ]]
+  [[ "$MDBT_S3_ERROR" != *"other-bucket"* ]]
+}
+
+@test "workload credential references override deploy-time reference fallback" {
+  MOCK_SECRET_PRIMARY="$(jq -cn \
+    --arg access "$(b64 'workload-access')" --arg secret "$(b64 'workload-secret')" \
+    '{data:{access:$access,secret:$secret}}')"
+  MOCK_CR='{"spec":{"env":[
+    {"name":"S3_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"access"}}},
+    {"name":"S3_ACCESS_SECRET","valueFrom":{"secretKeyRef":{"name":"storage-primary","key":"secret"}}}
+  ]}}'
+  BACKUP_ACCESS_SECRET='deploy-credentials'
+  BACKUP_ACCESS_KEY='deploy-access'
+  BACKUP_SECRET_ACCESS_SECRET='deploy-credentials'
+  BACKUP_SECRET_KEY='deploy-secret'
+  _MDBT_CONFIG_LOADED_KEYS=$'BACKUP_ACCESS_SECRET\nBACKUP_ACCESS_KEY\nBACKUP_SECRET_ACCESS_SECRET\nBACKUP_SECRET_KEY'
+
+  mdbt_resolve_backup_location tenant-a database
+  [ "$BACKUP_ACCESS_SECRET" = 'storage-primary' ]
+  [ "$BACKUP_ACCESS_KEY" = 'access' ]
+  [ "$BACKUP_SECRET_ACCESS_SECRET" = 'storage-primary' ]
+  [ "$BACKUP_SECRET_KEY" = 'secret' ]
+  [ "$MDBT_S3_CREDENTIAL_SOURCE" = 'workload' ]
+}
+
 @test "deploy-time BACKUP_REGION remains the fallback when workload region is absent" {
   BACKUP_REGION='deploy-region-1'
   _MDBT_CONFIG_LOADED_KEYS='BACKUP_REGION'

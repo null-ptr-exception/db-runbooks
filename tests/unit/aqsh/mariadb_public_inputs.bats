@@ -45,4 +45,8 @@ task_inputs() {
   run task_inputs restore
   [ "$status" -eq 0 ]
   [ "$output" = $'namespace\ntarget_time\ndry_run\nwait_timeout\nconfirm' ]
+
+  run task_inputs logical-restore
+  [ "$status" -eq 0 ]
+  [ "$output" = $'namespace\nbackup\ndry_run\nwait_timeout\nconfirm' ]
 }

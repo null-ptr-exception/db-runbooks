@@ -808,7 +808,7 @@ tasks:
         default: "false"
   logical-restore:
     script: mariadb/logical-restore.sh
-    description: "Recreate a namespace's MariaDB from a logical (mariadb-dump) Backup CR into a NEW instance via bootstrapFrom.backupRef — the logical counterpart of restore; works on both operator generations. Version, storage, name, and source Backup are resolved internally"
+    description: "Restore the database identified by namespace from a logical backup into a new database instance"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -822,6 +822,7 @@ tasks:
         env: BACKUP_NAME
         required: false
         type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - name: dry_run
         env: DRY_RUN
         required: false

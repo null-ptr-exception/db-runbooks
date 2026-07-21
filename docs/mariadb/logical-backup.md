@@ -32,6 +32,36 @@ The only required input is `namespace`.
 The compatibility `backup` task accepts only `namespace`; it exposes the same
 sanitized storage boundary and starts the backup immediately.
 
+## Logical restore
+
+`logical-restore` provisions a new database from a logical backup. Its public
+inputs are limited to caller decisions:
+
+| Input | Required | Default | Notes |
+|-------|:--:|---------|-------|
+| `namespace` | ✓ | — | Database namespace whose logical backup will be restored. |
+| `backup` | | latest | Logical backup name. When omitted, the platform selects the latest available backup when applying the restore. |
+| `dry_run` | | `true` | Return a sanitized plan. No manifest or platform resource name is returned. |
+| `wait_timeout` | | `10m` | Completion wait. `0` returns after the restore request is accepted. |
+| `confirm` | | `false` | Must be `true` when `dry_run=false`. |
+
+The public result is limited to `namespace`, `contentType`, `state`, `dryRun`,
+`provisioned`, and `restored`. The selected backup and generated database
+resource stay internal. State and progress flags have the following meanings:
+
+| Outcome | `state` | `provisioned` | `restored` | `dryRun` |
+|---------|---------|:-------------:|:----------:|:--------:|
+| Sanitized plan | `PLANNED` | `false` | `false` | `true` |
+| Request accepted without waiting | `REQUESTED` | `true` | `false` | `false` |
+| Wait elapsed while restore is still running | `PENDING` | `true` | `false` | `false` |
+| Restore completed | `COMPLETED` | `true` | `true` | `false` |
+
+Errors use the stable top-level `reason` contract. When progress data is
+returned, it uses only this sanitized shape; invalid public inputs may identify
+the caller-provided field. Neither success, dry-run, nor error responses expose
+a rendered manifest, generated target, internal source or image, credential or
+Secret reference, operator/Kubernetes detail, or raw diagnostic output.
+
 ## Examples
 
 Preview the operation:

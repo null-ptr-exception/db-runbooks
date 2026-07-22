@@ -110,6 +110,13 @@ mismatch (`PLAN_STALE`). Consequences, identical to `reconfig/apply`'s CAS
 - Switching `mode` between plan and apply also invalidates it — an
   `add_only` plan cannot be applied as a clobbering upsert.
 
+`apply`'s own live-state recompute happens once, up front; the patch that
+follows carries that same `resourceVersion` in `metadata.resourceVersion`,
+so the API server re-checks and rejects (409 Conflict) any edit that lands
+in the narrow window between the recompute and the write itself — the same
+`PLAN_STALE` outcome, enforced atomically by the write rather than only by
+the earlier in-script check.
+
 ### Merge-only writes
 
 `apply` only touches the keys present in the payload; existing keys stay

@@ -420,24 +420,38 @@ secrets_diff() {
 }
 
 # ---------------------------------------------------------------------------
-# secrets_write <namespace> <secret_name> <canonical_payload> <exists:true|false>
+# secrets_write <namespace> <secret_name> <canonical_payload> <exists:true|false> <resource_version>
 # Values never touch argv or logs: create ships a full manifest on stdin
 # (kubectl create -f -), update ships a strategic-merge data patch via
 # --patch-file /dev/stdin (kubectl patch -p would land the base64 values in
 # /proc/<pid>/cmdline). Merge-only: keys absent from the payload are left as
 # they are. Prints "created" or "patched".
+#
+# The patch body carries metadata.resourceVersion (the value the caller's
+# plan_hash was computed against) so the API server enforces the same
+# freshness precondition atomically as part of the write itself — closing
+# the gap between apply.sh's own live_hash recompute and this call, where an
+# external edit could otherwise land unnoticed. A server-side rejection of
+# that precondition (409 Conflict, "the object has been modified") is
+# reported as return code 2, distinct from other failures (1), so the caller
+# can map it to PLAN_STALE instead of a generic write failure.
 # ---------------------------------------------------------------------------
 secrets_write() {
-  local namespace="${1:?}" secret_name="${2:?}" canonical="${3:?}" exists="${4:?}"
+  local namespace="${1:?}" secret_name="${2:?}" canonical="${3:?}" exists="${4:?}" resource_version="${5:?}"
   local data_b64 out rc
 
   data_b64=$(printf '%s' "$canonical" | jq -c '.keys | map_values(@base64)')
 
   if [[ "$exists" == "true" ]]; then
-    log_debug "secrets" "patching secret ${secret_name} (merge, $(printf '%s' "$data_b64" | jq 'length') key(s))"
-    out=$(printf '%s' "$data_b64" | jq -c '{data: .}' \
+    log_debug "secrets" "patching secret ${secret_name} (merge, $(printf '%s' "$data_b64" | jq 'length') key(s), resourceVersion=${resource_version})"
+    out=$(jq -nc --argjson data "$data_b64" --arg rv "$resource_version" \
+        '{metadata: {resourceVersion: $rv}, data: $data}' \
       | _kubectl patch secret "$secret_name" --type merge --patch-file /dev/stdin 2>&1) && rc=0 || rc=$?
     if (( rc != 0 )); then
+      if printf '%s' "$out" | grep -qi 'conflict\|has been modified'; then
+        log_error "secrets" "kubectl patch secret ${secret_name} rejected stale resourceVersion=${resource_version}: ${out}"
+        return 2
+      fi
       log_error "secrets" "kubectl patch secret ${secret_name} failed: ${out}"
       return 1
     fi

@@ -69,9 +69,16 @@ if [[ "$(printf '%s' "$diff" | jq -r '.summary.create + .summary.update')" == "0
   log_info "secrets-apply" "nothing to write (all keys already match or are skipped)"
 else
   write_canonical=$(secrets_filter_canonical "$MODE" "$SECRETS_CANONICAL" "$diff")
-  action=$(secrets_write "$DB_NAMESPACE" "$SECRET_NAME" "$write_canonical" "$SECRETS_EXISTS") \
-    || secrets_fail "APPLY_FAILED" "kubectl write failed (see task logs)" \
-         "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
+  action=$(secrets_write "$DB_NAMESPACE" "$SECRET_NAME" "$write_canonical" "$SECRETS_EXISTS" "$resource_version") \
+    && write_rc=0 || write_rc=$?
+  if (( write_rc == 2 )); then
+    secrets_fail "PLAN_STALE" \
+      "secret was modified concurrently between plan validation and write — re-run plan and retry with the new plan_hash" \
+      "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
+  elif (( write_rc != 0 )); then
+    secrets_fail "APPLY_FAILED" "kubectl write failed (see task logs)" \
+      "$(jq -nc --arg name "$SECRET_NAME" '{secret_name: $name}')"
+  fi
 fi
 
 secrets_write_result "$(jq -nc \

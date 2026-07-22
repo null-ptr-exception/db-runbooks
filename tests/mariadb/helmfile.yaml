@@ -40,6 +40,10 @@ releases:
           namespace: mariadb-1
           # Replicated so the switch-primary e2e can promote a replica.
           replicas: 3
+          objectStorage:
+            enabled: true
+            secretName: mariadb-storage-primary
+            prefix: tenant-a/database
         databaseGateway:
           enabled: true
           testClient:
@@ -82,6 +86,24 @@ releases:
             cpu: 200m
             memory: 128Mi
 
+  # A second database with an independent workload contract proves one AQSH
+  # deployment can select different per-database object prefixes/references.
+  - name: mariadb-2
+    chart: ../chart
+    namespace: mariadb-2
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    values:
+      - mariadb:
+          enabled: true
+          namespace: mariadb-2
+          objectStorage:
+            enabled: true
+            secretName: mariadb-storage-secondary
+            endpoint: http://minio-secondary.kind-b.test:30080
+            bucket: db-backups-secondary
+            prefix: tenant-b/database
+
   # cluster-b: MinIO for backup tests
   - name: minio
     chart: ../chart
@@ -96,6 +118,10 @@ releases:
           virtualServices:
             - name: minio
               host: "minio.kind-b.test"
+              backendHost: minio.minio.svc.cluster.local
+              backendPort: 9000
+            - name: minio-secondary
+              host: "minio-secondary.kind-b.test"
               backendHost: minio.minio.svc.cluster.local
               backendPort: 9000
 
@@ -126,6 +152,8 @@ releases:
             tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:
           enabled: true
+          namespaces:
+            - mariadb-2
         gateway:
           enabled: true
           virtualServices:
@@ -148,6 +176,10 @@ releases:
       - mariadb:
           enabled: true
           namespace: mariadb-1
+          objectStorage:
+            enabled: true
+            secretName: mariadb-storage-destination
+            prefix: tenant-a/database
 
   # cluster-b: aqsh-mariadb, redis, rbac, gateway
   - name: mariadb-server-b

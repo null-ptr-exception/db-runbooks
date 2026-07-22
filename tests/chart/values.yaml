@@ -48,6 +48,15 @@ mariadb:
   # required by the switch-primary e2e. Default 1 = standalone.
   replicas: 1
   rootPassword: mariadb-test-pass
+  objectStorage:
+    enabled: false
+    secretName: mariadb-object-storage
+    endpoint: http://minio.kind-b.test:30080
+    bucket: db-backups
+    region: us-east-1
+    prefix: ""
+    accessKey: minioadmin
+    secretKey: minioadmin-changeme-prod
   storage: 1Gi
   resources:
     requests:
@@ -59,6 +68,8 @@ mariadb:
 # --- mariadb RBAC ---
 mariadbRbac:
   enabled: false
+  # Additional database namespaces served by the same AQSH deployment.
+  namespaces: []
 
 # --- namespace-local MariaDB gateway fixture ---
 # The Envoy workload and Service are installed with the official Istio gateway

@@ -68,6 +68,26 @@ wait_for_task() {
   return 1
 }
 
+assert_public_data_keys() {
+  local data="$1" expected="$2"
+  assert_equal "$(echo "$data" | jq -r 'keys | sort | join(",")')" "$expected"
+}
+
+assert_no_internal_result_keys() {
+  local data="$1" leaked
+  leaked=$(echo "$data" | jq -r '
+    [.. | objects | keys[]]
+    | map(select(
+        . == "bucket" or . == "endpoint" or . == "prefix" or . == "path" or
+        . == "location" or . == "secret" or . == "secretRef" or
+        . == "credentialsRef" or . == "sourcePod" or . == "manifest" or
+        . == "plan" or . == "operatorGroup" or . == "apiVersion" or
+        . == "conditions"
+      ))
+    | unique | join(",")')
+  assert_equal "$leaked" ""
+}
+
 # --- Tests ---
 
 @test "backup task is registered" {
@@ -98,15 +118,18 @@ wait_for_task() {
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   data=$(echo "$result" | jq -r '.data // empty')
 
-  local status namespace bucket
+  local status namespace
   status=$(echo "$TASK_RESPONSE" | jq -r '.status')
   namespace=$(echo "$data" | jq -r '.namespace // empty')
-  bucket=$(echo "$data" | jq -r '.bucket // empty')
 
-  echo "Task status: $status, namespace: $namespace, bucket: $bucket"
+  echo "Task status: $status, namespace: $namespace"
   assert_equal "$status" "completed"
   assert_equal "$namespace" "mariadb-1"
-  assert_equal "$bucket" "db-backups"
+  assert_equal "$(echo "$data" | jq -r '.created')" "true"
+  assert_equal "$(echo "$data" | jq -r '.state')" "COMPLETED"
+  assert_equal "$(echo "$data" | jq -r '.contentType')" "Logical"
+  assert_public_data_keys "$data" "backupName,contentType,created,createdAt,namespace,sizeBytes,state"
+  assert_no_internal_result_keys "$data"
 }
 
 @test "backup returns size and timestamp" {
@@ -119,18 +142,22 @@ wait_for_task() {
   [[ -n "$task_id" ]] || { echo "missing task id in response: $HTTP_BODY" >&2; return 1; }
   wait_for_task "$AQSH_URL" "$task_id"
 
-  local result data size_bytes timestamp
+  local result data size_bytes created_at backup_name
   result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
   data=$(echo "$result" | jq -r '.data // empty')
-  size_bytes=$(echo "$data" | jq -r '.size_bytes // empty')
-  timestamp=$(echo "$data" | jq -r '.timestamp // empty')
+  size_bytes=$(echo "$data" | jq -r '.sizeBytes // empty')
+  created_at=$(echo "$data" | jq -r '.createdAt // empty')
+  backup_name=$(echo "$data" | jq -r '.backupName // empty')
 
-  echo "size_bytes: $size_bytes, timestamp: $timestamp"
+  echo "sizeBytes: $size_bytes, createdAt: $created_at, backupName: $backup_name"
   [[ -n "$size_bytes" && "$size_bytes" -gt 0 ]]
-  [[ "$timestamp" =~ ^[0-9]{8}-[0-9]{6}$ ]]
+  [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  [[ "$backup_name" =~ ^logical-[0-9]{8}-[0-9]{6}\.sql\.gz$ ]]
+  assert_public_data_keys "$data" "backupName,contentType,created,createdAt,namespace,sizeBytes,state"
+  assert_no_internal_result_keys "$data"
 
   # stash this backup's object name for the list/delete round-trip below
-  echo "$data" | jq -r '.path' | awk -F/ '{print $NF}' > "${BATS_FILE_TMPDIR:-/tmp}/backup_e2e_name"
+  printf '%s\n' "$backup_name" > "${BATS_FILE_TMPDIR:-/tmp}/backup_e2e_name"
 }
 
 # The two tests below complete the snapshot-lifecycle round-trip on the REAL
@@ -149,6 +176,10 @@ wait_for_task() {
 
   local data; data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
   echo "list result: $(echo "$data" | jq -c '{count, names: [.backups[].name]}')"
+  assert_public_data_keys "$data" "backups,count,namespace"
+  assert_equal "$(echo "$data" | jq -r '[.backups[] | keys | sort | join(",")] | unique | join(";")')" \
+    "lastModified,name,sizeBytes"
+  assert_no_internal_result_keys "$data"
   # the backup created above must be listed, with a real lastModified
   assert_equal "$(echo "$data" | jq --arg n "$name" '[.backups[] | select(.name == $n)] | length')" "1"
   [[ "$(echo "$data" | jq -r --arg n "$name" '.backups[] | select(.name == $n) | .lastModified')" != "null" ]]
@@ -166,6 +197,9 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id"
   local data; data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
   assert_equal "$(echo "$data" | jq -r '.deleted')" "true"
+  assert_equal "$(echo "$data" | jq -r '.state')" "DELETED"
+  assert_public_data_keys "$data" "backup,deleted,dryRun,namespace,state"
+  assert_no_internal_result_keys "$data"
 
   # and the listing must no longer contain it
   http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-1"}'
@@ -174,4 +208,68 @@ wait_for_task() {
   wait_for_task "$AQSH_URL" "$task_id"
   data=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -r '.data // empty')
   assert_equal "$(echo "$data" | jq --arg n "$name" '[.backups[] | select(.name == $n)] | length')" "0"
+}
+
+@test "one AQSH isolates two workload-resolved backup prefixes" {
+  local ref_a ref_b task_id data_a data_b name_a name_b listed
+  ref_a=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb \
+    -o jsonpath='{.spec.envFrom[0].secretRef.name}')
+  ref_b=$(kubectl --context "$CTX_A" -n mariadb-2 get mariadb mariadb \
+    -o jsonpath='{.spec.envFrom[0].secretRef.name}')
+  [[ -n "$ref_a" && -n "$ref_b" && "$ref_a" != "$ref_b" ]]
+
+  http_post "${AQSH_URL}/tasks/backup" '{"namespace":"mariadb-1"}'
+  assert_equal "$HTTP_CODE" "202"
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  wait_for_task "$AQSH_URL" "$task_id"
+  data_a=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -c '.data // empty')
+  name_a=$(echo "$data_a" | jq -r '.backupName')
+  assert_public_data_keys "$data_a" "backupName,contentType,created,createdAt,namespace,sizeBytes,state"
+  assert_no_internal_result_keys "$data_a"
+  [[ "$TASK_RESPONSE" != *"$ref_a"* ]]
+  [[ "$TASK_RESPONSE" != *"tenant-a/database"* ]]
+
+  http_post "${AQSH_URL}/tasks/backup" '{"namespace":"mariadb-2"}'
+  assert_equal "$HTTP_CODE" "202"
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  wait_for_task "$AQSH_URL" "$task_id"
+  data_b=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -c '.data // empty')
+  name_b=$(echo "$data_b" | jq -r '.backupName')
+  assert_public_data_keys "$data_b" "backupName,contentType,created,createdAt,namespace,sizeBytes,state"
+  assert_no_internal_result_keys "$data_b"
+  [[ "$TASK_RESPONSE" != *"$ref_b"* ]]
+  [[ "$TASK_RESPONSE" != *"db-backups-secondary"* ]]
+  [[ "$TASK_RESPONSE" != *"minio-secondary.kind-b.test"* ]]
+  [[ "$TASK_RESPONSE" != *"tenant-b/database"* ]]
+
+  http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-1"}'
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  wait_for_task "$AQSH_URL" "$task_id"
+  listed=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -c '.data // empty')
+  assert_public_data_keys "$listed" "backups,count,namespace"
+  assert_no_internal_result_keys "$listed"
+  assert_equal "$(echo "$listed" | jq --arg n "$name_a" '[.backups[] | select(.name == $n)] | length')" "1"
+  assert_equal "$(echo "$listed" | jq --arg n "$name_b" '[.backups[] | select(.name == $n)] | length')" "0"
+
+  http_post "${AQSH_URL}/tasks/list-backups" '{"namespace":"mariadb-2"}'
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
+  wait_for_task "$AQSH_URL" "$task_id"
+  listed=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty' | jq -c '.data // empty')
+  assert_public_data_keys "$listed" "backups,count,namespace"
+  assert_no_internal_result_keys "$listed"
+  assert_equal "$(echo "$listed" | jq --arg n "$name_b" '[.backups[] | select(.name == $n)] | length')" "1"
+  assert_equal "$(echo "$listed" | jq --arg n "$name_a" '[.backups[] | select(.name == $n)] | length')" "0"
+  [[ "$TASK_RESPONSE" != *"$ref_b"* ]]
+  [[ "$TASK_RESPONSE" != *"db-backups-secondary"* ]]
+  [[ "$TASK_RESPONSE" != *"minio-secondary.kind-b.test"* ]]
+  [[ "$TASK_RESPONSE" != *"tenant-b/database"* ]]
+
+  # Best-effort fixture cleanup; each delete remains scoped by its workload
+  # prefix, exercising the same isolation on the mutating path.
+  http_post "${AQSH_URL}/tasks/delete-backup" \
+    "{\"namespace\":\"mariadb-1\",\"backup\":\"${name_a}\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty'); wait_for_task "$AQSH_URL" "$task_id"
+  http_post "${AQSH_URL}/tasks/delete-backup" \
+    "{\"namespace\":\"mariadb-2\",\"backup\":\"${name_b}\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty'); wait_for_task "$AQSH_URL" "$task_id"
 }

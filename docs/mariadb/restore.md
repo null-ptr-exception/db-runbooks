@@ -1,98 +1,51 @@
 # MariaDB Restore AQSH Runbook
 
-`restore` recreates a namespace's MariaDB from its mariadb-operator physical
+`restore` creates a new MariaDB for a namespace from an available physical
 backup, optionally to a point in time. **The namespace is the database
-identity:** the caller says only *which* namespace to restore (and optionally a
-point-in-time). Everything that defines the database — the engine version, the
-storage size, the restored instance name, which instance to copy the spec from,
-the S3 backup location, and the credentials — is **resolved internally** and is
-**not** a task input.
+identity:** the caller chooses the namespace and optional recovery time; all
+database and backup configuration is platform-managed.
 
-The source must be an operator `PhysicalBackup` / `mariabackup` object-storage
-layout, such as the one produced by the blue-green runbook; the logical `backup`
-task (a `mariadb-dump`) is **not** a valid restore source.
+A restore always creates a new database target and never overwrites the current
+one. Logical backups must use the logical restore task.
 
-It is modelled on the AWS RDS restore APIs
-(`RestoreDBInstanceFromDBSnapshot` / `RestoreDBInstanceToPointInTime`): a restore
-**always creates a new instance and never overwrites in place**, so it is safe to
-run against a typo. Under the hood it drives the operator `spec.bootstrapFrom`
-path (no replication / multi-cluster wiring). With `target_time`,
-`bootstrapFrom.targetRecoveryTime` performs point-in-time recovery; without it,
-the **latest backup** under the prefix is restored.
-
-> ⚠️ "No `target_time`" restores the **last backup**, not the live "now". To
-> recover close to the present you need point-in-time recovery against
-> continuously-archived binlogs (not yet exposed here).
+> Omitting `target_time` restores the latest available backup, not the live
+> database at the moment the request is made.
 
 ## Scope
 
-- **Same cluster.** Restore runs where aqsh, the mariadb-operator, and the
-  MariaDB instances all live (`cluster-dbs`), via the in-cluster config.
-  Direct, out-of-cluster script execution may still set `K8S_CONTEXT` as a
-  local-development reachability hook, but it is not a task input or a
-  cross-cluster switch. Cross-cluster restore (which would need the operator +
-  secrets provisioned in the target cluster) is out of scope.
-- **Same namespace.** The restored instance is created in the source namespace;
-  there is no target-namespace input.
-- **New instance.** Restore never overwrites in place — it refuses if an
-  instance with the resolved name already exists.
+- Restore stays within the managed environment and source namespace.
+- Restore creates a new target and refuses to overwrite an existing one.
+- Point-in-time recovery is limited to recovery points retained by the platform.
 
 ## Behavior
 
 | Step | Detail |
 |------|--------|
-| Plan (default) | With `dry_run=true` (the default) the task renders the MariaDB manifest and returns without applying; `confirm` is not required. |
-| Guard | To apply, set `dry_run=false` **and** `confirm=true` (mutating). |
-| Resolve | The restored instance name is auto-generated; the engine version and PVC size are derived from the namespace's instance (a single shared version is accepted across instances) and are **never** silently defaulted; the backup location, credentials, and S3 config come from platform convention. |
-| Guard | If a MariaDB with the resolved name already exists, the task fails — restore never overwrites in place. |
-| Validate | `target_time`, when given, must be a range-checked RFC3339 instant (e.g. `2026-06-14T03:21:00Z`). |
-| Apply | Creates a standalone `MariaDB` CR via `bootstrapFrom.s3` (`backupContentType: Physical`), `replicas=1`, no replication/multiCluster. |
-| Wait | Waits for `condition=Ready` (skip with `wait_timeout=0`). A wait timeout still returns a result carrying the connection endpoint + credential ref (status `error`), so the not-yet-Ready instance is never lost. |
+| Plan (default) | With `dry_run=true`, returns a sanitized preview without creating a restored database. Internal manifests and backend configuration are never returned. |
+| Guard | To start restore, set `dry_run=false` and `confirm=true`. |
+| Resolve | Resolves the database definition and latest backup or requested recovery point internally. Resolution failures return a stable public reason and generic guidance. |
+| Validate | `target_time`, when present, must be a valid RFC3339 instant, for example `2026-06-14T03:21:00Z`. |
+| Restore | Creates a new restored database target. |
+| Wait | Waits for readiness up to `wait_timeout`. Set it to `0` to return after creation. A timeout returns the last public state and a generic warning. |
 
 ## Inputs
 
-The only required input is `namespace`. The full caller surface is just five
-inputs:
+The only required input is `namespace`.
 
-| Input | Env | Required | Default | Notes |
-|-------|-----|:--:|---------|-------|
-| `namespace` | `DB_NAMESPACE` | ✓ | — | The database identity — the namespace to restore. |
-| `target_time` | `TARGET_TIME` | | — | RFC3339 instant for point-in-time recovery. Omit to restore the latest backup. |
-| `dry_run` | `DRY_RUN` | | `true` | Plan-only by default; set `false` (with `confirm=true`) to apply. |
-| `wait_timeout` | `WAIT_TIMEOUT` | | `10m` | Ready wait timeout. `0` returns immediately without waiting. |
-| `confirm` | `CONFIRM` | | `false` | Must be `true` to apply. |
+| Input | Required | Default | Notes |
+|-------|:--:|---------|-------|
+| `namespace` | ✓ | — | Database namespace to restore. |
+| `target_time` | | — | RFC3339 recovery time. Omit to restore the latest available backup. |
+| `dry_run` | | `true` | Preview only. Set to `false` with `confirm=true` to restore. |
+| `wait_timeout` | | `10m` | Readiness wait. `0` returns immediately after creation. |
+| `confirm` | | `false` | Must be `true` when `dry_run=false`. |
 
-Everything else that defines the restored database is a **platform internal,
-resolved from the namespace — not a task input**:
-
-- **Engine version & storage size** are derived from the namespace's instance
-  and never silently defaulted (a mismatched version is unsafe for a physical
-  restore; an undersized PVC would truncate the restored data). A single shared
-  version is accepted across instances; mixed versions or no instance make the
-  task fail rather than guess.
-- **Restored instance name & source instance** are auto-resolved from the
-  namespace.
-- **Credentials / S3 access** are resolved internally. The restored instance
-  reuses the platform-managed root Secret (named `mariadb`, key `password`) —
-  the same convention every managed MariaDB in a namespace follows — returned
-  as `credentialsRef` in the result.
-- **Backup location** is resolved by the shared `mdbt_resolve_backup_location`
-  helper — the same one the physical-backup **write** side (blue-green) uses — so
-  a restore finds a namespace's backups by namespace alone and the two sides can
-  never drift. The bucket (`db-backups`) and endpoint come from deploy-time
-  config (`MINIO_BUCKET` / `MINIO_ENDPOINT` in `/etc/aqsh/config/mariadb.env`);
-  the prefix is the `mariadb/<namespace>` convention. The caller never specifies
-  where backups live.
-
-> **Operator overrides.** `RESTORE_SOURCE`, `RESTORE_TARGET`, `RESTORE_IMAGE`,
-> `STORAGE_SIZE`, and `BACKUP_BUCKET` / `BACKUP_PREFIX` / `BACKUP_ENDPOINT` stay
-> readable as environment overrides for operators / automation, but they are
-> deliberately **not** task inputs — a caller restores by namespace, not by
-> spelling out the spec.
+Backup location, credentials, workload selection, database image, capacity, and
+execution details are platform-managed and are not task inputs.
 
 ## Examples
 
-Dry run (default) — render the plan for a namespace:
+Preview a latest-backup restore:
 
 ```bash
 curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
@@ -100,7 +53,7 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
   -d '{ "namespace": "mariadb-bg" }'
 ```
 
-Restore the latest backup:
+Restore the latest available backup:
 
 ```bash
 curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
@@ -108,7 +61,7 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
   -d '{ "namespace": "mariadb-bg", "dry_run": "false", "confirm": "true" }'
 ```
 
-Point-in-time restore:
+Restore to a point in time:
 
 ```bash
 curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
@@ -126,43 +79,29 @@ curl -sX POST "$MARIADB_AQSH_URL/tasks/restore" \
 ```json
 {
   "namespace": "mariadb-bg",
-  "target": "mariadb-bg-restore-20260614031500",
-  "image": "mariadb:11.4",
-  "backup": { "bucket": "db-backups", "prefix": "mariadb/mariadb-bg", "endpoint": "http://minio.minio.svc.cluster.local:9000", "contentType": "Physical" },
-  "pointInTimeRecovery": { "enabled": false, "targetRecoveryTime": null },
-  "connection": { "host": "mariadb-bg-restore-20260614031500-primary.mariadb-bg.svc.cluster.local", "port": 3306 },
-  "credentialsRef": { "secretName": "mariadb", "secretKey": "password" },
-  "restored": true
+  "contentType": "Physical",
+  "state": "COMPLETED",
+  "pointInTimeRecovery": {
+    "enabled": false,
+    "targetRecoveryTime": null
+  },
+  "provisioned": true,
+  "restored": true,
+  "dryRun": false
 }
 ```
 
-The restored instance is reached at `connection.host:port`; its root credentials
-live in the Secret named by `credentialsRef` (the restored data carries the
-source's users and passwords).
+The namespace remains the public database identity. Connection and credentials
+continue through the platform's normal user access flow. Results never contain
+backup locations, credential references, rendered manifests, or platform
+resource details.
 
 ## Notes
 
-- **Forward-looking backup convention.** Restore reads from
-  `s3://db-backups/mariadb/<namespace>` (resolved internally). This is a
-  forward-looking convention: until the physical-backup *write* side adopts the
-  same layout, restore reads from a location nothing writes to yet. Closing that
-  gap (and dropping this note) is tracked as a follow-up.
-- **PITR depends on the operator + backup retaining the recovery point.** A
-  `target_time` outside the available backup/binlog window will fail at the
-  operator level.
-- **Version sensitivity.** A physical restore must use the source's MariaDB
-  version, so the engine version is derived from the namespace's instances and
-  never guessed: a single shared version is used automatically (instances in a
-  namespace should not differ outside a blue-green upgrade); mixed versions make
-  the task fail rather than guess.
-- **Full-loss DR is not self-reconstructing yet.** Today the version and storage
-  are derived from an instance that is **still present** in the namespace. If a
-  namespace's MariaDB is *entirely* gone (the canonical "restore my deleted
-  database" case), there is no in-cluster spec left to derive from — the
-  namespace's identity is durable, but the spec behind it is not yet persisted
-  anywhere the in-cluster task can read. Closing this needs the backup to carry
-  the spec (or a per-namespace config), tracked together with the physical-backup
-  write side. Meanwhile an operator can drive a full-loss restore via the
-  `RESTORE_IMAGE` / `STORAGE_SIZE` env overrides.
-- **Standalone by design.** To turn a restored instance into a replica or a
-  blue/green member, drive it through the blue-green tasks afterwards.
+- A requested recovery time outside the available recovery window fails without
+  creating a target.
+- Restore requires the platform to retain enough database configuration to
+  rebuild the target. If that configuration is unavailable, the task fails with
+  generic guidance rather than exposing backend details.
+- A restored database is standalone. Use the blue/green workflow separately if
+  it must join a blue/green deployment.

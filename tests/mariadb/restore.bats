@@ -117,6 +117,13 @@ _root_password() {
     -o jsonpath='{.data.password}' | base64 -d
 }
 
+_mariadb_names() {
+  local names
+  names="$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')" || return
+  printf '%s\n' "$names" | sed '/^$/d' | sort
+}
+
 # _sql <mariadb-cr> <sql> — run SQL as root on that instance's primary pod.
 _sql() {
   local cr="$1" query="$2" primary password
@@ -158,15 +165,28 @@ _submit() {
   _submit "physical-backup" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   local backup; backup="$(_task_result_data)"
   assert_equal "$(echo "$backup" | jq -r '.data.created')" "true"
-  assert_equal "$(echo "$backup" | jq -r '.data.backup.contentType')" "Physical"
+  assert_equal "$(echo "$backup" | jq -r '.data.contentType')" "Physical"
 
   # 3. Restore into a NEW instance from that backup.
+  local before_restore
+  before_restore="$(_mariadb_names)"
   _submit "restore" '{"namespace":"mariadb-1","dry_run":"false","confirm":"true","wait_timeout":"10m"}'
   local restore; restore="$(_task_result_data)"
+  assert_equal "$(echo "$restore" | jq -c '.data | keys')" \
+    '["contentType","dryRun","namespace","pointInTimeRecovery","provisioned","restored","state"]'
+  assert_equal "$(echo "$restore" | jq -r '.data.contentType')" "Physical"
+  assert_equal "$(echo "$restore" | jq -r '.data.dryRun')" "false"
+  assert_equal "$(echo "$restore" | jq -r '.data.provisioned')" "true"
   assert_equal "$(echo "$restore" | jq -r '.data.restored')" "true"
-  RESTORE_TARGET="$(echo "$restore" | jq -r '.data.target')"
+  assert_equal "$(echo "$restore" | jq -r '.data.state')" "COMPLETED"
+
+  # The generated name is deliberately not part of the public API result. Find
+  # the newly provisioned CR through the test's privileged cluster fixture.
+  RESTORE_TARGET="$(comm -13 \
+    <(printf '%s\n' "$before_restore") \
+    <(_mariadb_names))"
   export RESTORE_TARGET
-  [[ -n "$RESTORE_TARGET" && "$RESTORE_TARGET" != "null" ]]
+  [[ "$RESTORE_TARGET" =~ ^mariadb-1-restore-[0-9]{14}$ ]]
 
   # 4. The restored CR must actually be Ready per the operator...
   kubectl --context "$CTX_A" -n mariadb-1 wait \

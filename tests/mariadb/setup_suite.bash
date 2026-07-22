@@ -5,7 +5,7 @@
 #
 # cluster-a (server):
 #   db-ops:     kube-federated-auth, kube-auth-proxy + aqsh-mariadb, Redis
-#   mariadb-1:  MariaDB instance (operator-managed)
+#   mariadb-1 / mariadb-2: independently configured MariaDB instances
 # cluster-b (server + client):
 #   db-ops:     test-client pod, kube-auth-proxy + aqsh-mariadb, Redis
 #   mariadb-1:  MariaDB instance (operator-managed)
@@ -71,7 +71,7 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
-  wait_ns_gone "$CTX_A" db-ops mariadb-1
+  wait_ns_gone "$CTX_A" db-ops mariadb-1 mariadb-2
   wait_ns_gone "$CTX_B" db-ops mariadb-1 minio
 
   # Install mariadb-operator CRDs and operator on both clusters
@@ -162,6 +162,8 @@ EOF
   echo "Waiting for mariadb (cluster-a)..."
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=900s
+  kubectl --context "$CTX_A" -n mariadb-2 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=900s
 
   echo "Waiting for namespace-local database gateway..."
   wait_deployment_rollout "$CTX_A" mariadb-1 database-gateway 180s
@@ -194,9 +196,10 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  # Delete mariadb-1 first — the operator in db-ops processes CR finalizers.
+  # Delete database namespaces first — the operator in db-ops processes CR finalizers.
   # Then delete db-ops — no finalizer-bearing CRs remain.
   delete_namespace_and_wait "$ctx_a" mariadb-1 300s || true
+  delete_namespace_and_wait "$ctx_a" mariadb-2 300s || true
   delete_namespace_and_wait "$ctx_b" mariadb-1 300s || true
   kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found --wait=false || true
   kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found --wait=false || true

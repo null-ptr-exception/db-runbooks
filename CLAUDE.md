@@ -73,6 +73,25 @@ pattern as optional task inputs with internal-config + hardcoded-literal
 fallback. MongoDB `recovery/*` and `sanity-check` tasks go a step further and
 don't expose these fields as task inputs *at all* — see "Auto-detect tier" below.
 
+**MariaDB object-storage policy is a scoped exception to generic live
+auto-detection.** The `S3_*` contract declared on a MariaDB workload is explicit
+deployment configuration owned by that database, not a best-effort signal that
+AQSH discovers and guesses from. The policy remains deployment configuration;
+its ownership and location move from one AQSH-wide setting to an explicit
+policy on each MariaDB workload. Resolution order is:
+
+1. Advanced explicit platform-process overrides
+2. The selected database's MariaDB workload policy
+3. Legacy AQSH-wide deploy-time configuration, retained as a migration fallback
+4. Compatibility defaults
+
+None of these fields are public task inputs. Non-credential storage fields
+(endpoint, bucket, prefix, and region) resolve independently. Credential
+references are bundle-aware: any advanced explicit credential-reference set
+supersedes the workload pair, while a workload must provide both credential
+references or neither. The two references in one valid bundle may still point
+to different Secrets. See `docs/mariadb/object-storage-resolution.md`.
+
 **Resolution order for account tasks** (3 tiers — see MongoDB account scripts
 for a worked example; MongoDB `recovery/*` and `sanity-check` use a variant
 without the task-input tier — see "Auto-detect tier" below):

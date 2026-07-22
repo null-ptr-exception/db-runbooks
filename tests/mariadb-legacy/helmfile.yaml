@@ -30,6 +30,10 @@ releases:
           namespace: mariadb-1
           operatorGroup: mariadb.mmontes.io
           replicas: 1
+          objectStorage:
+            enabled: true
+            secretName: mariadb-storage-primary
+            prefix: tenant-a/database
 
   - name: minio
     chart: ../chart

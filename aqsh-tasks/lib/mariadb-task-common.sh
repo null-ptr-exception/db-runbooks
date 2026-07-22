@@ -31,6 +31,8 @@ source "${LIB_DIR}/response.sh"
 source "${LIB_DIR}/k8s.sh"
 # shellcheck source=aqsh-tasks/lib/mariadb-operator-profile.sh
 source "${LIB_DIR}/mariadb-operator-profile.sh"  # operator generation / apiGroup detection
+# shellcheck source=aqsh-tasks/lib/mariadb-s3-resolver.sh
+source "${LIB_DIR}/mariadb-s3-resolver.sh"
 
 # Deploy-time config mounted by the aqsh ConfigMap (MINIO_ENDPOINT, MINIO_BUCKET,
 # ...). Overridable so tests / out-of-cluster callers can point elsewhere.
@@ -50,27 +52,10 @@ mdbt_load_config() {
     [[ -n "${!_key:-}" ]] && continue                       # keep a pre-set override
     printf -v "$_key" '%s' "$_val"
     export "${_key?}"
+    _MDBT_CONFIG_LOADED_KEYS="${_MDBT_CONFIG_LOADED_KEYS:-}${_key}"$'\n'
   done < "$MDBT_CONFIG_FILE"
+  export _MDBT_CONFIG_LOADED_KEYS
   return 0
-}
-
-# mdbt_resolve_backup_location <namespace>
-# Resolve the physical-backup S3 location for a namespace and export it as
-# BACKUP_BUCKET / BACKUP_PREFIX / BACKUP_ENDPOINT. This is the single source of
-# truth shared by the backup *write* side (blue-green PhysicalBackup) and the
-# *read* side (restore bootstrapFrom): both derive the same bucket, the same
-# per-namespace prefix, and the same endpoint, so a backup written for a
-# namespace is always discoverable by that namespace alone.
-#   bucket   → MINIO_BUCKET (deploy config), default db-backups
-#   prefix   → mariadb/<namespace> convention
-#   endpoint → MINIO_ENDPOINT (deploy config), default in-cluster MinIO
-# Each stays env-overridable (BACKUP_BUCKET / BACKUP_PREFIX / BACKUP_ENDPOINT)
-# for advanced operators; the convention is the default, not a hardcode.
-mdbt_resolve_backup_location() {
-  local namespace="$1"
-  BACKUP_BUCKET="${BACKUP_BUCKET:-${MINIO_BUCKET:-db-backups}}"
-  BACKUP_PREFIX="${BACKUP_PREFIX:-mariadb/${namespace}}"
-  BACKUP_ENDPOINT="${BACKUP_ENDPOINT:-${MINIO_ENDPOINT:-http://minio.minio.svc.cluster.local:9000}}"
 }
 
 # Where a task writes its single-line JSON result. Empty → stdout.
@@ -85,13 +70,41 @@ mdbt_write_result() {
   fi
 }
 
+# Build the public error envelope used by MariaDB tasks. `reason` is a stable,
+# machine-readable contract; the human message may evolve without forcing API
+# clients to parse prose. Keep implementation diagnostics in task logs only.
+mdbt_error_response() {
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}" reason="${5:-OPERATION_FAILED}"
+  [[ -n "$data" ]] || data="{}"
+  response_err "$op" "$message" "$data" "$code" |
+    jq -c --arg reason "$reason" '. + {reason: $reason}'
+}
+
 mdbt_fail() {
   # NB: default via a second statement, not "${3:-{}}" — that brace-in-default
   # form appends a stray "}" when $3 is set, corrupting a non-empty data payload.
-  local op="$1" message="$2" data="${3:-}" code="${4:-1}"
+  local op="$1" message="$2" data="${3:-}" code="${4:-1}" reason="${5:-}"
   [[ -n "$data" ]] || data="{}"
-  mdbt_write_result "$(response_err "$op" "$message" "$data" "$code")"
+  if [[ -z "$reason" ]]; then
+    if [[ "$code" == "2" ]]; then
+      reason="INVALID_REQUEST"
+    else
+      reason="OPERATION_FAILED"
+    fi
+  fi
+  mdbt_write_result "$(mdbt_error_response "$op" "$message" "$data" "$code" "$reason")"
   exit "$code"
+}
+
+# Run a validator for platform-owned values without exposing its field names or
+# values through the public response. Validators call `exit`, hence the
+# subshell. The caller supplies the user-safe category/message.
+mdbt_validate_internal_or_fail() {
+  local op="$1" reason="$2" message="$3"
+  shift 3
+  if ! (MDBT_RESULT_FILE=/dev/null; "$@") >/dev/null 2>&1; then
+    mdbt_fail "$op" "$message" "{}" 1 "$reason"
+  fi
 }
 
 # mdbt_require_confirm <op> <confirm_value>
@@ -100,7 +113,7 @@ mdbt_require_confirm() {
   local op="$1" confirm="$2"
   case "$confirm" in
     true | TRUE | yes | YES | 1) ;;
-    *) mdbt_fail "$op" "confirm=true is required for this mutating task" "{\"confirm\":\"$confirm\"}" 2 ;;
+    *) mdbt_fail "$op" "confirm=true is required for this mutating task" "{\"confirm\":\"$confirm\"}" 2 "INVALID_REQUEST" ;;
   esac
 }
 
@@ -139,14 +152,23 @@ mdbt_validate_secret_key() {
 mdbt_validate_s3_bucket() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
-    mdbt_fail "$op" "${name} must be an S3 bucket-style token" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+    mdbt_fail "$op" "${name} must be an S3 bucket-style token" "$(jq -n --arg field "$name" '{field: $field}')" 2
   fi
 }
 
 mdbt_validate_s3_prefix() {
   local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._/-]+$ ]]; then
-    mdbt_fail "$op" "${name} must match ^[A-Za-z0-9._/-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  if [[ -z "$value" || ! "$value" =~ ^[A-Za-z0-9._/-]+$ || "$value" == /* || "$value" == */ || "$value" == *//* ]]; then
+    mdbt_fail "$op" "${name} must be a non-empty relative S3 prefix" "$(jq -n --arg field "$name" '{field: $field}')" 2
+  fi
+  local segment
+  while IFS= read -r segment; do
+    if [[ "$segment" == "." || "$segment" == ".." || -z "$segment" ]]; then
+      mdbt_fail "$op" "${name} contains a traversal-like or ambiguous path segment" "$(jq -n --arg field "$name" '{field: $field}')" 2
+    fi
+  done < <(tr '/' '\n' <<<"$value")
+  if [[ "$value" == *"\\"* ]]; then
+    mdbt_fail "$op" "${name} contains an unsupported path separator" "$(jq -n --arg field "$name" '{field: $field}')" 2
   fi
 }
 
@@ -156,7 +178,7 @@ mdbt_validate_endpoint() {
   # http://minio.kind-b.test:30080, or a bare host:port (operator-style) e.g.
   # minio.svc:9000. A bare host with no port (and no scheme) is rejected.
   if [[ ! "$value" =~ ^([A-Za-z][A-Za-z0-9+.-]*://[A-Za-z0-9._-]+(:[0-9]+)?(/[A-Za-z0-9._/-]*)?|[A-Za-z0-9._-]+:[0-9]+)$ ]]; then
-    mdbt_fail "$op" "${name} must be a host:port or scheme URL endpoint" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+    mdbt_fail "$op" "${name} must be a host:port or scheme URL endpoint" "$(jq -n --arg field "$name" '{field: $field}')" 2
   fi
 }
 
@@ -181,7 +203,7 @@ mdbt_operator_s3_tls_enabled() {
 mdbt_validate_region() {
   local name="$1" value="$2" op="$3"
   if [[ ! "$value" =~ ^[A-Za-z0-9-]+$ ]]; then
-    mdbt_fail "$op" "${name} must match ^[A-Za-z0-9-]+$" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+    mdbt_fail "$op" "${name} must match ^[A-Za-z0-9-]+$" "$(jq -n --arg field "$name" '{field: $field}')" 2
   fi
 }
 
@@ -262,7 +284,8 @@ mdbt_wait_mariadb_backup_restored() {
 # environment (populated by mdbt_resolve_backup_location + task defaults):
 #   BACKUP_TARGET (Primary|Replica|PreferReplica), BACKUP_COMPRESSION,
 #   BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT, BACKUP_REGION,
-#   BACKUP_ACCESS_SECRET, BACKUP_ACCESS_KEY, BACKUP_SECRET_KEY.
+#   BACKUP_ACCESS_SECRET, BACKUP_ACCESS_KEY,
+#   BACKUP_SECRET_ACCESS_SECRET, BACKUP_SECRET_KEY.
 # A PhysicalBackup with no schedule runs exactly once, immediately.
 mdbt_physical_backup_manifest() {
   local name="$1" namespace="$2" mariadb="$3"
@@ -283,6 +306,7 @@ mdbt_physical_backup_manifest() {
     --arg region "$BACKUP_REGION" \
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
+    --arg secretAccessSecret "${BACKUP_SECRET_ACCESS_SECRET:-$BACKUP_ACCESS_SECRET}" \
     --arg secretKey "$BACKUP_SECRET_KEY" \
     '{
       apiVersion: $apiVersion,
@@ -300,7 +324,7 @@ mdbt_physical_backup_manifest() {
             region: $region,
             tls: {enabled: $tls},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
-            secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+            secretAccessKeySecretKeyRef: {name: $secretAccessSecret, key: $secretKey}
           }
         }
       }
@@ -333,6 +357,7 @@ mdbt_logical_backup_manifest() {
     --arg region "$BACKUP_REGION" \
     --arg accessSecret "$BACKUP_ACCESS_SECRET" \
     --arg accessKey "$BACKUP_ACCESS_KEY" \
+    --arg secretAccessSecret "${BACKUP_SECRET_ACCESS_SECRET:-$BACKUP_ACCESS_SECRET}" \
     --arg secretKey "$BACKUP_SECRET_KEY" \
     --argjson includePrefix "$include_prefix" \
     '{
@@ -348,7 +373,7 @@ mdbt_logical_backup_manifest() {
             region: $region,
             tls: {enabled: $tls},
             accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
-            secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+            secretAccessKeySecretKeyRef: {name: $secretAccessSecret, key: $secretKey}
           } + (if $includePrefix then {prefix: $prefix} else {} end))
         }
       }

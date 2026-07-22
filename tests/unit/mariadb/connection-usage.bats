@@ -6,6 +6,7 @@ setup() {
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
   MOCK_DIR="$(mktemp -d)"
   RESULT="${MOCK_DIR}/result.json"
+  EXEC_LOG="${MOCK_DIR}/exec.log"
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
@@ -20,8 +21,16 @@ if [[ "$args" == *"get mariadb"*"currentPrimary"* ]]; then
   printf '%s' "${MOCK_PRIMARY:-mariadb-0}"
   exit 0
 fi
+if [[ "$args" == *"get mariadb"*".spec.replicas"* ]]; then
+  printf '%s' "${MOCK_CR_REPLICAS-2}"
+  exit 0
+fi
+if [[ "$args" == *"get statefulset"*".spec.replicas"* ]]; then
+  printf '%s' "${MOCK_STS_REPLICAS-}"
+  exit 0
+fi
 if [[ "$args" == *"get pods"* ]]; then
-  printf '%s\n' ${MOCK_PODS:-mariadb-0 mariadb-1}
+  printf '%s\n' mariadb-0 mariadb-1 mariadb-metrics mariadb-query-exporter
   exit 0
 fi
 
@@ -32,6 +41,7 @@ if [[ " $args " == *" exec "* ]]; then
     if [[ "$previous" == "exec" ]]; then pod="$arg"; break; fi
     previous="$arg"
   done
+  printf '%s\n' "$pod" >> "${MOCK_EXEC_LOG}"
 
   if [[ "$args" == *"printenv MARIADB_ROOT_PASSWORD"* ]]; then
     [[ "${MOCK_ROOT_PASSWORD-testpass}" == "__EMPTY__" ]] && exit 1
@@ -85,8 +95,9 @@ MOCK
   chmod +x "${MOCK_DIR}/kubectl"
 
   export DB_NAMESPACE="mariadb-1"
-  unset MARIADB_NAME MOCK_FAIL_POD MOCK_EMPTY MOCK_ROOT_PASSWORD MOCK_PODS \
-    MOCK_MDB_NAMES || true
+  export MOCK_EXEC_LOG="$EXEC_LOG"
+  unset MARIADB_NAME MOCK_FAIL_POD MOCK_EMPTY MOCK_ROOT_PASSWORD \
+    MOCK_MDB_NAMES MOCK_CR_REPLICAS MOCK_STS_REPLICAS || true
 }
 
 teardown() {
@@ -125,6 +136,26 @@ field() {
   [ "$(field '.accounts[0].share_percent')" = "45.5" ]
   [ "$(field '.accounts[0].pods | join(",")')" = "mariadb-0,mariadb-1" ]
   [ "$(field '.accounts[1].account')" = "report_user" ]
+}
+
+@test "connection-usage excludes auxiliary pods sharing the instance label" {
+  run_usage MOCK_CR_REPLICAS=3 MOCK_EMPTY=true
+
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = "CONNECTION_USAGE_READY" ]
+  [ "$(field '.requested_pods')" = "3" ]
+  [ "$(field '.pods | map(.pod) | sort | join(",")')" = "mariadb-0,mariadb-1,mariadb-2" ]
+  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+}
+
+@test "connection-usage fails closed when exact workload members cannot be resolved" {
+  run_usage MOCK_CR_REPLICAS= MOCK_STS_REPLICAS=
+
+  [ "$status" -eq 0 ]
+  [ "$(field '.status')" = "BLOCKED" ]
+  [ "$(field '.reason_code')" = "POD_TARGETS_UNRESOLVED" ]
+  [ "$(field '.partial')" = "false" ]
+  [ ! -s "$EXEC_LOG" ]
 }
 
 @test "connection-usage normalizes a null longest-active value to zero" {
@@ -200,8 +231,7 @@ field() {
 }
 
 @test "connection-usage fails when every pod query fails" {
-  export MOCK_PODS="mariadb-1"
-  run_usage MOCK_FAIL_POD=mariadb-1
+  run_usage MOCK_CR_REPLICAS=1 MOCK_FAIL_POD=mariadb-0
 
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "ERROR" ]
@@ -239,7 +269,7 @@ field() {
 }
 
 @test "connection-usage auto-detects a single MariaDB instance" {
-  run_usage MOCK_MDB_NAMES=custom-db MOCK_PODS=custom-db-0 MOCK_EMPTY=true
+  run_usage MOCK_MDB_NAMES=custom-db MOCK_CR_REPLICAS=1 MOCK_EMPTY=true
 
   [ "$status" -eq 0 ]
   [ "$(field '.status')" = "READY" ]

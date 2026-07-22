@@ -135,6 +135,22 @@ mariadb_list_pods() {
   printf '%s\n' "$pods" | sed '/^$/d' | sort
 }
 
+# Exact workload membership for callers that must not use the broad label/name
+# fallback in mariadb_list_pods. Resolve the replica count from the selected CR
+# first, then its same-named StatefulSet for compatible/legacy deployments.
+# Returns 1 without output when membership cannot be established.
+mariadb_list_member_pods() {
+  local replicas
+
+  replicas="$(mariadb_cr_replicas || true)"
+  if [[ -z "$replicas" ]]; then
+    replicas="$(mariadb_sts_replicas || true)"
+  fi
+  [[ "$replicas" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  mariadb_list_pods "$replicas"
+}
+
 mariadb_exec() {
   local pod="${1:?pod is required}"
   shift

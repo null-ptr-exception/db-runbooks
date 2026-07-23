@@ -136,6 +136,7 @@ case "$verb" in
     orig="${MOCK_PRIMARY_INDEX:-0}"
     if [[ "$n" != "$orig" && -n "${MOCK_CONCURRENT_TARGET:-}" ]]; then
       printf '%s' "$MOCK_CONCURRENT_TARGET" > "$MOCK_DESIRED_STATE"
+      [[ "$MOCK_CONCURRENT_TARGET" == "$n" ]] && printf '%s' "$n" > "$MOCK_STATE"
       exit 1
     fi
     [[ "$n" == "$orig" && "${MOCK_ROLLBACK_PATCH_FAIL:-0}" == "1" ]] && exit 1
@@ -309,6 +310,16 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.fence_released')" = "false" ]
   [ "$(cat "$READ_ONLY_STATE")" = "1" ]
   [ "$(cat "$DESIRED_STATE")" = "2" ]
+}
+
+@test "switch-primary continues when an equivalent concurrent caller wins the patch" {
+  run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0 \
+    MOCK_CONCURRENT_TARGET=1
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = "PRIMARY_SWITCHED" ]
+  [ "$(field '.to_pod_index')" = "1" ]
+  [ "$(cat "$READ_ONLY_STATE")" = "1" ]
+  [ "$(cat "$DESIRED_STATE")" = "1" ]
 }
 
 @test "switch-primary reports a stuck fence when drain fails and writes cannot be restored" {

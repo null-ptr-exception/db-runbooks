@@ -63,10 +63,17 @@ teardown() {
 
 _stop_writer() {
   if [[ -n "${WRITER_PID:-}" ]]; then
-    kill "$WRITER_PID" >/dev/null 2>&1 || true
+    kill -TERM -- "-${WRITER_PID}" >/dev/null 2>&1 || true
     wait "$WRITER_PID" >/dev/null 2>&1 || true
     WRITER_PID=""
   fi
+}
+
+_start_writer() {
+  set -m
+  _writer_loop &
+  WRITER_PID=$!
+  set +m
 }
 
 # Always leave the primary back on podIndex 0 so later suites see the original
@@ -214,16 +221,17 @@ _switch_payload() {
 }
 
 _root_password() {
-  kubectl --context "$CTX_A" -n mariadb-1 get secret mariadb \
+  local request_timeout="${1:-0}"
+  kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 get secret mariadb \
     -o jsonpath='{.data.password}' | base64 -d
 }
 
 # Run SQL as root on the CURRENT primary pod.
 _sql_primary() {
-  local query="$1" primary password
-  primary="$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.currentPrimary}')"
-  password="$(_root_password)"
-  kubectl --context "$CTX_A" -n mariadb-1 exec "$primary" -c mariadb -- \
+  local query="$1" request_timeout="${2:-0}" primary password
+  primary="$(kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.currentPrimary}')"
+  password="$(_root_password "$request_timeout")"
+  kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 exec "$primary" -c mariadb -- \
     mariadb -u root -p"${password}" -N -B -e "$query"
 }
 
@@ -236,7 +244,9 @@ _writer_loop() {
   done
 }
 
-_event_count() { _sql_primary 'SELECT COUNT(*) FROM switch_e2e.events'; }
+_event_count() {
+  _sql_primary 'SELECT COUNT(*) FROM switch_e2e.events' "${EVENT_COUNT_PROBE_TIMEOUT:-10s}"
+}
 
 _wait_for_event_count_greater_than() {
   local baseline="$1" max_wait="${2:-60}" elapsed=0 count=0
@@ -343,8 +353,7 @@ _dump_state() {
     INSERT INTO switch_e2e.events(note) VALUES ('pre-switch-sentinel');"
   local before_count
   before_count="$(_event_count)"
-  _writer_loop &
-  WRITER_PID=$!
+  _start_writer
   _wait_for_event_count_greater_than "$before_count" 30
   before_count="$(_event_count)"
 

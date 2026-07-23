@@ -24,7 +24,7 @@ primary, then verifies or recovers the operator-owned switch:
   and be within `lag_threshold` seconds. This bounds the prospective write
   outage but is not the consistency proof: non-zero lag is allowed. The replica-health
   signal comes from the CR's `status.replication.replicas` on the current-gen
-  operator, or from live `SHOW SLAVE STATUS` on the legacy operator (see
+  operator, or from live `SHOW ALL SLAVES STATUS` on the legacy operator (see
   *Operator compatibility*); the output field `replicas_source`
   (`cr_status` | `show_all_slaves_status`) records which was used.
 - **Write fence + GTID drain** — on apply, the task sets the old primary

@@ -465,8 +465,10 @@ if ! bool "$patch_applied"; then
     emit ERROR PATCH_FAILED "failed the atomic patch of spec.replication.primary.podIndex to ${TARGET_INDEX}; writable state was restored" false \
       "$(jq -nc --arg gtid "$FENCED_GTID" '{fenced_gtid: $gtid, fence_released: true}')"; exit 1
   fi
-  emit ERROR PRIMARY_FENCE_STUCK "failed the atomic target patch and could not restore the old primary writable" false \
-    "$(jq -nc --arg gtid "$FENCED_GTID" '{fenced_gtid: $gtid, fence_released: false}')"; exit 1
+  if ! bool "$patch_applied"; then
+    emit ERROR PRIMARY_FENCE_STUCK "failed the atomic target patch and could not restore the old primary writable" false \
+      "$(jq -nc --arg gtid "$FENCED_GTID" '{fenced_gtid: $gtid, fence_released: false}')"; exit 1
+  fi
 fi
 OPERATOR_OWNS_SWITCH=true
 

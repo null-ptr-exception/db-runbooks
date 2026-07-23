@@ -124,6 +124,11 @@ Notes:
 1. The server does not need recipient private keys.
 2. Decryption must happen on the recipient side.
 3. `one_time_plaintext` is still available for internal/trusted flows.
+4. This delivers a **generated** password to a **human**. To place
+   caller-chosen credentials into a Kubernetes Secret for an application,
+   use the `secrets/*` gateway instead ([secrets.md](secrets.md)) — same
+   PGP mechanics, opposite direction (the caller encrypts against the
+   deployment's key from `secrets/pubkey`).
 
 ### `delete-account`
 

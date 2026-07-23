@@ -124,7 +124,14 @@ container name, storage location, and S3 credentials internal-config/
 auto-detect only, and never load MongoDB credentials at all) and the
 `sts/orphan-delete` task (see `docs/mongodb/sts-orphan-delete.md` — detaches
 a StatefulSet from its Pods via `kubectl delete --cascade=orphan`; step 1 of
-the standard PVC-enlarge workaround, PVC resize/STS recreate stay manual) —
+the standard PVC-enlarge workaround, PVC resize/STS recreate stay manual) and
+the oplog/ops/profiler gateway tasks (`oplog/status`, `oplog/resize`,
+`ops/list`, `ops/kill`, `profiler/status`, `profiler/set`; see
+`docs/mongodb/oplog.md`, `docs/mongodb/ops.md`, `docs/mongodb/profiler.md` —
+oplog size, currentOp, and the profiler level are all per-node state, not
+cluster-wide, so `ops/*`/`profiler/*` accept an optional `target_pod`
+defaulting to the elected PRIMARY, and `oplog/resize` applies to every
+current replica-set member itself rather than taking one) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
@@ -182,6 +189,19 @@ nor the hardcoded fallback can resolve it (e.g. credentials provisioned with
 no live signal in the StatefulSet spec at all), internal config remains the
 only override — there is no per-call escape hatch for `recovery/*` tasks by
 design.
+
+**Secrets gateway (`secrets/*`)**: a separate, DB-agnostic task family —
+`secrets/pubkey`, `secrets/get`, `secrets/plan`, `secrets/apply`,
+`secrets/delete` — served by BOTH gateways from the shared
+`scripts/secrets/` + `lib/secrets.sh`; see `docs/mongodb/secrets.md` /
+`docs/mariadb/secrets.md`. None of the recovery-tier rules above apply here:
+there is no `target_pod`, no destructive-wipe semantics, and no
+StatefulSet/credential resolution chain. Its task inputs are `namespace`,
+`secret_name`, and a PGP-encrypted `payload` (plus `mode` and, for
+`secrets/apply`, `plan_hash`). The deployment PGP key path and the
+protected-secret list are internal-config/auto-detect only, and secret
+VALUES arrive PGP-encrypted against the deployment key, never as plaintext
+task inputs.
 
 **G1 self-heal**: `wipe`/`recover` (gate mode only — `pre-check` stays
 read-only) go one step further than detection when the `data-recovery` init

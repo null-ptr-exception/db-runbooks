@@ -20,8 +20,15 @@
 #   4. Restore everything in teardown_file so later runs see the default
 #      convention again
 #
-# Runs last alphabetically among tests/mongodb/*.bats so it does not affect
-# other files' assumptions about the default naming convention.
+# Does NOT run last alphabetically (recovery_probe_skip, restart_*,
+# sanity_degraded, secrets, sts_orphan_delete all sort after it) — other
+# files' assumptions about the default naming convention depend entirely on
+# teardown_file restoring state correctly, not on file ordering. In
+# particular the ClusterRole's secrets rules must be touched by resourceNames
+# + verbs (never resources alone): the ClusterRole also carries a namespace-
+# wide get/create/patch/delete secrets rule (secrets/* task family, no
+# resourceNames) that a resources-only select() would match too, silently
+# narrowing it to this file's secret names for the rest of the suite.
 # =============================================================================
 
 setup_file() {
@@ -73,8 +80,13 @@ setup_file() {
   # Capture current state so teardown_file can restore it exactly.
   kubectl --context "$ctx" -n mongo-core get configmap aqsh-config \
     -o jsonpath='{.data.mongodb\.env}' > "${BATS_FILE_TMPDIR}/orig_mongodb_env.txt"
+  # select() must also pin verbs==["get"] — the ClusterRole has a SECOND
+  # secrets rule (namespace-wide get/create/patch/delete for the secrets/*
+  # task family, no resourceNames) that also matches resources==["secrets"].
+  # Without the verbs filter, the assignment below touches both rules and
+  # permanently narrows the namespace-wide one to this file's secret names.
   kubectl --context "$ctx" get clusterrole aqsh-mongo-manager -o json \
-    | jq -c '(.rules[] | select(.resources == ["secrets"])).resourceNames' \
+    | jq -c '(.rules[] | select(.resources == ["secrets"] and .verbs == ["get"])).resourceNames' \
     > "${BATS_FILE_TMPDIR}/orig_secret_resourcenames.json"
 
   # Swap internal config to the new convention: secret name/keys AND the
@@ -88,7 +100,7 @@ setup_file() {
   # Widen RBAC to match — without this, the swap above would be denied at
   # the kubectl-get-secret step, not silently fall back to the old secret.
   kubectl --context "$ctx" get clusterrole aqsh-mongo-manager -o json \
-    | jq '(.rules[] | select(.resources == ["secrets"])).resourceNames = ["app-mongo-creds"]' \
+    | jq '(.rules[] | select(.resources == ["secrets"] and .verbs == ["get"])).resourceNames = ["app-mongo-creds"]' \
     | kubectl --context "$ctx" apply -f -
 
   echo "Restarting aqsh to pick up the swapped internal config..."
@@ -108,7 +120,7 @@ teardown_file() {
   if [[ -f "${BATS_FILE_TMPDIR}/orig_secret_resourcenames.json" ]]; then
     kubectl --context "$ctx" get clusterrole aqsh-mongo-manager -o json \
       | jq --slurpfile names "${BATS_FILE_TMPDIR}/orig_secret_resourcenames.json" \
-          '(.rules[] | select(.resources == ["secrets"])).resourceNames = $names[0]' \
+          '(.rules[] | select(.resources == ["secrets"] and .verbs == ["get"])).resourceNames = $names[0]' \
       | kubectl --context "$ctx" apply -f - 2>/dev/null || true
   fi
 

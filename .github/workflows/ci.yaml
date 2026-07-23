@@ -190,7 +190,57 @@ jobs:
 
   mongodb:
     runs-on: [self-hosted, aws-runner]
-    timeout-minutes: 120
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      # Each shard pays the full ~15-20min setup_suite cost (build+push the
+      # image, stand up both Kind clusters, Cilium+Istio, the mongo-core/
+      # mongo-1 control plane) on top of its own tests — bats' setup_suite/
+      # teardown_suite lifecycle is per-invocation, so splitting below the
+      # file level would just multiply that fixed cost with no benefit.
+      # Groups are sized ~30-50 tests each (161 total) and kept semantically
+      # coherent so a shard failure name is itself informative. Add new
+      # *.bats files to whichever shard they belong with — nothing here
+      # auto-discovers new files.
+      matrix:
+        shard:
+          - name: core
+            files: >-
+              tests/mongodb/secrets.bats
+              tests/mongodb/account_lifecycle.bats
+              tests/mongodb/mongodb.bats
+              tests/mongodb/backup.bats
+              tests/mongodb/sanity_degraded.bats
+          - name: recovery
+            files: >-
+              tests/mongodb/recovery.bats
+              tests/mongodb/recovery_autodetect.bats
+              tests/mongodb/recovery_autodetect_bitnami_secret.bats
+              tests/mongodb/recovery_autodetect_file_mount.bats
+              tests/mongodb/recovery_auto_patch.bats
+              tests/mongodb/recovery_auto_patch_fresh.bats
+              tests/mongodb/recovery_auto_patch_fresh_bitnami.bats
+              tests/mongodb/recovery_bitnami_profile.bats
+              tests/mongodb/recovery_custom_naming.bats
+              tests/mongodb/recovery_probe_skip.bats
+          - name: pbm
+            files: >-
+              tests/mongodb/pbm.bats
+              tests/mongodb/pbm_bitnami.bats
+              tests/mongodb/pbm_physical.bats
+              tests/mongodb/pbm_physical_bitnami.bats
+              tests/mongodb/pbm_pitr.bats
+          - name: reconfig
+            files: >-
+              tests/mongodb/reconfig.bats
+              tests/mongodb/fcv.bats
+              tests/mongodb/fcv_bitnami.bats
+              tests/mongodb/restart_ondelete.bats
+              tests/mongodb/restart_stuck_partition.bats
+              tests/mongodb/sts_orphan_delete.bats
+              tests/mongodb/oplog.bats
+              tests/mongodb/ops.bats
+              tests/mongodb/profiler.bats
     steps:
       - name: Check out repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -202,8 +252,41 @@ jobs:
           sudo sysctl fs.inotify.max_user_watches=524288
           sudo sysctl fs.inotify.max_user_instances=512
 
-      - name: Run mongodb test suite
-        run: bats tests/mongodb/
+      - name: Clean slate — remove any leftover clusters from a prior run
+        run: |
+          # This runs on a persistent self-hosted runner, not ephemeral
+          # GitHub-hosted infra. "Tear down clusters" below swallows its own
+          # failures (`|| true`), so a run that gets killed/cancelled mid-way
+          # can leave cluster-a/cluster-b/registry alive for the NEXT run to
+          # silently reuse via ctlptl's idempotent apply — including
+          # whatever stale Helm-deployed RBAC objects (ClusterRoles etc.)
+          # that earlier run's checkout had, not this run's. Force a clean
+          # slate unconditionally before creating anything.
+          # cluster-a/cluster-b/registry are fixed names (infra/ctlptl-infra.yaml)
+          # shared by every shard — this assumes one job runs at a time per
+          # runner instance (the GitHub Actions default for self-hosted
+          # runners). Two shards concurrently scheduled onto the SAME runner
+          # would collide.
+          kind delete cluster --name cluster-a 2>/dev/null || true
+          kind delete cluster --name cluster-b 2>/dev/null || true
+          docker rm -f registry 2>/dev/null || true
+
+      - name: Run mongodb test suite (${{ matrix.shard.name }})
+        run: bats ${{ matrix.shard.files }}
+
+      - name: Dump aqsh logs and runner resource state on failure
+        if: failure()
+        run: |
+          echo "::group::disk usage"
+          df -h
+          echo "::endgroup::"
+          echo "::group::docker system df"
+          docker system df -v
+          echo "::endgroup::"
+          echo "::group::aqsh-mongodb pod logs (captured by teardown_suite before namespace deletion)"
+          cat /tmp/aqsh-mongodb-teardown.log
+          echo "::endgroup::"
+        continue-on-error: true
 
       - name: Tear down clusters
         if: always()

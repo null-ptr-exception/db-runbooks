@@ -85,6 +85,14 @@ Step 4: Platform Team decrypts locally & distributes
 
 **Selected:** PGP for Zero-Trust principle—system cannot read plaintext credentials.
 
+> **Scope note:** this table is about delivering a password **to a human**.
+> Delivering credentials **to an application** (a Secret its pods mount) is a
+> different problem with the opposite direction of trust, and has its own
+> gateway: the `secrets/*` family ([secrets.md](secrets.md)), where the
+> payload is PGP-encrypted *in transit* against a deployment-held key and
+> materialized as a K8s Secret in the target namespace. The two are
+> complementary, not contradictory.
+
 ---
 
 ## State Reconciliation Job
@@ -188,6 +196,10 @@ echo "$CIPHERTEXT" | gpg --decrypt
 | **PGP Encrypted** | Zero system-wide persistence; private key never uploaded | Requires recipient key management |
 
 **Selected:** PGP Encrypted for **zero-trust principle**—the system cannot read plaintext credentials even in memory.
+
+> Applies to human-facing delivery only — see the scope note under
+> ["Why PGP + Not K8s Secret?"](#why-pgp--not-k8s-secret) above; app-facing
+> Secret provisioning is `secrets/*` ([secrets.md](secrets.md)).
 
 ---
 

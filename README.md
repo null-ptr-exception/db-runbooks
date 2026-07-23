@@ -130,6 +130,12 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `recovery/pre-check`, `/wipe`, `/reset`, `/status`, `/fix-no-primary`, `/recover` | Replica-set member recovery (gate checks, wipe + resync, no-primary diagnosis) | [docs/mongodb/recovery.md](docs/mongodb/recovery.md) |
 | `reconfig/plan`, `/apply`, `/force-dr`, `/freeze` | Gated replica-set reconfig (risk report → CAS apply, break-glass DR, change freeze) | [docs/mongodb/reconfig.md](docs/mongodb/reconfig.md) |
 | `fcv/status`, `fcv/set` | featureCompatibilityVersion report + gated upgrade/downgrade validated against the binary version | [docs/mongodb/fcv.md](docs/mongodb/fcv.md) |
+| `pbm/status`, `/backup`, `/list`, `/restore`, `/delete`, `/pitr`, `/logs`, `/cancel-backup`, `/schedule`, `/config` | Percona Backup for MongoDB: logical/physical/incremental backups, PITR, takeover restore, managed scheduling | [docs/mongodb/pbm.md](docs/mongodb/pbm.md) |
+| `secrets/pubkey`, `/get`, `/plan`, `/apply`, `/delete` | PGP-encrypted Secret CRUD, plan/apply CAS gated | [docs/mongodb/secrets.md](docs/mongodb/secrets.md) |
+| `sts/orphan-delete` | Detach the StatefulSet from its Pods (`--cascade=orphan`) — step 1 of the PVC-enlarge workaround | [docs/mongodb/sts-orphan-delete.md](docs/mongodb/sts-orphan-delete.md) |
+| `oplog/status`, `oplog/resize` | Per-member oplog size/window report + gated resize across every current member | [docs/mongodb/oplog.md](docs/mongodb/oplog.md) |
+| `ops/list`, `ops/kill` | Currently active operations on a node + gated kill by opid | [docs/mongodb/ops.md](docs/mongodb/ops.md) |
+| `profiler/status`, `profiler/set` | Query profiler level/threshold report + gated change on a node | [docs/mongodb/profiler.md](docs/mongodb/profiler.md) |
 | `backup` | Backup to MinIO | — |
 
 ### Task API Example

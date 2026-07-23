@@ -29,6 +29,19 @@ rules:
       # resolves; change them together (see values.yaml).
       - {{ .Values.mongodb.backupSecret | default "minio" | quote }}
     verbs: ["get"]
+  # secrets/* task family (docs/mongodb/secrets.md): get/patch/delete cannot
+  # be pinned to resourceNames here because the family's whole point is
+  # writing CALLER-named Secrets, and create ignores resourceNames anyway
+  # (same reason as configmaps below) — so this rule is namespace-wide, like
+  # the MariaDB role's account-password rule. Root-credential Secrets are
+  # guarded in the scripts instead (PROTECTED_SECRET — auto-detected from the
+  # StatefulSet env plus SECRETS_PROTECTED_NAMES_DEFAULT internal config).
+  # (Namespace-wide get makes the pinned rule above redundant in pure RBAC
+  # terms; it stays because it documents which named Secrets the OTHER task
+  # families depend on.)
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list"]

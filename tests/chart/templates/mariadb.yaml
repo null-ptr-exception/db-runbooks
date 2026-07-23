@@ -1,4 +1,7 @@
 {{- if .Values.mariadb.enabled }}
+# Operator root password. This name (and "minio" below) is repeated in
+# SECRETS_PROTECTED_NAMES_DEFAULT (helmfile inline mariadb.env) so the
+# secrets/* family refuses to touch it — rename them together.
 apiVersion: v1
 kind: Secret
 metadata:

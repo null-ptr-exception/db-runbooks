@@ -28,6 +28,16 @@ aqsh:
   tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
   config: {}
+  # PGP private key for the secrets/* task family — exactly one of:
+  #   pgpKey:        ASCII-armored key content; the chart renders it into
+  #                  Secret aqsh-pgp (test suites inject a per-run throwaway
+  #                  key via runtime-values.yaml — see tests/*/setup_suite.bash)
+  #   pgpSecretName: name of a pre-created Secret (key `private.asc`),
+  #                  provisioned out-of-band — the production path, key
+  #                  material never transits helm values/release storage
+  # Both empty = no mount; secrets/plan|apply|pubkey fail PGP_KEY_UNAVAILABLE.
+  pgpKey: ""
+  pgpSecretName: ""
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     imagePullPolicy: IfNotPresent
@@ -115,7 +125,9 @@ mongodb:
   reconfigAuditConfigmap: mongodb-reconfig-audit
   # S3 credentials secret the pbm/* tasks read in the DB namespace (keys
   # access-key-id / secret-access-key — same shape the MariaDB operator flow
-  # uses). Pairs with PBM_S3_CREDENTIALS_SECRET_DEFAULT in mongodb.env.
+  # uses). Pairs with PBM_S3_CREDENTIALS_SECRET_DEFAULT in mongodb.env AND
+  # with SECRETS_PROTECTED_NAMES_DEFAULT (the secrets/* family must refuse
+  # to write it) — rename all three together.
   backupSecret: minio
   # The CronJob pbm/schedule manages in the DB namespace. Pairs with
   # PBM_SCHEDULE_CRONJOB_DEFAULT in mongodb.env.

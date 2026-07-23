@@ -123,6 +123,13 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
+  # Throwaway deployment PGP keypair for the secrets/* task family (shared
+  # by both clusters' aqsh releases; callers fetch the public half through
+  # the secrets/pubkey task). No gpg on the host → no key; the secrets.bats
+  # file skips itself instead of failing the whole suite.
+  local PGP_PRIV
+  PGP_PRIV=$(provision_ephemeral_pgp_key)
+
   # Write runtime-discovered values to a temp file
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mariadb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
@@ -143,6 +150,13 @@ $(echo "$CA_B" | sed 's/^/      /')
     cluster-a-token: "${TOKEN_A}"
     cluster-b-token: "${TOKEN_B}"
 EOF
+  if [[ -n "$PGP_PRIV" ]]; then
+    cat >> "$RUNTIME_VALUES" <<EOF
+aqsh:
+  pgpKey: |
+$(echo "$PGP_PRIV" | sed 's/^/    /')
+EOF
+  fi
 
   # Second apply: inject real runtime values.
   helmfile apply -f "$HELMFILE" --values "$RUNTIME_VALUES"

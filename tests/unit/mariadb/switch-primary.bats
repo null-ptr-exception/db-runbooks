@@ -14,6 +14,7 @@ setup() {
   STATE="${MOCK_DIR}/primary_index"        # the "effective" current primary index
   DESIRED_STATE="${MOCK_DIR}/desired_primary_index"
   READ_ONLY_STATE="${MOCK_DIR}/read_only"
+  ROLLBACK_DELAY_STATE="${MOCK_DIR}/rollback_delay_reads"
   OP_LOG="${MOCK_DIR}/operations.log"
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
@@ -22,6 +23,21 @@ setup() {
 args="$*"; verb=""
 for a in "$@"; do case "$a" in explain|get|patch|delete|exec) verb="$a"; break;; esac; done
 state() { cat "$MOCK_STATE" 2>/dev/null || printf '%s' "${MOCK_PRIMARY_INDEX:-0}"; }
+state_for_json() {
+  local s remaining
+  s="$(state)"
+  if [[ "$s" == "stuck" && -s "$MOCK_ROLLBACK_DELAY_STATE" ]]; then
+    remaining="$(cat "$MOCK_ROLLBACK_DELAY_STATE")"
+    if (( remaining <= 1 )); then
+      s="${MOCK_PRIMARY_INDEX:-0}"
+      printf '%s' "$s" > "$MOCK_STATE"
+      rm -f "$MOCK_ROLLBACK_DELAY_STATE"
+    else
+      printf '%s' "$((remaining - 1))" > "$MOCK_ROLLBACK_DELAY_STATE"
+    fi
+  fi
+  printf '%s' "$s"
+}
 printf '%s\n' "$verb $args" >> "$MOCK_OP_LOG"
 case "$verb" in
   explain) [[ "${MOCK_NO_SWITCH_FIELD:-0}" == "1" ]] && exit 1 || exit 0 ;;
@@ -30,7 +46,7 @@ case "$verb" in
       *metadata.name*) printf '%s' "${MOCK_SOURCES:-mariadb}"; exit 0 ;;   # autodetect list
       *"jsonpath="*currentPrimary*) s="$(state)"; [[ "$s" == "stuck" ]] && s="${MOCK_PRIMARY_INDEX:-0}"; printf 'mariadb-%s' "$s"; exit 0 ;;
       *"-o json"*)
-        s="$(state)"; ready="True"; idx="$s"
+        s="$(state_for_json)"; ready="True"; idx="$s"
         if [[ "$s" == "stuck" ]]; then idx="${MOCK_PRIMARY_INDEX:-0}"; ready="False"; fi
         # MOCK_LEGACY=1 emulates the mmontes-era operator: it publishes
         # currentPrimary/currentPrimaryPodIndex but NEVER status.replication, so
@@ -142,7 +158,14 @@ case "$verb" in
     [[ "$n" == "$orig" && "${MOCK_ROLLBACK_PATCH_FAIL:-0}" == "1" ]] && exit 1
     printf '%s' "$n" > "$MOCK_DESIRED_STATE"
     if [[ "$n" == "$orig" ]]; then                 # rollback to original
-      [[ "${MOCK_ROLLBACK_RECOVERS:-1}" == "1" ]] && printf '%s' "$n" > "$MOCK_STATE"
+      if [[ "${MOCK_ROLLBACK_RECOVERS:-1}" == "1" ]]; then
+        delay="${MOCK_ROLLBACK_RECOVERY_DELAY_READS:-0}"
+        if [[ "$delay" =~ ^[1-9][0-9]*$ ]]; then
+          printf '%s' "$delay" > "$MOCK_ROLLBACK_DELAY_STATE"
+        else
+          printf '%s' "$n" > "$MOCK_STATE"
+        fi
+      fi
     elif [[ "${MOCK_SWITCH_STUCK:-0}" == "1" ]]; then  # forward switch hangs (limbo)
       printf 'stuck' > "$MOCK_STATE"
     else                                           # forward switch succeeds
@@ -157,7 +180,8 @@ MOCK
 
   export DB_NAMESPACE="mariadb-1" MARIADB_NAME="mariadb"
   export MOCK_STATE="$STATE" MOCK_DESIRED_STATE="$DESIRED_STATE"
-  export MOCK_READ_ONLY_STATE="$READ_ONLY_STATE" MOCK_OP_LOG="$OP_LOG"
+  export MOCK_READ_ONLY_STATE="$READ_ONLY_STATE" MOCK_ROLLBACK_DELAY_STATE="$ROLLBACK_DELAY_STATE"
+  export MOCK_OP_LOG="$OP_LOG"
   export SWITCH_POLL_INTERVAL="0.05"
 }
 
@@ -345,6 +369,18 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.recovered')" = "true" ]
   [ "$(field '.fence_released')" = "true" ]
   [ "$(cat "$READ_ONLY_STATE")" = "0" ]
+}
+
+@test "switch-primary waits for delayed operator rollback before declaring recovery" {
+  run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0 \
+    WAIT_TIMEOUT=1 SWITCH_RECOVERY_TIMEOUT=1 MOCK_SWITCH_STUCK=1 \
+    MOCK_ROLLBACK_RECOVERS=1 MOCK_ROLLBACK_RECOVERY_DELAY_READS=3
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = "SWITCH_TIMEOUT_ROLLED_BACK" ]
+  [ "$(field '.recovered')" = "true" ]
+  [ "$(field '.fence_released')" = "true" ]
+  [ "$(cat "$STATE")" = "0" ]
+  [ ! -e "$ROLLBACK_DELAY_STATE" ]
 }
 
 @test "switch-primary reports SWITCH_STUCK when rollback cannot recover and eviction is gated" {

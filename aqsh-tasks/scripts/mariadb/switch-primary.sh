@@ -490,8 +490,7 @@ if bool "$ROLLBACK_ON_TIMEOUT"; then
     _record "release-fence"
     fence_released=false
     if _release_owned_fence; then fence_released=true; fi
-    recovery_cr="$(_cr_json 2>/dev/null || true)"
-    if bool "$fence_released" && [[ -n "$recovery_cr" ]] && [[ "$(_primary_index "$recovery_cr")" == "$FROM_INDEX" ]]; then
+    if bool "$fence_released" && _wait_switch "$FROM_INDEX" "$RECOVERY_TIMEOUT"; then
       emit ERROR SWITCH_TIMEOUT_ROLLED_BACK "switch to podIndex ${TARGET_INDEX} did not complete within ${WAIT_TIMEOUT}s; auto-rolled back to ${FROM_INDEX} (DB is primary-serving again)" false \
         "$(jq -c '. + {recovered: true, fence_released: true}' <<<"$recovery")"; exit 1
     fi

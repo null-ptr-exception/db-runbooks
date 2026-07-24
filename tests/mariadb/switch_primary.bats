@@ -10,7 +10,7 @@
 #
 # Scope covers the happy-path switch plus the live SQL-health fallback: the
 # latter pauses the controller and removes only its replica status map so the
-# real task must query the still-running replicas with SHOW SLAVE STATUS. The
+# real task must query the still-running replicas with SHOW ALL SLAVES STATUS. The
 # stuck-switch recovery ladder (rollback / gated pod-eviction) stays unit-tested;
 # validating it needs a fault-injection harness tracked in #59.
 
@@ -49,14 +49,31 @@ setup() {
 
   OPERATOR_SCALED_DOWN=false
   OPERATOR_ORIGINAL_REPLICAS=""
+  WRITER_PID=""
 }
 
 teardown() {
+  _stop_writer
   # The SQL-fallback e2e deliberately pauses the controller. Always restore it,
   # including when an assertion in that test fails midway through.
   if [[ "${OPERATOR_SCALED_DOWN:-false}" == "true" ]]; then
     _restore_operator
   fi
+}
+
+_stop_writer() {
+  if [[ -n "${WRITER_PID:-}" ]]; then
+    kill -TERM -- "-${WRITER_PID}" >/dev/null 2>&1 || true
+    wait "$WRITER_PID" >/dev/null 2>&1 || true
+    WRITER_PID=""
+  fi
+}
+
+_start_writer() {
+  set -m
+  _writer_loop &
+  WRITER_PID=$!
+  set +m
 }
 
 # Always leave the primary back on podIndex 0 so later suites see the original
@@ -204,17 +221,43 @@ _switch_payload() {
 }
 
 _root_password() {
-  kubectl --context "$CTX_A" -n mariadb-1 get secret mariadb \
+  local request_timeout="${1:-0}"
+  kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 get secret mariadb \
     -o jsonpath='{.data.password}' | base64 -d
 }
 
 # Run SQL as root on the CURRENT primary pod.
 _sql_primary() {
-  local query="$1" primary password
-  primary="$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.currentPrimary}')"
-  password="$(_root_password)"
-  kubectl --context "$CTX_A" -n mariadb-1 exec "$primary" -c mariadb -- \
+  local query="$1" request_timeout="${2:-0}" primary password
+  primary="$(kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 get mariadb mariadb -o jsonpath='{.status.currentPrimary}')"
+  password="$(_root_password "$request_timeout")"
+  kubectl --request-timeout="$request_timeout" --context "$CTX_A" -n mariadb-1 exec "$primary" -c mariadb -- \
     mariadb -u root -p"${password}" -N -B -e "$query"
+}
+
+_writer_loop() {
+  local seq=0
+  while true; do
+    seq=$((seq + 1))
+    _sql_primary "INSERT INTO switch_e2e.events(note) VALUES ('continuous-${seq}')" >/dev/null 2>&1 || true
+    sleep 0.2
+  done
+}
+
+_event_count() {
+  _sql_primary 'SELECT COUNT(*) FROM switch_e2e.events' "${EVENT_COUNT_PROBE_TIMEOUT:-10s}"
+}
+
+_wait_for_event_count_greater_than() {
+  local baseline="$1" max_wait="${2:-60}" elapsed=0 count=0
+  while (( elapsed < max_wait )); do
+    count="$(_event_count 2>/dev/null || echo 0)"
+    [[ "$count" =~ ^[0-9]+$ ]] && (( count > baseline )) && return 0
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  echo "continuous writer did not advance beyond ${baseline} rows" >&2
+  return 1
 }
 
 # --- Tests ---
@@ -269,7 +312,7 @@ _dump_state() {
   # The current operator normally publishes status.replication.replicas, so
   # briefly stop only its controller and remove that status field. The database
   # pods stay running. This deterministically drives the production task through
-  # real pod exec + SHOW SLAVE STATUS without adding a test-only code switch.
+  # real pod exec + SHOW ALL SLAVES STATUS without adding a test-only code switch.
   _wait_for_all_replicas_caught_up 120
   local from data to
   from="$(_primary_index)"
@@ -291,7 +334,7 @@ _dump_state() {
   data="$(_task_result_data)"
   echo "# SQL fallback dry_run result: $data" >&3
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SWITCH_DRY_RUN"
-  assert_equal "$(echo "$data" | jq -r '.replicas_source')" "show_slave_status"
+  assert_equal "$(echo "$data" | jq -r '.replicas_source')" "show_all_slaves_status"
   assert_equal "$(echo "$data" | jq -r '.target_auto_selected')" "true"
   to="$(echo "$data" | jq -r '.to_pod_index')"
   [ "$to" != "$from" ]
@@ -305,8 +348,15 @@ _dump_state() {
   local from target; from="$(_primary_index)"; target="$(_other_index "$from")"
   echo "# switching primary ${from} -> ${target}" >&3
   _dump_state
-  # lag_threshold 30 tolerates minor idle-replication lag so the pre-check
-  # doesn't flake; the replicas are otherwise caught up.
+  _sql_primary "CREATE DATABASE IF NOT EXISTS switch_e2e; \
+    CREATE TABLE IF NOT EXISTS switch_e2e.events (id BIGINT AUTO_INCREMENT PRIMARY KEY, note VARCHAR(128)); \
+    INSERT INTO switch_e2e.events(note) VALUES ('pre-switch-sentinel');"
+  local before_count
+  before_count="$(_event_count)"
+  _start_writer
+  _wait_for_event_count_greater_than "$before_count" 30
+  before_count="$(_event_count)"
+
   _submit "switch-primary" "$(_switch_payload "$target" true)"
   local data; data="$(_task_result_data)"
   echo "# switch result: $data" >&3
@@ -316,10 +366,12 @@ _dump_state() {
 
   # The operator must have actually flipped the primary...
   assert_equal "$(_primary_index)" "$target"
-  # ...and the new primary must be genuinely writable (not just a status flip).
-  _sql_primary "CREATE DATABASE IF NOT EXISTS switch_e2e; \
-    CREATE TABLE IF NOT EXISTS switch_e2e.t (id INT PRIMARY KEY); \
-    INSERT INTO switch_e2e.t VALUES (1);"
-  run _sql_primary "SELECT COUNT(*) FROM switch_e2e.t"
-  assert_output "1"
+  # ...the fenced pre-switch position must be present, and the service must
+  # resume accepting the continuous writer on the new primary.
+  run _sql_primary "SELECT COUNT(*) FROM switch_e2e.events WHERE note='pre-switch-sentinel'"
+  assert_output --regexp '^[1-9][0-9]*$'
+  local post_switch_count
+  post_switch_count="$(_event_count)"
+  _wait_for_event_count_greater_than "$post_switch_count" 60
+  _stop_writer
 }

@@ -1526,3 +1526,58 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Pods gateway (see docs/mongodb/pods.md). Pure Kubernetes-level Pod
+  # list/delete for the StatefulSet backing this namespace's MongoDB
+  # deployment — never connects to mongod, works unchanged for Bitnami and
+  # official images. Distinct from ops/kill, which kills a mongod OPERATION
+  # by opid, not a Pod. sts_name is deliberately NOT a task input — same
+  # auto-detect tier as ops/* (CLAUDE.md "Configuration Layers").
+  pods/list:
+    script: mongodb/pods/list.sh
+    description: "Read-only: list the live Pods belonging to this namespace's MongoDB StatefulSet"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pods/delete:
+    script: mongodb/pods/delete.sh
+    description: "Delete a Pod belonging to this namespace's MongoDB StatefulSet (dry_run -> confirm); the StatefulSet recreates it"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

@@ -895,6 +895,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "delete"]   # delete is for recovery_wipe_pod force-deleting a not-Ready target pod
+    # (also shared by pods/delete, see docs/mongodb/pods.md — a separate,
+    # directly caller-invoked capability, not part of this pipeline)
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]            # for mongosh exec inside pods

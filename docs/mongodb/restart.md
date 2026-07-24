@@ -24,7 +24,9 @@ to complete. Behavior automatically adapts to the StatefulSet's
 - `OnDelete`: an operator or human is expected to delete pods to pick up the
   new template; the task instead waits for pods matching a label selector
   (`app.kubernetes.io/name=<sts_name>` by default) to cycle through
-  NotReady → Ready.
+  NotReady → Ready. `pods/delete` (see `docs/mongodb/pods.md`) is one way to
+  do that "operator or human" delete for a single pod on demand; `restart`
+  itself does not call it.
 
 ## Input
 
@@ -80,8 +82,9 @@ grants, scoped to `mongo-1`/the target namespace:
   configured StatefulSet name) — drives `kubectl rollout restart`.
 - `statefulsets`: `list`, `watch` (namespace-wide) — strategy/status detection.
 - `pods`: `get`, `list`, `delete` — `restart` uses `get`/`list` to poll
-  readiness; `delete` is used by other MongoDB tasks sharing this ClusterRole,
-  not by `restart`.
+  readiness; `delete` is used by other MongoDB tasks sharing this ClusterRole
+  (recovery's `recovery_wipe_pod`, and `pods/delete` — see
+  `docs/mongodb/pods.md`), not by `restart`.
 - `pods/exec`: `create` — used by other MongoDB tasks sharing this
   ClusterRole, not by `restart`.
 - `secrets`: `get` (pinned to the credential secret) — used by other MongoDB

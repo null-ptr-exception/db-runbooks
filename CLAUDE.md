@@ -203,6 +203,27 @@ protected-secret list are internal-config/auto-detect only, and secret
 VALUES arrive PGP-encrypted against the deployment key, never as plaintext
 task inputs.
 
+**Pods gateway (`pods/*`)**: `pods/list` and `pods/delete`, served by BOTH
+gateways — API-shape-agnostic across DBs (same inputs, gating, and
+result-code contract) but, unlike `secrets/*`, **not** the same script:
+each gateway resolves its own instance and exact member-pod list with its
+own DB-specific library (`mongodb-recovery.sh`'s `recovery_resolve_sts_name`
++ `k8s.sh`'s `_k8s_sts_owned_pod_names` for MongoDB;
+`mariadb.sh`'s `mariadb_autodetect_target` + `mariadb_list_member_pods` for
+MariaDB), then share only a small generic K8s-status-formatting helper
+(`lib/pods.sh`). See `docs/mongodb/pods.md` / `docs/mariadb/pods.md`. Pure
+Kubernetes-API operations — neither task connects to the database engine or
+reads a credential, so `pods/list` works even when the database itself is
+down, and both work unchanged across MongoDB's Bitnami/official image
+split. The instance name is not a task input (auto-detect tier, same as
+`ops/*`); `pods/delete`'s `target_pod` is required and is always verified
+against the resolved instance's exact member-pod list before any delete
+(`POD_NOT_MEMBER` otherwise) — a task-level safety boundary independent of
+the underlying RBAC grant, which is an unscoped `delete` on `pods` in the
+namespace. Whether the delete is graceful or forced
+(`--grace-period=0 --force`) is decided internally from the pod's own
+`Ready` condition, never a caller-facing field.
+
 **G1 self-heal**: `wipe`/`recover` (gate mode only — `pre-check` stays
 read-only) go one step further than detection when the `data-recovery` init
 container itself is missing: instead of just failing G1 with a manual-setup

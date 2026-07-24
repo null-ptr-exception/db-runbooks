@@ -987,3 +987,44 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Pods gateway (see docs/mariadb/pods.md). Pure Kubernetes-level Pod
+  # list/delete for this namespace's MariaDB instance. The instance itself
+  # is deliberately NOT a task input — same auto-detect tier as
+  # list-backups/delete-backup (CLAUDE.md "Configuration Layers").
+  pods/list:
+    script: mariadb/pods/list.sh
+    description: "Read-only: list the live Pods belonging to this namespace's MariaDB instance"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+  pods/delete:
+    script: mariadb/pods/delete.sh
+    description: "Delete a Pod belonging to this namespace's MariaDB instance (dry_run -> confirm); the StatefulSet recreates it"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"

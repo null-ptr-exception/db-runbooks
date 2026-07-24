@@ -13,7 +13,9 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    # delete: pods/delete gateway task (see docs/mariadb/pods.md), scoped in
+    # code to the resolved instance's own member pods only.
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

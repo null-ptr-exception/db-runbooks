@@ -12,7 +12,7 @@ setup_file() {
 task_inputs() {
   awk -v wanted="$1" '
     $0 == "  " wanted ":" { in_task=1; in_input=0; next }
-    in_task && /^  [A-Za-z0-9_-]+:$/ { exit }
+    in_task && /^  [A-Za-z0-9_\/-]+:$/ { exit }
     in_task && /^    input:$/ { in_input=1; next }
     in_task && in_input && /^      - name: / {
       sub(/^      - name: /, "")

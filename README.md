@@ -277,7 +277,8 @@ Run `./scripts/preflight.sh` — it installs everything above (plus the
 bats test helpers.
 
 Skaffold is intentionally not installed: the active suites build with Docker,
-load images with Kind, and deploy with Helmfile.
+load images with Kind, and deploy with Helmfile. Preflight also removes stale
+Skaffold installations and shims left on self-hosted runners.
 
 ### CI
 

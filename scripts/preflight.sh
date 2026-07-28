@@ -39,6 +39,29 @@ _ensure_local_bin() {
   fi
 }
 
+_remove_obsolete_binary() {
+  local path="$1"
+
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+
+  _fix "Removing obsolete binary: $path"
+  if rm -f -- "$path" 2>/dev/null; then
+    :
+  elif command -v sudo &>/dev/null && sudo -n rm -f -- "$path"; then
+    :
+  else
+    _err "cannot remove obsolete binary: $path"
+    return 1
+  fi
+
+  if [[ -e "$path" || -L "$path" ]]; then
+    _err "obsolete binary remains: $path"
+    return 1
+  fi
+}
+
 echo "======================================="
 echo " Preflight: checking required tools"
 echo "======================================="
@@ -110,9 +133,20 @@ echo ""
 echo "=== mise tools ==="
 mise trust "$ROOT_DIR" 2>/dev/null || true
 
+# Skaffold is no longer used, but self-hosted runners may retain an older
+# vulnerable installation. Purge both mise-managed versions and known shims.
+if mise ls --installed --json | jq -e '.skaffold | length > 0' &>/dev/null; then
+  _fix "Uninstalling obsolete Skaffold versions from mise..."
+  mise uninstall --all --yes skaffold
+fi
+_remove_obsolete_binary "$LOCAL_BIN/skaffold"
+_remove_obsolete_binary "/app/kin/bin/skaffold"
+
 # Lint-only tooling is skipped by default to avoid blocking setup/test flows
 # when upstream release mirrors are temporarily unavailable.
-RUNTIME_MISE_TOOLS=(kubectl helm skaffold helmfile ctlptl)
+# The suites build with Docker, load with Kind, and deploy with Helmfile.
+# Keep unused Skaffold out of the active toolchain.
+RUNTIME_MISE_TOOLS=(kubectl helm helmfile ctlptl)
 if [[ "${PREFLIGHT_INSTALL_SHELLCHECK:-0}" == "1" ]]; then
   RUNTIME_MISE_TOOLS+=(shellcheck)
 fi

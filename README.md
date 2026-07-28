@@ -269,12 +269,16 @@ suites against fresh Kind clusters per job.
 ## 📦 Prerequisites
 
 - **Docker**
-- **[mise](https://mise.jdx.dev/)** (manages `kubectl`/`helm`/`helmfile`/`ctlptl`/`skaffold` versions per `.mise.toml`)
+- **[mise](https://mise.jdx.dev/)** (manages `kubectl`/`helm`/`helmfile`/`ctlptl` versions per `.mise.toml`)
 - **[Kind](https://kind.sigs.k8s.io/)**, **[BATS](https://bats-core.readthedocs.io/)**, `jq`
 
 Run `./scripts/preflight.sh` — it installs everything above (plus the
 `helm-diff` plugin helmfile needs) into `~/.local/bin` / mise, and clones the
 bats test helpers.
+
+Skaffold is intentionally not installed: the active suites build with Docker,
+load images with Kind, and deploy with Helmfile. Preflight also removes stale
+Skaffold installations and shims left on self-hosted runners.
 
 ### CI
 

@@ -112,7 +112,9 @@ mise trust "$ROOT_DIR" 2>/dev/null || true
 
 # Lint-only tooling is skipped by default to avoid blocking setup/test flows
 # when upstream release mirrors are temporarily unavailable.
-RUNTIME_MISE_TOOLS=(kubectl helm skaffold helmfile ctlptl)
+# The suites build with Docker, load with Kind, and deploy with Helmfile.
+# Keep unused Skaffold out of the active toolchain and CI image.
+RUNTIME_MISE_TOOLS=(kubectl helm helmfile ctlptl)
 if [[ "${PREFLIGHT_INSTALL_SHELLCHECK:-0}" == "1" ]]; then
   RUNTIME_MISE_TOOLS+=(shellcheck)
 fi

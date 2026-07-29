@@ -24,19 +24,19 @@ on the MariaDB deployment.
 |---|---|---|
 | Gateway host (sandbox) | `aqsh-mongodb.kind-a.test:30080` | `aqsh-mariadb.kind-a.test:30080` |
 | Instance resolution | `recovery_resolve_sts_name` — internal config → exactly-one-StatefulSet auto-detect → hardcoded `mongodb` fallback | `mariadb_autodetect_target` — MariaDB CR first, same-named StatefulSet fallback for operator-less deployments; ambiguous/none fails closed (`DATABASE_CONFIGURATION_AMBIGUOUS` / `DATABASE_NOT_FOUND`), no hardcoded-name fallback |
-| Member-pod membership | `_k8s_sts_owned_pod_names` — **live** ownerReference check against currently-existing Pods | `mariadb_list_member_pods` — ordinal names (`<instance>-0..N-1`) generated from the resolved replica count; does **not** re-verify each name still exists as a live Pod |
+| Member-pod membership | `_k8s_sts_owned_pod_names` — **live** ownerReference check against currently-existing Pods | `mariadb_list_member_pods` — ordinal names (`<instance>-0..N-1`) generated from the resolved replica count, intersected against `_k8s_sts_owned_pod_names` for the same-named StatefulSet — a Pod that merely carries the expected name but isn't actually owned by it (e.g. during a recreation race) is never a candidate |
 | Result envelope | Flat (`write_task_result`/`fail_task`, matching `ops/*`) | Nested (`response_ok`/`mdbt_fail`, matching `restart`/`list-backups`/`delete-backup`) — top-level `reason` on both success and failure, domain fields under `.data` |
 | RBAC | Already had `pods: get/list/delete` — no change | `pods` previously had only `get/list/watch`; **`delete` added** for this family (`tests/chart/templates/mariadb-rbac.yaml`) |
 
-The membership-resolution difference has one behavioral consequence: because
-MariaDB's member list is name-pattern-based rather than live-verified, the
-`POD_ALREADY_DELETED` short-circuit is reliably reachable there (a
-force-deleted, not-yet-recreated ordinal still passes membership, then fails
-the live-existence check). On the MongoDB side the same short-circuit exists
-defensively (e.g. a second, concurrent `pods/delete` call racing the first),
-but ordinary sequential use will see `POD_NOT_MEMBER` instead during the
-narrow recreation window, since a fully-gone Pod also drops out of the live
-ownerReference list. Neither behavior is incorrect — both fail closed.
+Both gateways now resolve membership the same way — generated/candidate
+names are never trusted on their own, only Pods whose live ownerReferences
+name the resolved StatefulSet. This matters because the RBAC grant on both
+sides is a namespace-wide unscoped `delete` on `pods`; the in-script
+membership check is the only thing standing between that grant and an
+arbitrary Pod in the namespace. One consequence: a fully-gone Pod also drops
+out of the live ownerReference list, so a concurrent/racing `pods/delete`
+call on both DBs will ordinarily see `POD_NOT_MEMBER` rather than reaching
+the `POD_ALREADY_DELETED` short-circuit — both fail closed either way.
 
 ## Usage Scenario: recycle a replica in mariadb-1
 

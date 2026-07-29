@@ -68,26 +68,48 @@ pods_status_json() {
 
 # ---------------------------------------------------------------------------
 # pods_is_ready <pod_name>
-# True (rc 0) when the pod's Ready condition is "True". Used to decide
-# graceful vs. forced delete — never a caller-facing input, since a stuck
-# not-Ready pod is exactly the case a forced delete exists to unblock (same
-# rationale as recovery_wipe_pod in mongodb-recovery.sh).
+# rc 0: the pod's Ready condition is "True".
+# rc 1: confirmed negative — the pod exists but isn't Ready, or is gone
+#       (NotFound). Used to decide graceful vs. forced delete — never a
+#       caller-facing input, since a stuck not-Ready pod is exactly the case
+#       a forced delete exists to unblock (same rationale as
+#       recovery_wipe_pod in mongodb-recovery.sh).
+# rc 2: the kubectl call itself failed (API/auth/transport error) — NOT a
+#       confirmed negative. Callers must not treat this the same as rc 1:
+#       collapsing a transient read failure into "not ready" would force a
+#       --grace-period=0 --force delete based on no real signal.
 # ---------------------------------------------------------------------------
 pods_is_ready() {
   local pod="${1:?pod is required}"
-  local status
-  status=$(_kubectl get pod "$pod" \
-    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || return 1
-  [[ "$status" == "True" ]]
+  local out
+  if ! out=$(_kubectl get pod "$pod" \
+    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>&1); then
+    grep -qi 'notfound' <<<"$out" && return 1
+    log_error "pods_is_ready" "could not determine readiness of ${pod}: ${out}"
+    return 2
+  fi
+  [[ "$out" == "True" ]]
 }
 
 # ---------------------------------------------------------------------------
 # pods_exists <pod_name>
-# True (rc 0) when the pod is still present in the live cluster.
+# rc 0: the pod is present in the live cluster.
+# rc 1: confirmed negative — the API server returned NotFound.
+# rc 2: the kubectl call itself failed for any other reason (API/auth/
+#       transport error) — NOT a confirmed negative. Callers must not treat
+#       this the same as rc 1: collapsing a transient read failure into
+#       "pod is gone" can report a false POD_ALREADY_DELETED success while
+#       an API outage — not an actual deletion — is what happened.
 # ---------------------------------------------------------------------------
 pods_exists() {
   local pod="${1:?pod is required}"
-  _kubectl get pod "$pod" >/dev/null 2>&1
+  local out
+  if out=$(_kubectl get pod "$pod" -o name 2>&1); then
+    return 0
+  fi
+  grep -qi 'notfound' <<<"$out" && return 1
+  log_error "pods_exists" "could not determine whether ${pod} exists: ${out}"
+  return 2
 }
 
 # ---------------------------------------------------------------------------
@@ -98,16 +120,20 @@ pods_exists() {
 # Without --wait=false, `kubectl delete pod` blocks until the Pod object is
 # fully removed, which can outlast the task's own exec timeout under normal
 # termination-grace-period delays or cluster slowness and turn a successful
-# delete into a spurious task failure. stdout/stderr of kubectl is returned
-# to the caller for error reporting. force=true adds --grace-period=0
-# --force (used only when the pod is not Ready — see pods_is_ready).
+# delete into a spurious task failure. --ignore-not-found keeps this call
+# idempotent for its own callers too: pods_exists is checked first, but the
+# Pod can disappear between that check and this call (e.g. a concurrent
+# delete), and a named-Pod delete does not treat NotFound as success by
+# default. stdout/stderr of kubectl is returned to the caller for error
+# reporting. force=true adds --grace-period=0 --force (used only when the
+# pod is not Ready — see pods_is_ready).
 # ---------------------------------------------------------------------------
 pods_delete() {
   local pod="${1:?pod is required}"
   local force="${2:-false}"
   if [[ "$force" == "true" ]]; then
-    _kubectl delete pod "$pod" --grace-period=0 --force --wait=false 2>&1
+    _kubectl delete pod "$pod" --grace-period=0 --force --wait=false --ignore-not-found 2>&1
   else
-    _kubectl delete pod "$pod" --wait=false 2>&1
+    _kubectl delete pod "$pod" --wait=false --ignore-not-found 2>&1
   fi
 }

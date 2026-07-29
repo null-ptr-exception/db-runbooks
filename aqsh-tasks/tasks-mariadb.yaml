@@ -1002,6 +1002,12 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   pods/delete:
     script: mariadb/pods/delete.sh
     description: "Delete a Pod belonging to this namespace's MariaDB instance (dry_run -> confirm); the StatefulSet recreates it"
@@ -1028,3 +1034,9 @@ tasks:
         required: false
         type: string
         default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

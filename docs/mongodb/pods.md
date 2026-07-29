@@ -142,6 +142,7 @@ Success result:
 | `INVALID_INPUT` | failed | Gate violation (`dry_run`/`confirm` conflict, or missing `confirm`) |
 | `POD_NOT_MEMBER` | failed | `target_pod` is not an owned member of the resolved StatefulSet |
 | `PODS_LIST_FAILED` | failed | Could not list/read pods for the resolved StatefulSet |
+| `POD_STATUS_UNKNOWN` | failed | Could not confirm `target_pod`'s existence/readiness (e.g. a transient API error) — distinct from a confirmed NotFound, which is `POD_ALREADY_DELETED` |
 | `DELETE_FAILED` | failed | The Kubernetes API rejected the delete itself |
 
 ---

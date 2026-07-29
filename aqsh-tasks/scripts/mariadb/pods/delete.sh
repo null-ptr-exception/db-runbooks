@@ -17,6 +17,7 @@ set -euo pipefail
 #   TARGET_POD   — required; the pod to delete
 #   DRY_RUN      — default "true": resolve and validate, change nothing
 #   CONFIRM      — must be "true" when DRY_RUN is "false"
+#   LOG_LEVEL    — optional per-call log verbosity, matching MongoDB's gateway
 #
 # The instance itself is not a task input (see CLAUDE.md "Configuration
 # Layers") — same auto-detect as pods/list. Whether the delete is graceful
@@ -42,6 +43,7 @@ source "${LIB_DIR}/mariadb.sh"
 source "${LIB_DIR}/pods.sh"
 
 mdbt_load_config
+log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
 
 OP="pods-delete"
 
@@ -90,18 +92,34 @@ fi
 # the same way mdbt_error_response splices one onto response_err — so a
 # caller can always branch on top-level "reason" regardless of status.
 
-# Already gone: idempotent success, skip the gate entirely.
-if ! pods_exists "$TARGET_POD"; then
+# Already gone: idempotent success, skip the gate entirely. pods_exists
+# distinguishes a confirmed-gone Pod (rc 1) from a failed status check
+# (rc 2, e.g. a transient API error) — only the former is safe to report as
+# POD_ALREADY_DELETED; the latter must abort instead of silently masking an
+# unreachable API server as "nothing to delete".
+EXISTS_RC=0
+pods_exists "$TARGET_POD" || EXISTS_RC=$?
+if [[ "$EXISTS_RC" -eq 1 ]]; then
   log_info "$OP" "${TARGET_POD} already gone"
   mdbt_write_result "$(response_ok "$OP" "Pod ${TARGET_POD} does not exist; nothing to delete." "$(jq -n \
     --arg namespace "$NAMESPACE" --arg instance "$MARIADB_NAME" --arg target_pod "$TARGET_POD" \
     '{namespace:$namespace, instance:$instance, target_pod:$target_pod, deleted:false}')" | \
     jq -c '. + {reason: "POD_ALREADY_DELETED"}')"
   exit 0
+elif [[ "$EXISTS_RC" -eq 2 ]]; then
+  mdbt_fail "$OP" "could not determine whether ${TARGET_POD} exists" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "POD_STATUS_UNKNOWN"
 fi
 
 FORCE="false"
-pods_is_ready "$TARGET_POD" || FORCE="true"
+READY_RC=0
+pods_is_ready "$TARGET_POD" || READY_RC=$?
+if [[ "$READY_RC" -eq 1 ]]; then
+  FORCE="true"
+elif [[ "$READY_RC" -eq 2 ]]; then
+  mdbt_fail "$OP" "could not determine readiness of ${TARGET_POD}" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "POD_STATUS_UNKNOWN"
+fi
 log_debug "$OP" "target_pod=${TARGET_POD} force=${FORCE}"
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then

@@ -65,7 +65,13 @@ if ! grep -qxF "$_TARGET_POD" <<<"$_MEMBER_NAMES"; then
 fi
 
 # ── Already gone: idempotent success, skip the gate entirely ───────────────
-if ! pods_exists "$_TARGET_POD"; then
+# pods_exists distinguishes a confirmed-gone Pod (rc 1) from a failed status
+# check (rc 2, e.g. a transient API error) — only the former is safe to
+# report as POD_ALREADY_DELETED; the latter must abort instead of silently
+# masking an unreachable API server as "nothing to delete".
+_EXISTS_RC=0
+pods_exists "$_TARGET_POD" || _EXISTS_RC=$?
+if [[ "$_EXISTS_RC" -eq 1 ]]; then
   log_info "pods-delete" "${_TARGET_POD} already gone"
   write_task_result "$(jq -n \
     --arg namespace "$DB_NAMESPACE" \
@@ -75,11 +81,17 @@ if ! pods_exists "$_TARGET_POD"; then
       summary:("Pod " + $target_pod + " does not exist; nothing to delete."),
       namespace:$namespace, instance:$instance, target_pod:$target_pod, deleted:false}')"
   exit 0
+elif [[ "$_EXISTS_RC" -eq 2 ]]; then
+  fail_task "POD_STATUS_UNKNOWN" "could not determine whether ${_TARGET_POD} exists"
 fi
 
 _FORCE="false"
-if ! pods_is_ready "$_TARGET_POD"; then
+_READY_RC=0
+pods_is_ready "$_TARGET_POD" || _READY_RC=$?
+if [[ "$_READY_RC" -eq 1 ]]; then
   _FORCE="true"
+elif [[ "$_READY_RC" -eq 2 ]]; then
+  fail_task "POD_STATUS_UNKNOWN" "could not determine readiness of ${_TARGET_POD}"
 fi
 log_debug "pods-delete" "target_pod=${_TARGET_POD} ready=$([[ "$_FORCE" == "true" ]] && echo false || echo true) force=${_FORCE}"
 

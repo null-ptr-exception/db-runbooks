@@ -13,6 +13,7 @@ set -euo pipefail
 #
 # The NAMESPACE is the only required input; the instance itself is
 # auto-detected — never a task input (see CLAUDE.md "Configuration Layers").
+# LOG_LEVEL is optional per-call log verbosity, matching the MongoDB gateway.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -33,6 +34,7 @@ source "${LIB_DIR}/mariadb.sh"
 source "${LIB_DIR}/pods.sh"
 
 mdbt_load_config
+log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
 
 OP="pods-list"
 

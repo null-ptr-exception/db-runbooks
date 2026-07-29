@@ -92,16 +92,22 @@ pods_exists() {
 
 # ---------------------------------------------------------------------------
 # pods_delete <pod_name> <force: true|false>
-# Issues the delete; stdout/stderr of kubectl is returned to the caller for
-# error reporting. force=true adds --grace-period=0 --force (used only when
-# the pod is not Ready — see pods_is_ready).
+# Issues the delete and returns as soon as the API server accepts it
+# (--wait=false) — callers only "issue" the delete, they never wait for the
+# Pod to fully terminate (see docs/mongodb/pods.md, docs/mariadb/pods.md).
+# Without --wait=false, `kubectl delete pod` blocks until the Pod object is
+# fully removed, which can outlast the task's own exec timeout under normal
+# termination-grace-period delays or cluster slowness and turn a successful
+# delete into a spurious task failure. stdout/stderr of kubectl is returned
+# to the caller for error reporting. force=true adds --grace-period=0
+# --force (used only when the pod is not Ready — see pods_is_ready).
 # ---------------------------------------------------------------------------
 pods_delete() {
   local pod="${1:?pod is required}"
   local force="${2:-false}"
   if [[ "$force" == "true" ]]; then
-    _kubectl delete pod "$pod" --grace-period=0 --force 2>&1
+    _kubectl delete pod "$pod" --grace-period=0 --force --wait=false 2>&1
   else
-    _kubectl delete pod "$pod" 2>&1
+    _kubectl delete pod "$pod" --wait=false 2>&1
   fi
 }

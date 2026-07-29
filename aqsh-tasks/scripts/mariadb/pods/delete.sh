@@ -52,6 +52,16 @@ TARGET_POD="${TARGET_POD:-}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
 
+# dry_run must be an explicit "true"/"false" (schema-enforced too) — this is
+# a safety control, not a generic flag: mdbt_bool_json treats any
+# unrecognized string as false, so a typo like dry_run="flase" combined with
+# confirm=true would otherwise skip the dry-run gate entirely and perform
+# the delete.
+if [[ "$DRY_RUN" != "true" && "$DRY_RUN" != "false" ]]; then
+  mdbt_fail "$OP" "dry_run must be a boolean (true/false); got '${DRY_RUN}'" \
+    "$(jq -n --arg dry_run "$DRY_RUN" '{dry_run: $dry_run}')" 2 "INVALID_REQUEST"
+fi
+
 # Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
   mdbt_require_confirm "$OP" "$CONFIRM"

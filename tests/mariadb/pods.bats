@@ -163,6 +163,16 @@ run_pods_task() {
   assert_equal "$RESULT_REASON" "INVALID_REQUEST"
 }
 
+# Note: there is no "dry_run=flase (typo)" test here — the tasks.yaml
+# pattern for `dry_run` (`^(true|false)$`) already rejects it at submission
+# (HTTP 400, before the script — and its own belt-and-braces literal
+# comparison — ever runs), the same "not worth double-testing a format
+# guard" call fcv.bats/profiler.bats make on the MongoDB side for their own
+# pattern-guarded inputs. dry_run is safety-critical (an unrecognized value
+# must never be silently treated as false and fall through to a real
+# delete), which is exactly why it gets a strict enum pattern instead of
+# the free-form `type: string` most other boolean-ish inputs use.
+
 @test "pods/delete rejects a target_pod that is not a member of the instance" {
   run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-pods-test-auxiliary\"}"
   assert_equal "$TASK_STATUS" "failed"

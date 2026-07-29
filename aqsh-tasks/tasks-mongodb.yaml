@@ -1570,6 +1570,7 @@ tasks:
         required: false
         type: string
         default: "true"
+        pattern: '^(true|false)$'
       - name: confirm
         env: CONFIRM
         required: false

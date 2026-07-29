@@ -45,6 +45,13 @@ DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
 
 # ── Gate (same triad as ops/kill) ────────────────────────────────────────────
+# dry_run must be an explicit "true"/"false" (schema-enforced too) — this is
+# a safety control, not a generic flag: bool_enabled treats any unrecognized
+# string as false, so a typo like dry_run="flase" combined with confirm=true
+# would otherwise skip the dry-run gate entirely and perform the delete.
+if [[ "$DRY_RUN" != "true" && "$DRY_RUN" != "false" ]]; then
+  fail_task "INVALID_INPUT" "dry_run must be a boolean (true/false); got '${DRY_RUN}'"
+fi
 if bool_enabled "$DRY_RUN" && bool_enabled "$CONFIRM"; then
   fail_task "INVALID_INPUT" "confirm=true with dry_run=true is not supported"
 fi

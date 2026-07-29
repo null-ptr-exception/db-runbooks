@@ -108,7 +108,7 @@ erroring — `count` reflects what was actually readable at that moment.
 |---|---|---|---|
 | `namespace` | yes | — | Namespace of the MongoDB StatefulSet |
 | `target_pod` | yes | — | Pod to delete; must be an exact member of the auto-detected StatefulSet |
-| `dry_run` | no | `"true"` | Resolve and validate only; nothing is changed |
+| `dry_run` | no | `"true"` | Resolve and validate only; nothing is changed. Must be exactly `"true"` or `"false"` — schema- and script-enforced, since this is a safety control, not a generic flag: anything else (e.g. a `"flase"` typo) fails closed with `INVALID_INPUT` instead of being silently treated as `false` |
 | `confirm` | no | `"false"` | Must be `"true"` when `dry_run` is `"false"` |
 
 Gate rules (identical to `ops/kill`, `sts/orphan-delete`): `dry_run=true`
@@ -139,7 +139,7 @@ Success result:
 | `POD_DELETED` | completed | Delete issued; the StatefulSet will recreate the Pod |
 | `POD_ALREADY_DELETED` | completed | `target_pod` was already gone — not an error |
 | `DRY_RUN_READY` | completed | Validated; preview only, nothing changed |
-| `INVALID_INPUT` | failed | Gate violation (`dry_run`/`confirm` conflict, or missing `confirm`) |
+| `INVALID_INPUT` | failed | Gate violation: `dry_run` is not exactly `"true"`/`"false"`, a `dry_run`/`confirm` conflict, or missing `confirm` |
 | `POD_NOT_MEMBER` | failed | `target_pod` is not an owned member of the resolved StatefulSet |
 | `PODS_LIST_FAILED` | failed | Could not list/read pods for the resolved StatefulSet |
 | `POD_STATUS_UNKNOWN` | failed | Could not confirm `target_pod`'s existence/readiness (e.g. a transient API error) — distinct from a confirmed NotFound, which is `POD_ALREADY_DELETED` |

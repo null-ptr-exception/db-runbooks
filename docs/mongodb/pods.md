@@ -37,13 +37,17 @@ Operator / test-client (cluster-b)
      ▼
 aqsh (mongo-core, cluster-a) → mongodb/pods/delete.sh
      │ 1. gate: dry_run/confirm triad (same as ops/kill, sts/orphan-delete),
-     │      plus pod_uid required whenever dry_run=false
+     │      plus pod_uid required whenever dry_run=false — runs first and
+     │      unconditionally, before target_pod is ever looked up, so an
+     │      invalid request (e.g. dry_run=false with no pod_uid) always
+     │      fails INVALID_INPUT even if target_pod is already gone
      │ 2. resolve sts_name (3-tier, no task input)
      │ 3. fetch target_pod directly (single kubectl get -o json) — not a
      │      derived membership list, so an already-deleted target_pod is
      │      never mistaken for "not a member" (see below)
      │ 4. target_pod not found? → POD_ALREADY_DELETED, completed
-     │      (idempotent short-circuit; skips the gate entirely)
+     │      (idempotent short-circuit past membership/precondition/delete —
+     │      steps 5-8 below — for a request that already cleared the gate)
      │ 5. target_pod's ownerReferences don't name this StatefulSet?
      │      → POD_NOT_MEMBER, failed
      │ 6. dry_run? → DRY_RUN_READY preview (would graceful/force?, pod_uid)

@@ -140,6 +140,19 @@ teardown_file() {
 setup() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+
+  STS_SCALED_DOWN=false
+}
+
+teardown() {
+  # The "already gone" test below scales the StatefulSet down by one. Always
+  # restore it, including when an assertion or wait fails midway — otherwise
+  # a failure there leaves mongodb-1 permanently absent for every later test
+  # in this file.
+  if [[ "${STS_SCALED_DOWN:-false}" == "true" ]]; then
+    kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=2
+    kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -301,6 +314,7 @@ run_pods_task() {
   # live-pods list, where an already-gone target simply isn't present and
   # so was misreported POD_NOT_MEMBER instead of the intended idempotent
   # POD_ALREADY_DELETED short-circuit.
+  STS_SCALED_DOWN=true
   kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=1
   kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=delete --timeout=120s
 
@@ -310,6 +324,7 @@ run_pods_task() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
 
   kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=2
+  STS_SCALED_DOWN=false
   kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
 }
 

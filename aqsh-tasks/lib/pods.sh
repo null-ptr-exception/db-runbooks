@@ -86,13 +86,23 @@ pods_status_json() {
 # ---------------------------------------------------------------------------
 pods_fetch_json() {
   local pod="${1:?pod is required}"
-  local out
-  if out=$(_kubectl get pod "$pod" -o json 2>&1); then
+  # stderr goes to a temp file, not 2>&1 (same idiom as k8s_get_sts_pods):
+  # kubectl can emit exit-0 stderr in shapes we can't enumerate (admission
+  # "Warning:" lines, client-go throttling notices, plugin output), and any
+  # of it merged into stdout would corrupt the JSON parsed downstream by
+  # pods_owned_by_sts/pods_uid/pods_ready — silently making a healthy Pod
+  # look like a non-member or non-ready one.
+  local out stderr_tmp err_detail
+  stderr_tmp=$(mktemp)
+  if out=$(_kubectl get pod "$pod" -o json 2>"$stderr_tmp"); then
+    rm -f "$stderr_tmp"
     printf '%s\n' "$out"
     return 0
   fi
-  grep -qi 'notfound' <<<"$out" && return 1
-  log_error "pods_fetch_json" "could not read ${pod}: ${out}"
+  err_detail=$(cat "$stderr_tmp")
+  rm -f "$stderr_tmp"
+  grep -qi 'notfound' <<<"$err_detail" && return 1
+  log_error "pods_fetch_json" "could not read ${pod}: ${err_detail}"
   return 2
 }
 

@@ -62,15 +62,26 @@ setup() {
   load '../test_helper/bats-assert/load'
 
   OPERATOR_SCALED_DOWN=false
+  OPERATOR_ORIGINAL_REPLICAS=""
+  STS_SCALED_DOWN=false
+  STS_ORIGINAL_REPLICAS=""
 }
 
 teardown() {
   # The "already gone" test below briefly pauses the mariadb-operator (same
-  # pattern as switch_primary.bats) so a directly-deleted Pod doesn't get
-  # recreated out from under the assertion. Always restore it, including
-  # when an assertion in that test fails midway.
+  # pattern as switch_primary.bats) AND scales the StatefulSet itself down
+  # by one — pausing the operator alone stops it fighting a manual scale,
+  # but the StatefulSet's own (built-in, not operator-managed) controller
+  # would otherwise still recreate a deleted Pod to match its existing
+  # replica count. Always restore both, including when an assertion or wait
+  # in that test fails midway.
+  if [[ "${STS_SCALED_DOWN:-false}" == "true" ]]; then
+    kubectl --context "$CTX_A" -n "$DB_NS" scale statefulset/mariadb \
+      --replicas="${STS_ORIGINAL_REPLICAS:-3}"
+  fi
   if [[ "${OPERATOR_SCALED_DOWN:-false}" == "true" ]]; then
-    kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas=1
+    kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator \
+      --replicas="${OPERATOR_ORIGINAL_REPLICAS:-1}"
   fi
 }
 
@@ -251,27 +262,39 @@ run_pods_task() {
 
 @test "pods/delete on an already-gone target reports POD_ALREADY_DELETED, not POD_NOT_MEMBER" {
   # Pause the mariadb-operator's reconciliation (same pattern as
-  # switch_primary.bats) so a directly-deleted Pod stays gone long enough to
-  # prove POD_ALREADY_DELETED is reachable, rather than shadowed by
-  # POD_NOT_MEMBER: mariadb_list_member_pods only lists currently-live,
-  # owned Pods, so an absent target previously always failed that check
-  # first.
-  local original_replicas
-  original_replicas=$(kubectl --context "$CTX_A" -n "$NS" \
+  # switch_primary.bats) so it won't fight a manual StatefulSet scale, THEN
+  # scale the StatefulSet itself down by one. Pausing only the operator is
+  # not enough on its own: the StatefulSet is still a plain Kubernetes
+  # object owned by the built-in (non-operator) StatefulSet controller,
+  # which would otherwise recreate a deleted mariadb-2 to match the STS's
+  # existing replica count regardless of whether the operator is running.
+  # Scaling the STS down removes that replacement source, so mariadb-2 stays
+  # gone long enough to prove POD_ALREADY_DELETED is reachable, rather than
+  # shadowed by POD_NOT_MEMBER: mariadb_list_member_pods only lists
+  # currently-live, owned Pods, so an absent target previously always
+  # failed that check first.
+  OPERATOR_ORIGINAL_REPLICAS=$(kubectl --context "$CTX_A" -n "$NS" \
     get deployment mariadb-operator -o jsonpath='{.spec.replicas}')
-  [[ "$original_replicas" =~ ^[1-9][0-9]*$ ]]
+  [[ "$OPERATOR_ORIGINAL_REPLICAS" =~ ^[1-9][0-9]*$ ]]
   OPERATOR_SCALED_DOWN=true
   kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas=0
   _wait_for_operator_scaled_down 60
 
-  kubectl --context "$CTX_A" -n "$DB_NS" delete pod mariadb-2 --wait=true --timeout=60s
+  STS_ORIGINAL_REPLICAS=$(kubectl --context "$CTX_A" -n "$DB_NS" \
+    get statefulset mariadb -o jsonpath='{.spec.replicas}')
+  [[ "$STS_ORIGINAL_REPLICAS" =~ ^[1-9][0-9]*$ ]]
+  STS_SCALED_DOWN=true
+  kubectl --context "$CTX_A" -n "$DB_NS" scale statefulset/mariadb --replicas=2
+  kubectl --context "$CTX_A" -n "$DB_NS" wait pod mariadb-2 --for=delete --timeout=120s
 
   run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$RESULT_REASON" "POD_ALREADY_DELETED"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
 
-  kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas="$original_replicas"
+  kubectl --context "$CTX_A" -n "$DB_NS" scale statefulset/mariadb --replicas="$STS_ORIGINAL_REPLICAS"
+  STS_SCALED_DOWN=false
+  kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas="$OPERATOR_ORIGINAL_REPLICAS"
   OPERATOR_SCALED_DOWN=false
   kubectl --context "$CTX_A" -n "$DB_NS" wait pod mariadb-2 --for=condition=Ready --timeout=180s
 }

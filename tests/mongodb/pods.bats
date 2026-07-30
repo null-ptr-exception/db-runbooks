@@ -239,6 +239,12 @@ run_pods_task() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
 }
 
+@test "pods/delete requires pod_uid when dry_run=false" {
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
+}
+
 # Note: there is no "dry_run=flase (typo)" test here — the tasks.yaml
 # pattern for `dry_run` (`^(true|false)$`) already rejects it at submission
 # (HTTP 400, before the script — and its own belt-and-braces literal
@@ -263,12 +269,20 @@ run_pods_task() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "DRY_RUN_READY"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.force')" "false"
+  [[ -n "$(echo "$RESULT_DATA" | jq -r '.pod_uid')" ]]
+  [[ "$(echo "$RESULT_DATA" | jq -r '.pod_uid')" != "null" ]]
 
   kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 >/dev/null
 }
 
 @test "pods/delete confirmed deletes the pod and the StatefulSet recreates it" {
-  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  local pod_uid
+  pod_uid=$(echo "$RESULT_DATA" | jq -r '.pod_uid')
+  [[ -n "$pod_uid" && "$pod_uid" != "null" ]]
+
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\",\"dry_run\":\"false\",\"confirm\":\"true\",\"pod_uid\":\"${pod_uid}\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "POD_DELETED"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "true"
@@ -278,4 +292,49 @@ run_pods_task() {
   run_pods_task "list" "{\"namespace\":\"${PNS}\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.count')" "2"
+}
+
+@test "pods/delete on an already-gone target reports POD_ALREADY_DELETED, not POD_NOT_MEMBER" {
+  # Scale down by one so mongodb-1 (the highest ordinal) is deleted by the
+  # StatefulSet controller itself and stays gone (not recreated) — the
+  # regression this guards against is delete.sh deriving membership from a
+  # live-pods list, where an already-gone target simply isn't present and
+  # so was misreported POD_NOT_MEMBER instead of the intended idempotent
+  # POD_ALREADY_DELETED short-circuit.
+  kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=1
+  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=delete --timeout=120s
+
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "POD_ALREADY_DELETED"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
+
+  kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=2
+  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+}
+
+@test "pods/delete rejects a confirm whose pod_uid no longer matches a same-name replacement" {
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  local stale_uid
+  stale_uid=$(echo "$RESULT_DATA" | jq -r '.pod_uid')
+  [[ -n "$stale_uid" && "$stale_uid" != "null" ]]
+
+  # Recreate mongodb-1 out from under the dry-run's observation, independent
+  # of the task under test, so its live UID no longer matches stale_uid —
+  # simulating a retry issued after the StatefulSet already replaced it.
+  kubectl --context "$CTX_A" -n "$PNS" delete pod mongodb-1 --wait=true --timeout=60s
+  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+  local new_uid
+  new_uid=$(kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 -o jsonpath='{.metadata.uid}')
+  assert_not_equal "$new_uid" "$stale_uid"
+
+  run_pods_task "delete" "{\"namespace\":\"${PNS}\",\"target_pod\":\"mongodb-1\",\"dry_run\":\"false\",\"confirm\":\"true\",\"pod_uid\":\"${stale_uid}\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "POD_REPLACED"
+
+  # The replacement Pod must survive the rejected delete untouched.
+  local after_uid
+  after_uid=$(kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 -o jsonpath='{.metadata.uid}')
+  assert_equal "$after_uid" "$new_uid"
 }

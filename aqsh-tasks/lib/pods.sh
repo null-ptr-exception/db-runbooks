@@ -67,33 +67,16 @@ pods_status_json() {
 }
 
 # ---------------------------------------------------------------------------
-# pods_is_ready <pod_name>
-# rc 0: the pod's Ready condition is "True".
-# rc 1: confirmed negative — the pod exists but isn't Ready, or is gone
-#       (NotFound). Used to decide graceful vs. forced delete — never a
-#       caller-facing input, since a stuck not-Ready pod is exactly the case
-#       a forced delete exists to unblock (same rationale as
-#       recovery_wipe_pod in mongodb-recovery.sh).
-# rc 2: the kubectl call itself failed (API/auth/transport error) — NOT a
-#       confirmed negative. Callers must not treat this the same as rc 1:
-#       collapsing a transient read failure into "not ready" would force a
-#       --grace-period=0 --force delete based on no real signal.
-# ---------------------------------------------------------------------------
-pods_is_ready() {
-  local pod="${1:?pod is required}"
-  local out
-  if ! out=$(_kubectl get pod "$pod" \
-    -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>&1); then
-    grep -qi 'notfound' <<<"$out" && return 1
-    log_error "pods_is_ready" "could not determine readiness of ${pod}: ${out}"
-    return 2
-  fi
-  [[ "$out" == "True" ]]
-}
-
-# ---------------------------------------------------------------------------
-# pods_exists <pod_name>
-# rc 0: the pod is present in the live cluster.
+# pods_fetch_json <pod_name>
+# Single-call snapshot of one Pod's full object. The delete flow derives
+# existence, StatefulSet ownership, readiness, and UID from this one
+# consistent read, rather than checking membership against a separately
+# listed live member set (which silently drops an already-deleted target —
+# making "already gone" indistinguishable from "never a member" — and gives
+# no UID to guard a confirmed delete against a same-name replacement Pod
+# that already exists by the time the confirm call runs).
+#
+# rc 0: pod found — JSON printed to stdout.
 # rc 1: confirmed negative — the API server returned NotFound.
 # rc 2: the kubectl call itself failed for any other reason (API/auth/
 #       transport error) — NOT a confirmed negative. Callers must not treat
@@ -101,15 +84,47 @@ pods_is_ready() {
 #       "pod is gone" can report a false POD_ALREADY_DELETED success while
 #       an API outage — not an actual deletion — is what happened.
 # ---------------------------------------------------------------------------
-pods_exists() {
+pods_fetch_json() {
   local pod="${1:?pod is required}"
   local out
-  if out=$(_kubectl get pod "$pod" -o name 2>&1); then
+  if out=$(_kubectl get pod "$pod" -o json 2>&1); then
+    printf '%s\n' "$out"
     return 0
   fi
   grep -qi 'notfound' <<<"$out" && return 1
-  log_error "pods_exists" "could not determine whether ${pod} exists: ${out}"
+  log_error "pods_fetch_json" "could not read ${pod}: ${out}"
   return 2
+}
+
+# ---------------------------------------------------------------------------
+# pods_owned_by_sts <pod_json> <sts_name>
+# rc 0 iff <pod_json>'s ownerReferences name a StatefulSet called
+# <sts_name> — exact ownership, never a label/name guess (same rationale as
+# _k8s_sts_owned_pod_names). Pure JSON check over an already-fetched object,
+# no kubectl call of its own.
+# ---------------------------------------------------------------------------
+pods_owned_by_sts() {
+  local pod_json="${1:?pod_json is required}" sts_name="${2:?sts_name is required}"
+  jq -e --arg sts "$sts_name" \
+    'any(.metadata.ownerReferences[]?; .kind == "StatefulSet" and .name == $sts)' \
+    <<<"$pod_json" >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# pods_uid <pod_json> / pods_ready <pod_json>
+# Pure extraction/predicate helpers over a pods_fetch_json result — no
+# kubectl call. pods_ready's rc 0 means the Ready condition is "True"; used
+# to decide graceful vs. forced delete — never a caller-facing input, since
+# a stuck not-Ready pod is exactly the case a forced delete exists to
+# unblock (same rationale as recovery_wipe_pod in mongodb-recovery.sh).
+# ---------------------------------------------------------------------------
+pods_uid() {
+  jq -r '.metadata.uid // empty' <<<"${1:?pod_json is required}"
+}
+
+pods_ready() {
+  jq -e '([.status.conditions[]? | select(.type == "Ready") | .status] | first) == "True"' \
+    <<<"${1:?pod_json is required}" >/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -121,12 +136,20 @@ pods_exists() {
 # fully removed, which can outlast the task's own exec timeout under normal
 # termination-grace-period delays or cluster slowness and turn a successful
 # delete into a spurious task failure. --ignore-not-found keeps this call
-# idempotent for its own callers too: pods_exists is checked first, but the
-# Pod can disappear between that check and this call (e.g. a concurrent
+# idempotent for its own callers too: pods_fetch_json is checked first, but
+# the Pod can disappear between that check and this call (e.g. a concurrent
 # delete), and a named-Pod delete does not treat NotFound as success by
 # default. stdout/stderr of kubectl is returned to the caller for error
 # reporting. force=true adds --grace-period=0 --force (used only when the
-# pod is not Ready — see pods_is_ready).
+# pod is not Ready — see pods_ready).
+#
+# This does NOT take a UID precondition: the `kubectl delete` CLI has no
+# flag for one (client-go's DeleteOptions.Preconditions.UID is not exposed
+# via any documented flag). Callers that need identity-aware delete
+# semantics (see mongodb/pods/delete.sh, mariadb/pods/delete.sh) compare
+# pods_uid's freshly-fetched value against a caller-supplied expected UID
+# themselves, immediately before calling this function — a script-level
+# check, not a server-enforced atomic precondition.
 # ---------------------------------------------------------------------------
 pods_delete() {
   local pod="${1:?pod is required}"

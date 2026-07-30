@@ -60,10 +60,36 @@ teardown_file() {
 setup() {
   load '../test_helper/bats-support/load'
   load '../test_helper/bats-assert/load'
+
+  OPERATOR_SCALED_DOWN=false
+}
+
+teardown() {
+  # The "already gone" test below briefly pauses the mariadb-operator (same
+  # pattern as switch_primary.bats) so a directly-deleted Pod doesn't get
+  # recreated out from under the assertion. Always restore it, including
+  # when an assertion in that test fails midway.
+  if [[ "${OPERATOR_SCALED_DOWN:-false}" == "true" ]]; then
+    kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas=1
+  fi
 }
 
 kexec() {
   kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
+}
+
+# Same helper as switch_primary.bats' _wait_for_operator_scaled_down.
+_wait_for_operator_scaled_down() {
+  local max_wait="${1:-60}" elapsed=0 running
+  while ((elapsed < max_wait)); do
+    running=$(kubectl --context "$CTX_A" -n "$NS" \
+      get deployment mariadb-operator -o json | jq '.status.replicas // 0') || running=1
+    [[ "$running" -eq 0 ]] && return 0
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "mariadb-operator still has ${running} replicas after ${max_wait}s" >&2
+  return 1
 }
 
 http_post() {
@@ -163,6 +189,12 @@ run_pods_task() {
   assert_equal "$RESULT_REASON" "INVALID_REQUEST"
 }
 
+@test "pods/delete requires pod_uid when dry_run=false" {
+  run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$RESULT_REASON" "INVALID_REQUEST"
+}
+
 # Note: there is no "dry_run=flase (typo)" test here — the tasks.yaml
 # pattern for `dry_run` (`^(true|false)$`) already rejects it at submission
 # (HTTP 400, before the script — and its own belt-and-braces literal
@@ -190,6 +222,7 @@ run_pods_task() {
   assert_equal "$RESULT_REASON" "DRY_RUN_READY"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.force')" "false"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.pod_uid')" "$before_uid"
 
   local after_uid
   after_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')
@@ -200,7 +233,7 @@ run_pods_task() {
   local before_uid
   before_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')
 
-  run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\",\"dry_run\":\"false\",\"confirm\":\"true\",\"pod_uid\":\"${before_uid}\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$RESULT_REASON" "POD_DELETED"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "true"
@@ -214,4 +247,54 @@ run_pods_task() {
   run_pods_task "list" "{\"namespace\":\"${DB_NS}\"}"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.count')" "3"
+}
+
+@test "pods/delete on an already-gone target reports POD_ALREADY_DELETED, not POD_NOT_MEMBER" {
+  # Pause the mariadb-operator's reconciliation (same pattern as
+  # switch_primary.bats) so a directly-deleted Pod stays gone long enough to
+  # prove POD_ALREADY_DELETED is reachable, rather than shadowed by
+  # POD_NOT_MEMBER: mariadb_list_member_pods only lists currently-live,
+  # owned Pods, so an absent target previously always failed that check
+  # first.
+  local original_replicas
+  original_replicas=$(kubectl --context "$CTX_A" -n "$NS" \
+    get deployment mariadb-operator -o jsonpath='{.spec.replicas}')
+  [[ "$original_replicas" =~ ^[1-9][0-9]*$ ]]
+  OPERATOR_SCALED_DOWN=true
+  kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas=0
+  _wait_for_operator_scaled_down 60
+
+  kubectl --context "$CTX_A" -n "$DB_NS" delete pod mariadb-2 --wait=true --timeout=60s
+
+  run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\"}"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$RESULT_REASON" "POD_ALREADY_DELETED"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "false"
+
+  kubectl --context "$CTX_A" -n "$NS" scale deployment mariadb-operator --replicas="$original_replicas"
+  OPERATOR_SCALED_DOWN=false
+  kubectl --context "$CTX_A" -n "$DB_NS" wait pod mariadb-2 --for=condition=Ready --timeout=180s
+}
+
+@test "pods/delete rejects a confirm whose pod_uid no longer matches a same-name replacement" {
+  local stale_uid
+  stale_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')
+
+  # Recreate mariadb-2 out from under that observation, independent of the
+  # task under test, so its live UID no longer matches stale_uid —
+  # simulating a retry issued after the instance already replaced it.
+  kubectl --context "$CTX_A" -n "$DB_NS" delete pod mariadb-2 --wait=true --timeout=60s
+  kubectl --context "$CTX_A" -n "$DB_NS" wait pod mariadb-2 --for=condition=Ready --timeout=180s
+  local new_uid
+  new_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')
+  assert_not_equal "$new_uid" "$stale_uid"
+
+  run_pods_task "delete" "{\"namespace\":\"${DB_NS}\",\"target_pod\":\"mariadb-2\",\"dry_run\":\"false\",\"confirm\":\"true\",\"pod_uid\":\"${stale_uid}\"}"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$RESULT_REASON" "POD_REPLACED"
+
+  # The replacement Pod must survive the rejected delete untouched.
+  local after_uid
+  after_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')
+  assert_equal "$after_uid" "$new_uid"
 }

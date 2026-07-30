@@ -89,6 +89,30 @@ kexec() {
   kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
 }
 
+# kubectl wait --for=condition=Ready returns immediately if the condition
+# is ALREADY met at call time — including against the OLD Pod object, which
+# commonly still reports Ready=True for a while into its graceful
+# termination (a --wait=false delete only sets deletionTimestamp; the
+# kubelet doesn't necessarily flip Ready=False right away). Waiting on
+# readiness alone can therefore match the pre-delete Pod instead of the
+# StatefulSet's real replacement. Wait for the UID to actually change first.
+_wait_for_pod_replaced_ready() {
+  local ns="$1" pod="$2" before_uid="$3" max_wait="${4:-180}"
+  local elapsed=0 uid
+  while ((elapsed < max_wait)); do
+    uid=$(kubectl --context "$CTX_A" -n "$ns" get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)
+    if [[ -n "$uid" && "$uid" != "$before_uid" ]]; then
+      kubectl --context "$CTX_A" -n "$ns" wait pod "$pod" \
+        --for=condition=Ready --timeout="$((max_wait - elapsed))s"
+      return $?
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  echo "pod ${pod} in ${ns} still has uid=${before_uid} (not replaced) after ${max_wait}s" >&2
+  return 1
+}
+
 # Same helper as switch_primary.bats' _wait_for_operator_scaled_down.
 _wait_for_operator_scaled_down() {
   local max_wait="${1:-60}" elapsed=0 running
@@ -249,7 +273,7 @@ run_pods_task() {
   assert_equal "$RESULT_REASON" "POD_DELETED"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "true"
 
-  kubectl --context "$CTX_A" -n "$DB_NS" wait pod mariadb-2 --for=condition=Ready --timeout=180s
+  _wait_for_pod_replaced_ready "$DB_NS" mariadb-2 "$before_uid" 180
 
   local after_uid
   after_uid=$(kubectl --context "$CTX_A" -n "$DB_NS" get pod mariadb-2 -o jsonpath='{.metadata.uid}')

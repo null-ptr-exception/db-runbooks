@@ -18,6 +18,20 @@ setup() {
 args="$*"
 [[ "$args" == *"get mariadb"*".spec.replicas"* ]] && { printf '%s' "${MOCK_CR_REPLICAS-3}"; exit 0; }
 [[ "$args" == *"get statefulset"*".spec.replicas"* ]] && { printf '%s' "${MOCK_STS_REPLICAS-}"; exit 0; }
+if [[ "$args" == *"get pods"*"-o json"* ]]; then
+  # _k8s_sts_owned_pod_names: live ownerReferences check, same replica
+  # precedence as mariadb_list_member_pods (CR replicas, else STS replicas).
+  mock_replicas="${MOCK_CR_REPLICAS-3}"
+  [[ -n "$mock_replicas" ]] || mock_replicas="${MOCK_STS_REPLICAS-}"
+  items=""
+  if [[ "$mock_replicas" =~ ^[1-9][0-9]*$ ]]; then
+    for ((mock_i = 0; mock_i < mock_replicas; mock_i++)); do
+      items+="${items:+,}{\"metadata\":{\"name\":\"${MARIADB_NAME}-${mock_i}\",\"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"${MARIADB_NAME}\",\"controller\":true}]}}"
+    done
+  fi
+  printf '{"items":[%s]}\n' "$items"
+  exit 0
+fi
 [[ "$args" == *"get pods"* ]] && { printf 'mariadb-0\nmariadb-1\nmariadb-2\nmariadb-metrics\nmariadb-query-exporter\n'; exit 0; }
 # MOCK_PRIMARY defaults to mariadb-0 only when UNSET; set it to "" to simulate no primary
 [[ "$args" == *"get mariadb"*"currentPrimary"* ]] && { printf '%s' "${MOCK_PRIMARY-mariadb-0}"; exit 0; }

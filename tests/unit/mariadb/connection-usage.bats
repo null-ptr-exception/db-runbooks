@@ -29,6 +29,24 @@ if [[ "$args" == *"get statefulset"*".spec.replicas"* ]]; then
   printf '%s' "${MOCK_STS_REPLICAS-}"
   exit 0
 fi
+if [[ "$args" == *"get pods"*"-o json"* ]]; then
+  # _k8s_sts_owned_pod_names: live ownerReferences check. Reflect whichever
+  # instance/replica-count this test configured — same precedence as
+  # mariadb_list_member_pods (CR replicas, else STS replicas) — so the
+  # generated ordinal names intersect correctly regardless of scenario.
+  mock_name="${MOCK_MDB_NAMES:-mariadb}"
+  mock_name="${mock_name%% *}"
+  mock_replicas="${MOCK_CR_REPLICAS-2}"
+  [[ -n "$mock_replicas" ]] || mock_replicas="${MOCK_STS_REPLICAS-}"
+  items=""
+  if [[ "$mock_replicas" =~ ^[1-9][0-9]*$ ]]; then
+    for ((mock_i = 0; mock_i < mock_replicas; mock_i++)); do
+      items+="${items:+,}{\"metadata\":{\"name\":\"${mock_name}-${mock_i}\",\"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"${mock_name}\",\"controller\":true}]}}"
+    done
+  fi
+  printf '{"items":[%s]}\n' "$items"
+  exit 0
+fi
 if [[ "$args" == *"get pods"* ]]; then
   printf '%s\n' mariadb-0 mariadb-1 mariadb-metrics mariadb-query-exporter
   exit 0

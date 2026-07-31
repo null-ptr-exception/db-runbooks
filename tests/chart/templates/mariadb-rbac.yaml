@@ -13,7 +13,11 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    # delete: pods/delete gateway task (see docs/mariadb/pods.md). This grant
+    # is namespace-wide and unscoped; the actual boundary is in code, which
+    # only ever targets a Pod whose live ownerReferences name the resolved
+    # instance's own StatefulSet (mariadb_list_member_pods).
+    verbs: ["get", "list", "watch", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]

@@ -18,6 +18,14 @@ discovery then seeds from `<sts>-0.<headless-service>.<namespace>.svc.cluster.lo
 calls `isMaster` to locate the current primary, and runs all checks against
 that primary. Works on standalone instances too.
 
+The Layer 1 PVC disk-usage check's mount path is likewise never a task input:
+it asks mongod itself for its real dbPath (`db.serverCmdLineOpts().parsed.storage.dbPath`,
+the same live detection `recovery/*` uses — see CLAUDE.md "Configuration
+Layers" → "Auto-detect tier") so the check works unchanged whether the
+deployment is a Bitnami chart (`/bitnami/mongodb/data/db`) or an official
+image (`/data/db`), falling back to the Bitnami path only if no pod in the
+StatefulSet answers the probe.
+
 ## Endpoint
 
 ```
@@ -160,6 +168,11 @@ which now also resolves the headless Service from the StatefulSet's own
 `spec.serviceName` rather than assuming it matches the StatefulSet's name.
 
 ## Sample Log Output
+
+Header block below is `cli.sh`'s local-debug format (its own `--pvc-path`
+flag, default `/data/db`); the AQSH task doesn't print this banner and
+resolves `PVC path` live per the auto-detect above, so it will read
+`/bitnami/mongodb` instead against a Bitnami-chart deployment.
 
 ```
 ══ MongoDB Sanity Check ══════════════════════════════════════════

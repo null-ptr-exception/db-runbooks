@@ -201,6 +201,70 @@ echo "$CIPHERTEXT" | gpg --decrypt
 > ["Why PGP + Not K8s Secret?"](#why-pgp--not-k8s-secret) above; app-facing
 > Secret provisioning is `secrets/*` ([secrets.md](secrets.md)).
 
+#### Fixed-Password System Accounts (`password_secret_name`)
+
+Everything above assumes a **generated** password delivered to a human. For
+a system/service account that must keep one constant password (never
+rotated through this API), skip `password_delivery_mode` entirely and instead
+point CREATE at a Secret you already populated — mirrors MariaDB
+`create-account`'s `generate_password=false` path
+([../mariadb/create-account.md](../mariadb/create-account.md)), except this
+task only ever *reads* the Secret, never creates or owns it. Provision it
+first via `secrets/plan` → `secrets/apply` ([secrets.md](secrets.md)).
+
+```bash
+curl -X POST http://aqsh-mongodb:4180/api/task \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "account/create-account",
+    "params": {
+      "namespace": "mongo-1",
+      "auth_db": "admin",
+      "username": "svc_account",
+      "roles_json": "[{\"role\":\"readWrite\",\"db\":\"mydb\"}]",
+      "password_secret_name": "svc-account-credentials",
+      "password_secret_key": "password",
+      "dry_run": "false",
+      "confirm": "true"
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "CREATED",
+  "reason_code": "ACCOUNT_CREATED",
+  "username": "svc_account",
+  "auth_db": "admin",
+  "expires_at": "2026-06-23T10:00:00Z",
+  "delivery_payload": {
+    "mode": "caller_provided_secret",
+    "secret_name": "svc-account-credentials",
+    "secret_key": "password"
+  },
+  "roles": [{"role": "readWrite", "db": "mydb"}]
+}
+```
+
+Rules:
+
+1. Mutually exclusive with `password_delivery_mode`/`recipient_pgp_pubkey` —
+   passing both fails `INVALID_INPUT`.
+2. Reading a protected Secret (root credentials, or anything else the
+   `secrets/*` gateway's auto-detect/internal-config list already protects —
+   [secrets.md](secrets.md)) fails `PROTECTED_SECRET`.
+3. Missing Secret, missing key, or an empty value fails
+   `PASSWORD_SECRET_UNAVAILABLE`.
+4. The password value itself never appears in the task result — only the
+   Secret's name/key reference does. It also never crosses PGP, since the
+   caller already holds it.
+5. The policy record's `password_delivery_mode` is stored as
+   `caller_provided_secret`; expiry reconciliation still applies unchanged
+   (it works off the credentials fingerprint, not the delivery mode) — set
+   `force-permanent` explicitly if this account should also be exempt from
+   expiry.
+
 ---
 
 ### BAN Account (Revoke Access)
@@ -527,6 +591,9 @@ kubectl --context kind-cluster-b -n mongo-core exec deploy/test-client -- \
 - `policy_id`, `username`, `auth_db`, `roles`, `status`
 - `created_at`, `expires_at`, `initial_cred_fingerprint`, `last_cred_fingerprint`
 - `password_delivery_mode`, `request_id`
+
+`password_delivery_mode` values: `one_time_plaintext`, `encrypted_payload`, or
+`caller_provided_secret` (see ["Fixed-Password System Accounts"](#fixed-password-system-accounts-password_secret_name) above).
 
 ---
 

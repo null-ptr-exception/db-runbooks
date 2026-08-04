@@ -154,6 +154,16 @@ tasks:
         required: false
         type: string
         default: ""
+      - name: password_secret_name
+        env: PASSWORD_SECRET_NAME
+        required: false
+        type: string
+        default: ""  # caller-chosen fixed password: read from this existing Secret instead of generating one; see docs/mongodb/create-account.md
+      - name: password_secret_key
+        env: PASSWORD_SECRET_KEY
+        required: false
+        type: string
+        default: "password"
       - name: request_id
         env: REQUEST_ID
         required: false

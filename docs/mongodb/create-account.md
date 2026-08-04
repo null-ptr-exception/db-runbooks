@@ -78,6 +78,10 @@ Request fields:
 - password policy fields (`password_length`, `password_special_chars`, `password_special_max`)
 - `password_delivery_mode` (`one_time_plaintext` or `encrypted_payload`)
 - `recipient_pgp_pubkey` (required when `password_delivery_mode=encrypted_payload`; accepts ASCII-armored key text or base64-encoded armored key)
+- `password_secret_name`, `password_secret_key` (default key `password`) — caller-chosen
+  fixed password, read from a Secret you already populated (e.g. via
+  [secrets/apply](secrets.md)) instead of letting the task generate one. See
+  "Caller-Chosen Fixed Password" below.
 
 Encrypted delivery behavior:
 
@@ -129,6 +133,50 @@ Notes:
    use the `secrets/*` gateway instead ([secrets.md](secrets.md)) — same
    PGP mechanics, opposite direction (the caller encrypts against the
    deployment's key from `secrets/pubkey`).
+
+#### Caller-Chosen Fixed Password
+
+For a system/service account whose password must stay constant (never
+rotated through this API), pass `password_secret_name` (+ optionally
+`password_secret_key`, default `password`) instead of a
+`password_delivery_mode`. This mirrors MariaDB `create-account`'s
+`generate_password=false` path
+([create-account.md](../mariadb/create-account.md)), with one difference:
+this task never creates or writes the Secret, only reads it — provision the
+Secret yourself first, typically via `secrets/plan` → `secrets/apply`
+([secrets.md](secrets.md#usage-scenarios)).
+
+1. `password_secret_name`/`password_secret_key` and
+   `password_delivery_mode`/`recipient_pgp_pubkey` are mutually exclusive —
+   passing both fails `INVALID_INPUT`.
+2. The task reads the Secret value and uses it verbatim as the account's
+   MongoDB password; it is never generated, encrypted, or echoed back.
+3. Reading a **protected** Secret (the deployment's root-credential Secret,
+   or any other name covered by the same auto-detect/internal-config list
+   the `secrets/*` gateway uses — see [secrets.md](secrets.md#protected-secrets-auto-detected-no-per-call-override))
+   fails `PROTECTED_SECRET`.
+4. Missing Secret, missing key, or an empty value fails
+   `PASSWORD_SECRET_UNAVAILABLE`.
+5. The result's `delivery_payload` is `{"mode":"caller_provided_secret",
+   "secret_name":..., "secret_key":...}` — a reference only, never the
+   password value. The policy record's `password_delivery_mode` field stores
+   `caller_provided_secret` too, so `account-lifecycle.md`'s reconciliation
+   logic (fingerprint-based) treats it like any other account.
+
+Example request:
+
+```json
+{
+	"namespace": "mongo-1",
+	"auth_db": "admin",
+	"username": "svc_account",
+	"roles_json": "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+	"dry_run": "false",
+	"confirm": "true",
+	"password_secret_name": "svc-account-credentials",
+	"password_secret_key": "password"
+}
+```
 
 ### `delete-account`
 

@@ -114,7 +114,7 @@ fi
 
 effective_delivery_mode="$PASSWORD_DELIVERY_MODE"
 if [[ -n "$PASSWORD_SECRET_NAME" ]]; then
-  K8S_NAMESPACE="$DB_NAMESPACE"
+  export K8S_NAMESPACE="$DB_NAMESPACE"
   if secrets_is_protected "$PASSWORD_SECRET_NAME"; then
     fail_task "PROTECTED_SECRET" "refusing to read a protected Secret (root credentials or other managed machinery) as an account password source"
   fi

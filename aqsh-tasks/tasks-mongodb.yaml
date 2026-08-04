@@ -1588,3 +1588,141 @@ tasks:
         type: string
         default: ""
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # MQL gateway (see docs/mongodb/mql.md). Structured-JSON CRUD, no raw
+  # eval — filter/projection/pipeline/document(s)/update are validated JSON
+  # embedded into the query, never arbitrary caller-supplied JS. sts_name/
+  # credentials are not task inputs (CLAUDE.md "Configuration Layers");
+  # admin/local/config are always refused (PROTECTED_DATABASE).
+  mql/read:
+    script: mongodb/mql/read.sh
+    description: "Read-only MQL: find/aggregate/count/distinct on one collection (default node: primary)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: false
+        type: string
+        default: ""
+        pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
+      - name: database
+        env: MQL_DATABASE
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,63}$'
+      - name: collection
+        env: MQL_COLLECTION
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9_.-]{1,120}$'
+      - name: operation
+        env: MQL_OPERATION
+        required: true
+        type: string
+        pattern: '^(find|aggregate|count|distinct)$'
+      - name: filter
+        env: MQL_FILTER
+        required: false
+        type: string
+        default: "{}"
+      - name: projection
+        env: MQL_PROJECTION
+        required: false
+        type: string
+        default: "{}"
+      - name: pipeline
+        env: MQL_PIPELINE
+        required: false
+        type: string
+        default: "[]"
+      - name: distinct_field
+        env: MQL_DISTINCT_FIELD
+        required: false
+        type: string
+        default: ""
+      - name: limit
+        env: MQL_LIMIT
+        required: false
+        type: string
+        default: "50"
+        pattern: '^[0-9]+$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  mql/write:
+    script: mongodb/mql/write.sh
+    description: "Gated MQL write: insert_one/insert_many/update_one/update_many/delete_one/delete_many on one collection (dry_run -> confirm; always targets primary)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: database
+        env: MQL_DATABASE
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9_-]{1,63}$'
+      - name: collection
+        env: MQL_COLLECTION
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9_.-]{1,120}$'
+      - name: operation
+        env: MQL_OPERATION
+        required: true
+        type: string
+        pattern: '^(insert_one|insert_many|update_one|update_many|delete_one|delete_many)$'
+      - name: filter
+        env: MQL_FILTER
+        required: false
+        type: string
+        default: "{}"
+      - name: update
+        env: MQL_UPDATE
+        required: false
+        type: string
+        default: ""
+      - name: document
+        env: MQL_DOCUMENT
+        required: false
+        type: string
+        default: ""
+      - name: documents
+        env: MQL_DOCUMENTS
+        required: false
+        type: string
+        default: ""
+      - name: upsert
+        env: MQL_UPSERT
+        required: false
+        type: string
+        default: "false"
+        pattern: '^(true|false)$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+        pattern: '^(true|false)$'
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

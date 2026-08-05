@@ -241,86 +241,30 @@ bg_local_step() {
 # BG_PEER_ERR to a stable, public-safe marker and returns 1 (does NOT exit).
 # BG_PEER_ERR is read by the orchestrator scripts that source this lib.
 # shellcheck disable=SC2034
+# The HTTP submit/poll transport now lives in mariadb-task-common.sh as
+# mdbt_peer_call_task, so non-blue/green tasks can reuse it. What stays here is
+# the part that is genuinely blue/green-specific: injecting peer_aqsh_url and
+# peer_token into the payload.
 bg_peer_call_task() {
   local peer_url="$2" peer_token="$3" task_path="$4" payload="$5" timeout="${6:-540}"
-  local encoded submit code body task_id resp status elapsed=0 curl_rc
+  local rc=0
 
   BG_PEER_ERR=""
-  encoded="${task_path//\//%2F}"
 
-  # peer_aqsh_url / peer_token are required inputs on the public task contract.
-  # Internal steps never use them, but every peer (internal-step) call must
-  # still satisfy the schema — inject the orchestrator's own values.
+  # peer_aqsh_url / peer_token are required inputs on the blue/green public task
+  # contract. Internal steps never use them, but every peer (internal-step) call
+  # must still satisfy the schema — inject the orchestrator's own values.
+  # This is why the transport does NOT inject: a task that does not declare
+  # these fields (physical-backup, replication/*) is rejected with 400.
   payload="$(jq -c --arg purl "$peer_url" --arg ptok "$peer_token" \
     '. + {peer_aqsh_url: $purl, peer_token: $ptok}' <<<"$payload")"
 
-  if submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
-    -X POST "${peer_url}/tasks/${encoded}" \
-    -H "Authorization: Bearer ${peer_token}" \
-    -H 'Content-Type: application/json' \
-    -d "$payload" 2>/dev/null)"; then
-    curl_rc=0
-  else
-    curl_rc=$?
-  fi
-  if (( curl_rc != 0 )); then
-    BG_PEER_ERR='{"stage":"peer-operation"}'
-    return 1
-  fi
-
-  code="$(printf '%s' "$submit" | tail -n1)"
-  body="$(printf '%s' "$submit" | sed '$d')"
-  if [[ "$code" != "202" ]]; then
-    BG_PEER_ERR='{"stage":"peer-operation"}'
-    return 1
-  fi
-  task_id="$(jq -r '.id // empty' <<<"$body" 2>/dev/null || true)"
-  if [[ -z "$task_id" ]]; then
-    BG_PEER_ERR='{"stage":"peer-operation"}'
-    return 1
-  fi
-
-  while (( elapsed < timeout )); do
-    if resp="$(curl -sS --connect-timeout 5 -m 15 \
-      -H "Authorization: Bearer ${peer_token}" \
-      "${peer_url}/executions/${task_id}" 2>/dev/null)"; then
-      curl_rc=0
-    else
-      curl_rc=$?
-    fi
-    if (( curl_rc != 0 )); then
-      BG_PEER_ERR='{"stage":"peer-operation"}'
-      return 1
-    fi
-    status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
-    case "$status" in
-      completed)
-        jq -c '
-          .result.data as $d
-          | (($d | try fromjson catch null) // (if ($d | type) == "object" then $d else {} end))
-          | (.data // {})
-        ' <<<"$resp" 2>/dev/null || printf '{}'
-        return 0
-        ;;
-      failed)
-        BG_PEER_ERR='{"stage":"peer-operation"}'
-        return 1
-        ;;
-    esac
-    sleep 5
-    elapsed=$(( elapsed + 5 ))
-  done
-
-  BG_PEER_ERR='{"stage":"peer-operation"}'
-  return 1
+  mdbt_peer_call_task "$peer_url" "$peer_token" "$task_path" "$payload" "$timeout" || rc=$?
+  [[ "$rc" -eq 0 ]] || BG_PEER_ERR="${MDBT_PEER_ERR:-'{"stage":"peer-operation"}'}"
+  return "$rc"
 }
 
-bg_validate_url() {
-  local name="$1" value="$2" op="$3"
-  if [[ ! "$value" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
-    bg_fail "$op" "${name} must be an http(s) URL" "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
-  fi
-}
+bg_validate_url() { mdbt_validate_url "$@"; }
 
 # bg_set_maintenance <true|false>
 # Toggle maintenance/read-only mode on the local-target MariaDB ($BG_MDB).

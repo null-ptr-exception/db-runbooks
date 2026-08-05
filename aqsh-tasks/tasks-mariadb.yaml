@@ -661,6 +661,100 @@ tasks:
         required: false
         type: string
         default: "false"
+  replication/attach:
+    script: mariadb/replication/attach.sh
+    description: "Attach an already-deployed standby to the primary in the peer cluster. Assesses first, then does whatever that requires: resumes replication when the standby's history still matches the primary, or re-seeds it from a fresh primary backup when it does not. Re-seeding DESTROYS the standby's current data; it only runs with confirm and only when nothing is connected to the standby."
+    # Assessment is fast; the budget is dominated by waiting for the operator to
+    # reconcile the topology and the replica threads to come up.
+    # Budget covers the re-seed path: a full backup on the primary plus restore
+    # and link on this side.
+    timeout: 45m
+    allowed_groups: ["system:serviceaccounts"]
+    # The peer address is derived from the namespace via the mesh Service naming
+    # convention (<namespace>-rw), never supplied by the caller. Peer port,
+    # connection-guard policy, ignored service accounts, and credential
+    # references are deploy-time internals (REPL_* in mariadb.env), not inputs.
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "300"
+      # Optional guard: pass the action the dry run reported to refuse execution
+      # if the assessment has since changed. Empty means "follow the assessment".
+      - name: expected_action
+        env: EXPECTED_ACTION
+        required: false
+        type: string
+        default: ""
+      # Used only if the standby turns out to need re-seeding, which requires a
+      # fresh backup from the primary's own AQSH. The caller's bearer token
+      # authenticates there too (same TokenReview backend). Not a confirmation
+      # gate — the connection guard and confirm are what make that path safe.
+      - name: peer_token
+        env: PEER_TOKEN
+        required: false
+        type: string
+        default: ""
+      # Optional: set REPL_PEER_AQSH_URL_DEFAULT once per deployment and callers
+      # never pass an address.
+      - name: peer_aqsh_url
+        env: PEER_AQSH_URL
+        required: false
+        type: string
+        default: ""
+  replication/status:
+    script: mariadb/replication/status.sh
+    description: "Read-only cross-cluster replication status: link state, lag, and whether the standby could still resume from the primary"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: include_peer
+        env: INCLUDE_PEER
+        required: false
+        type: string
+        default: "true"
+  replication/detach:
+    script: mariadb/replication/detach.sh
+    description: "Remove the cross-cluster replication link (multiCluster topology and its endpoint references). Leaves the database and its data in place."
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   backup:
     script: backup/backup-mariadb.sh
     description: "Create a logical backup for the database identified by namespace"

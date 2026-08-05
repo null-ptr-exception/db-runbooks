@@ -661,6 +661,125 @@ tasks:
         required: false
         type: string
         default: "false"
+  replication/attach:
+    script: mariadb/replication/attach.sh
+    description: "Attach an already-deployed standby to the primary in the peer cluster. Assesses first: resumes replication when the standby's history still matches the primary, and reports that a rebuild is required when it does not."
+    # Assessment is fast; the budget is dominated by waiting for the operator to
+    # reconcile the topology and the replica threads to come up.
+    timeout: 10m
+    allowed_groups: ["system:serviceaccounts"]
+    # The peer address is derived from the namespace via the mesh Service naming
+    # convention (<namespace>-rw), never supplied by the caller. Peer port,
+    # connection-guard policy, ignored service accounts, and credential
+    # references are deploy-time internals (REPL_* in mariadb.env), not inputs.
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "300"
+      # Optional guard: pass the action the dry run reported to refuse execution
+      # if the assessment has since changed. Empty means "follow the assessment".
+      - name: expected_action
+        env: EXPECTED_ACTION
+        required: false
+        type: string
+        default: ""
+  replication/rebuild:
+    script: mariadb/replication/rebuild.sh
+    description: "Re-seed a standby that cannot resume replication: take a fresh physical backup on the primary, recreate the standby from it, and re-establish the link. DESTROYS the standby's current data."
+    # Budget covers a full backup on the primary plus restore and link on this
+    # side; both are bounded by wait_timeout individually.
+    timeout: 45m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "900"
+      # The caller's own bearer token, forwarded to the primary's AQSH to ask it
+      # for a fresh backup. Both clusters validate against the same TokenReview
+      # backend, so the token the caller already holds works there too.
+      - name: peer_token
+        env: PEER_TOKEN
+        required: true
+        type: string
+      # Optional: set REPL_PEER_AQSH_URL_DEFAULT once per deployment and callers
+      # never pass this. Accepted as an input so a deployment that has not set it
+      # is still operable.
+      - name: peer_aqsh_url
+        env: PEER_AQSH_URL
+        required: false
+        type: string
+        default: ""
+  replication/status:
+    script: mariadb/replication/status.sh
+    description: "Read-only cross-cluster replication status: link state, lag, and whether the standby could still resume from the primary"
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: include_peer
+        env: INCLUDE_PEER
+        required: false
+        type: string
+        default: "true"
+  replication/detach:
+    script: mariadb/replication/detach.sh
+    description: "Remove the cross-cluster replication link (multiCluster topology and its endpoint references). Leaves the database and its data in place."
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   backup:
     script: backup/backup-mariadb.sh
     description: "Create a logical backup for the database identified by namespace"

@@ -346,8 +346,13 @@ _mongo_eval_pod() {
 
 @test "mql/read refuses the admin database" {
   local body
+  # collection is deliberately NOT system.* here: "system.users" would also
+  # trip mql_validate_collection_name's own system.* guard (checked before
+  # the protected-database check), which would make this test pass for the
+  # wrong reason (INVALID_INPUT) instead of actually exercising
+  # PROTECTED_DATABASE. See the dedicated system.* test below for that guard.
   body=$(jq -nc --arg ns "$PNS" \
-    '{namespace:$ns, database:"admin", collection:"system.users", operation:"find"}')
+    '{namespace:$ns, database:"admin", collection:"users", operation:"find"}')
   run_mql_task "read" "$body"
   assert_equal "$TASK_STATUS" "failed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "PROTECTED_DATABASE"

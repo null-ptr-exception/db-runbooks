@@ -20,7 +20,11 @@ _MONGODB_CONSTANT_LOADED=1
 # StatefulSet name (overridden per-task via MONGO_STS_NAME)
 STS_NAME="${STS_NAME:-mongodb}"
 
-# PVC disk usage
+# PVC disk usage. The AQSH task (scripts/mongodb/sanity-check.sh) always sets
+# this itself via recovery_resolve_data_paths (live mongod dbPath detection,
+# falling back to mongodb-recovery.sh's Bitnami literal) before sourcing this
+# file, so the /data/db default below only takes effect for cli.sh, whose
+# --pvc-path flag is the caller's own explicit choice.
 PVC_MOUNT_PATH="${PVC_MOUNT_PATH:-/data/db}"
 PVC_WARN_PERCENT="${PVC_WARN_PERCENT:-80}"
 PVC_CRIT_PERCENT="${PVC_CRIT_PERCENT:-90}"

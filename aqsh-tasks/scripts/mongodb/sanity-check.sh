@@ -135,6 +135,16 @@ export MONGO_HOST MONGO_PORT
 export MONGO_AUTHDB="admin"
 export MONGO_USER="${_MONGO_USER}" MONGO_PASS="${_MONGO_PASS}"
 
+# ── Auto-detect PVC mount path ───────────────────────────────────────────────
+# Ask mongod itself for its real dbPath (same detection recovery/* uses) so
+# the Layer 1 disk-usage check works unchanged across Bitnami/official-image
+# layouts, instead of assuming one convention. Falls soft to
+# mongodb-recovery.sh's own hardcoded literal when detection can't reach
+# any pod in the StatefulSet.
+recovery_resolve_data_paths "${_STS_NAME}-0" "${_MONGO_USER}" "${_MONGO_PASS}" "${_STS_NAME}"
+export PVC_MOUNT_PATH="${_RECOVERY_MOUNT_PATH}"
+log_debug "mongo-sanity-check" "PVC mount path resolved: ${PVC_MOUNT_PATH}"
+
 # ── Run checks ────────────────────────────────────────────────────────────────
 source "${LIB_DIR}/mongodb_constant.sh"
 source "${LIB_DIR}/custom.sh"

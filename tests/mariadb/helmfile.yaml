@@ -48,6 +48,15 @@ releases:
           enabled: true
           testClient:
             enabled: true
+        # Publish this primary on the shared gateway's MySQL listener (3306 →
+        # nodePort 30091) so cluster-b can reach it, and provide the local half
+        # of the mesh contract. In the real deployment Cilium does both.
+        replicationMesh:
+          expose:
+            enabled: true
+          peer:
+            enabled: true
+            externalName: mariadb-primary.mariadb-1.svc.cluster.local
 
   # cluster-a: a separate Envoy workload owned and lifecycle-managed by the
   # MariaDB namespace. The shared control-plane gateway is intentionally not
@@ -150,6 +159,13 @@ releases:
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
               SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
               SECRETS_AUTODETECT_DEFAULT=false
+              # Cross-cluster replication. Necessarily per-cluster: each AQSH's
+              # peer is the OTHER cluster, so this cannot live in the shared
+              # aqsh-tasks/config/mariadb.env template.
+              # 30091 is the sandbox's gateway nodePort standing in for the real
+              # deployment's 3306 — the whole reason the port is configurable.
+              REPL_PEER_PORT_DEFAULT=30091
+              REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-b.test:30080
           authProxy:
             tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:
@@ -178,10 +194,26 @@ releases:
       - mariadb:
           enabled: true
           namespace: mariadb-1
+          # Replicated so the CR carries spec.replication — a standalone
+          # instance has no replication configuration for a standby link to
+          # attach to.
+          replicas: 2
+          # Disjoint from cluster-a's range (its default gives 10, 11, 12).
+          # Equal server_ids across the two clusters make MariaDB refuse the
+          # link outright (errno 1593), and the field is immutable, so this has
+          # to be right at deploy time.
+          serverIdStartIndex: 100
           objectStorage:
             enabled: true
             secretName: mariadb-storage-destination
             prefix: tenant-a/database
+        # The standby half of the mesh contract: <namespace>-rw resolves out of
+        # this cluster to cluster-a's gateway. Any *.kind-a.test name works —
+        # CoreDNS maps them all to the cluster-a node IP.
+        replicationMesh:
+          peer:
+            enabled: true
+            externalName: mariadb.kind-a.test
 
   # cluster-b: aqsh-mariadb, redis, rbac, gateway
   - name: mariadb-server-b
@@ -203,6 +235,9 @@ releases:
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
               SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
               SECRETS_AUTODETECT_DEFAULT=false
+              # This is the standby side: its peer is cluster-a.
+              REPL_PEER_PORT_DEFAULT=30091
+              REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-a.test:30080
           authProxy:
             tokenReviewURL: "http://fedauth-mariadb.kind-a.test:30080"
         mariadbRbac:

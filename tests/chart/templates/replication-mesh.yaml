@@ -1,0 +1,68 @@
+{{/*
+Cross-cluster replication mesh stand-in — TEST INFRASTRUCTURE ONLY.
+
+In the real deployment, Cilium cluster mesh publishes an ExternalName Service
+`<namespace>-rw` in every namespace of every cluster, aliasing the primary's
+Service. The kind sandbox has no cluster mesh, so this template reproduces the
+same *contract* over what the sandbox does have (Istio TCP passthrough on the
+shared gateway, port 3306 → nodePort 30091, plus the CoreDNS *.kind-a.test
+mapping):
+
+  standby pod
+    → <namespace>-rw.<namespace>.svc.cluster.local   (peer.enabled, cluster-b)
+    → CNAME  <externalName>                          e.g. mariadb.kind-a.test
+    → CoreDNS → cluster-a node IP : REPL_PEER_PORT   30091
+    → shared gateway TCP listener                    (expose.enabled, cluster-a)
+    → the primary's Service                          :3306
+
+What this validates for real: the `<namespace>-rw` name derivation, the tasks'
+end-to-end wiring, and that replication actually starts. What it does NOT
+reproduce: Cilium's own resolution path, and the real deployment's port (3306,
+not 30091) — which is exactly why the port is deploy-time config.
+*/}}
+{{- if .Values.replicationMesh.expose.enabled }}
+{{- $backendHost := .Values.replicationMesh.expose.backendHost | default (printf "mariadb-primary.%s.svc.cluster.local" .Release.Namespace) }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ .Release.Namespace }}-replication-passthrough
+  namespace: {{ .Release.Namespace }}
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istio-ingress/shared-gateway
+  tcp:
+    - match:
+        - port: 3306
+      route:
+        - destination:
+            host: {{ $backendHost | quote }}
+            port:
+              number: {{ .Values.replicationMesh.expose.backendPort }}
+{{- end }}
+{{- if .Values.replicationMesh.peer.enabled }}
+{{- if not .Values.replicationMesh.peer.externalName }}
+{{- fail "replicationMesh.peer.externalName is required when replicationMesh.peer.enabled" }}
+{{- end }}
+---
+# Name is derived, never configured: it must match what mdbr_peer_host builds
+# from the namespace, or the e2e proves nothing about the derivation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Namespace }}-rw
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ExternalName
+  externalName: {{ .Values.replicationMesh.peer.externalName | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Namespace }}-ro
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ExternalName
+  externalName: {{ .Values.replicationMesh.peer.externalName | quote }}
+{{- end }}

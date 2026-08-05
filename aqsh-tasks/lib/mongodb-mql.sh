@@ -78,12 +78,14 @@ mql_validate_collection_name() {
 # ---------------------------------------------------------------------------
 # mql_validate_json <value> <expected_type: object|array>
 # True when <value> is exactly one well-formed JSON document (no trailing
-# content after it — jq errors on that, which this treats as invalid) of
-# the expected top-level type.
+# content after it, and no second whitespace-separated document — jq's
+# default single-value mode accepts "{} {}" as two consecutive values, so
+# this uses slurp mode and requires exactly one element) of the expected
+# top-level type.
 # ---------------------------------------------------------------------------
 mql_validate_json() {
   local value="${1:?value is required}" expected_type="${2:?expected_type is required}"
-  jq -e "type == \"${expected_type}\"" >/dev/null 2>&1 <<<"$value"
+  jq -se "length == 1 and (.[0] | type == \"${expected_type}\")" >/dev/null 2>&1 <<<"$value"
 }
 
 # ---------------------------------------------------------------------------
@@ -158,16 +160,29 @@ _mql_probe_pod() {
 
 # ---------------------------------------------------------------------------
 # _mql_resolve_target <sts_name> <probe_pod> <target_pod_input> <user> <pass>
-# Echoes "<exec_pod>\x1f<direct_host_or_empty>" — identical contract to
-# _ops_resolve_target. mql/write never passes a target_pod_input (writes
-# always resolve the elected PRIMARY); mql/read passes the caller's
-# optional target_pod.
+# Echoes "<exec_pod>\x1f<direct_host_or_empty>". Unlike _ops_resolve_target,
+# an explicit target_pod_input is verified to actually belong to the
+# resolved StatefulSet (via its own ownerReferences, same check
+# pods_owned_by_sts/lib/pods.sh makes for pods/delete) before it is trusted
+# as the exec target — this gateway loads and uses live MongoDB credentials
+# against whatever pod it execs into, so an unverified target_pod_input
+# would let a caller redirect an authenticated query/write at any pod in
+# the namespace, not just a member of the deployment those credentials were
+# resolved for. mql/write never passes a target_pod_input (writes always
+# resolve the elected PRIMARY), so this check is only reachable from
+# mql/read. Returns 1 when target_pod_input is empty and no PRIMARY is
+# reachable, 2 when target_pod_input is non-empty but not owned by
+# sts_name (including "pod doesn't exist").
 # ---------------------------------------------------------------------------
 _mql_resolve_target() {
   local sts_name="${1:?sts_name is required}" probe="${2:?probe pod is required}"
   local target_pod_input="${3:-}"
   local user="${4:?user is required}" pass="${5:?pass is required}"
   if [[ -n "$target_pod_input" ]]; then
+    local owner
+    owner=$(_kubectl get pod "$target_pod_input" \
+      -o jsonpath='{.metadata.ownerReferences[?(@.kind=="StatefulSet")].name}' 2>/dev/null) || return 2
+    [[ "$owner" == "$sts_name" ]] || return 2
     printf '%s\x1f' "$target_pod_input"
     return 0
   fi
@@ -227,6 +242,16 @@ _mql_run_expr() {
 # are pre-validated JSON text, embedded raw — the caller (mql/read.sh) must
 # have already rejected any pipeline containing $out/$merge via
 # mql_pipeline_has_write_stage, since aggregate has no other write gate.
+# <limit> bounds find/aggregate/distinct result materialization (count has
+# no array to bound) so a large collection can't exhaust mongosh/task memory
+# before the task timeout: find uses cursor.limit() directly; aggregate
+# cursors don't support cursor.limit() at all (MongoDB's own docs: use a
+# $limit stage instead), so a {$limit: <limit>} stage is appended after
+# whatever pipeline the caller supplied — always the *last* stage, so a
+# caller-supplied $limit earlier in the pipeline can only shrink the result
+# further, never grow past the gateway's cap; distinct has no cursor (one
+# command, one response) so its already-materialized array is sliced
+# client-side instead.
 # Returns 1 on connection/auth failure, 2 on an unknown operation (caller
 # bug, not a runtime failure).
 # ---------------------------------------------------------------------------
@@ -235,9 +260,18 @@ mql_read_execute() {
   local user="${3:?user is required}" pass="${4:?pass is required}"
   local database="${5:?database is required}" collection="${6:?collection is required}"
   local operation="${7:?operation is required}"
-  local filter="${8:-{}}" projection="${9:-{}}" pipeline="${10:-[]}"
+  local filter="${8:-}" projection="${9:-}" pipeline="${10:-[]}"
   local distinct_field="${11:-}" limit="${12:-50}"
-  local esc_col esc_field esc_db coll expr
+  local esc_col esc_field esc_db coll expr capped_pipeline
+  # NOT "${8:-{}}": bash's word-scan for a ${param:-word} default ends at
+  # the FIRST unescaped '}' it sees — a literal '{' in the default word is
+  # not depth-counted, so "{}" as an inline default leaves a stray trailing
+  # '}' appended to the RESULT whenever the parameter is actually set
+  # (verified in bash 5.1: "${1:-{}}" with $1="hello" yields "hello}", not
+  # "hello"). Assigning the '{}' default as a separate statement sidesteps
+  # the parser pitfall entirely.
+  [[ -z "$filter" ]] && filter='{}'
+  [[ -z "$projection" ]] && projection='{}'
 
   esc_col=$(_escape_js_string "$collection")
   esc_db=$(_escape_js_string "$database")
@@ -248,14 +282,15 @@ mql_read_execute() {
       expr="${coll}.find(${filter},${projection}).limit(${limit}).toArray()"
       ;;
     aggregate)
-      expr="${coll}.aggregate(${pipeline}).toArray()"
+      capped_pipeline=$(jq -c --argjson lim "$limit" '. + [{"$limit":$lim}]' <<<"$pipeline")
+      expr="${coll}.aggregate(${capped_pipeline}).toArray()"
       ;;
     count)
       expr="({count: ${coll}.countDocuments(${filter})})"
       ;;
     distinct)
       esc_field=$(_escape_js_string "$distinct_field")
-      expr="({values: ${coll}.distinct('${esc_field}',${filter})})"
+      expr="({values: ${coll}.distinct('${esc_field}',${filter}).slice(0,${limit})})"
       ;;
     *)
       return 2
@@ -268,18 +303,25 @@ mql_read_execute() {
 # ---------------------------------------------------------------------------
 # mql_write_preview <exec_pod> <direct_host> <user> <pass> <database>
 #                    <collection> <operation> <filter> <document> <documents>
-# dry_run preview: update_*/delete_* report matched_count (countDocuments)
-# plus up to 5 sample _ids (nothing is changed); insert_* have nothing live
-# to preview, so the validated payload is echoed back as-is. Returns 1 on
-# connection/auth failure, 2 on an unknown operation.
+# dry_run preview: update_*/delete_* report candidate_count (all matching
+# documents, via countDocuments) and would_change_count — the count the
+# confirmed call can actually change, which for update_one/delete_one is
+# capped at 1 since a *_one operation touches at most one document even
+# when the filter matches more; sample_ids is limited to that same count
+# (1 for *_one, up to 5 for *_many). insert_* have nothing live to preview,
+# so the validated payload is echoed back as-is. Returns 1 on connection/
+# auth failure, 2 on an unknown operation.
 # ---------------------------------------------------------------------------
 mql_write_preview() {
   local exec_pod="${1:?exec pod is required}" direct_host="${2:-}"
   local user="${3:?user is required}" pass="${4:?pass is required}"
   local database="${5:?database is required}" collection="${6:?collection is required}"
   local operation="${7:?operation is required}"
-  local filter="${8:-{}}" document="${9:-}" documents="${10:-}"
-  local esc_col esc_db coll expr
+  local filter="${8:-}" document="${9:-}" documents="${10:-}"
+  local esc_col esc_db coll expr sample_limit
+  # See mql_read_execute's comment: an inline "${8:-{}}" default corrupts
+  # any non-empty filter by appending a stray '}' (bash parser pitfall).
+  [[ -z "$filter" ]] && filter='{}'
 
   case "$operation" in
     insert_one)
@@ -290,11 +332,19 @@ mql_write_preview() {
       printf '{"would_insert_count":%s,"would_insert":%s}' "$(jq -c 'length' <<<"$documents")" "$documents"
       return 0
       ;;
-    update_one | update_many | delete_one | delete_many)
+    update_one | delete_one)
+      sample_limit=1
       esc_col=$(_escape_js_string "$collection")
       esc_db=$(_escape_js_string "$database")
       coll="db.getSiblingDB('${esc_db}').getCollection('${esc_col}')"
-      expr="({matched_count: ${coll}.countDocuments(${filter}), sample_ids: ${coll}.find(${filter},{_id:1}).limit(5).toArray().map(function(d){return d._id;})})"
+      expr="(function(){var c=${coll}.countDocuments(${filter});return {candidate_count:c,would_change_count:(c>0?1:0),sample_ids:${coll}.find(${filter},{_id:1}).limit(${sample_limit}).toArray().map(function(d){return d._id;})};})()"
+      ;;
+    update_many | delete_many)
+      sample_limit=5
+      esc_col=$(_escape_js_string "$collection")
+      esc_db=$(_escape_js_string "$database")
+      coll="db.getSiblingDB('${esc_db}').getCollection('${esc_col}')"
+      expr="(function(){var c=${coll}.countDocuments(${filter});return {candidate_count:c,would_change_count:c,sample_ids:${coll}.find(${filter},{_id:1}).limit(${sample_limit}).toArray().map(function(d){return d._id;})};})()"
       ;;
     *)
       return 2
@@ -319,9 +369,12 @@ mql_write_execute() {
   local user="${3:?user is required}" pass="${4:?pass is required}"
   local database="${5:?database is required}" collection="${6:?collection is required}"
   local operation="${7:?operation is required}"
-  local filter="${8:-{}}" update="${9:-}" document="${10:-}" documents="${11:-}"
+  local filter="${8:-}" update="${9:-}" document="${10:-}" documents="${11:-}"
   local upsert="${12:-false}"
   local esc_col esc_db coll expr upsert_js
+  # See mql_read_execute's comment: an inline "${8:-{}}" default corrupts
+  # any non-empty filter by appending a stray '}' (bash parser pitfall).
+  [[ -z "$filter" ]] && filter='{}'
 
   esc_col=$(_escape_js_string "$collection")
   esc_db=$(_escape_js_string "$database")

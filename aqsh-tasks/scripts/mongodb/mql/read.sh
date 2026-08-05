@@ -44,8 +44,15 @@ _TARGET_POD_INPUT="${TARGET_POD:-}"
 _DATABASE="${MQL_DATABASE:?database is required}"
 _COLLECTION="${MQL_COLLECTION:?collection is required}"
 _OPERATION="${MQL_OPERATION:?operation is required}"
-_FILTER="${MQL_FILTER:-{}}"
-_PROJECTION="${MQL_PROJECTION:-{}}"
+# NOT "${MQL_FILTER:-{}}": bash's ${param:-word} default-word scan stops at
+# the first unescaped '}', so an inline "{}" default leaves a stray
+# trailing '}' appended to the value whenever the parameter is actually set
+# — which task defaulting (tasks-mongodb.yaml already supplies "{}") means
+# it always is. Two-step default sidesteps the parser pitfall.
+_FILTER="${MQL_FILTER:-}"
+[[ -z "$_FILTER" ]] && _FILTER='{}'
+_PROJECTION="${MQL_PROJECTION:-}"
+[[ -z "$_PROJECTION" ]] && _PROJECTION='{}'
 _PIPELINE="${MQL_PIPELINE:-[]}"
 _DISTINCT_FIELD="${MQL_DISTINCT_FIELD:-}"
 _LIMIT="${MQL_LIMIT:-50}"
@@ -92,8 +99,13 @@ _PROBE=$(_mql_probe_pod "$_MQL_STS") \
   || fail_task "NO_PRIMARY" "no Ready/Running pod found for StatefulSet ${_MQL_STS} in ${DB_NAMESPACE}"
 log_debug "mql-read" "probe pod: ${_PROBE}"
 
-_TARGET_ROW=$(_mql_resolve_target "$_MQL_STS" "$_PROBE" "$_TARGET_POD_INPUT" "$_MONGO_USER" "$_MONGO_PASS") \
-  || fail_task "NO_PRIMARY" "no target_pod given and no reachable PRIMARY for StatefulSet ${_MQL_STS} in ${DB_NAMESPACE}"
+_TARGET_ROW=$(_mql_resolve_target "$_MQL_STS" "$_PROBE" "$_TARGET_POD_INPUT" "$_MONGO_USER" "$_MONGO_PASS") && _TARGET_RC=0 || _TARGET_RC=$?
+if [[ "$_TARGET_RC" -eq 2 ]]; then
+  log_debug "mql-read" "target_pod '${_TARGET_POD_INPUT}' is not owned by StatefulSet ${_MQL_STS}"
+  fail_task "TARGET_POD_NOT_MEMBER" "'${_TARGET_POD_INPUT}' is not a member pod of StatefulSet ${_MQL_STS} in ${DB_NAMESPACE}"
+elif [[ "$_TARGET_RC" -ne 0 ]]; then
+  fail_task "NO_PRIMARY" "no target_pod given and no reachable PRIMARY for StatefulSet ${_MQL_STS} in ${DB_NAMESPACE}"
+fi
 IFS=$'\x1f' read -r _EXEC_POD _DIRECT_HOST <<<"$_TARGET_ROW"
 log_debug "mql-read" "exec_pod=${_EXEC_POD} direct_host=${_DIRECT_HOST:-<local>}"
 

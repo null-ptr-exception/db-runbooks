@@ -47,7 +47,10 @@ log_set_level "${LOG_LEVEL:-${LOG_LEVEL_DEFAULT:-INFO}}"
 _DATABASE="${MQL_DATABASE:?database is required}"
 _COLLECTION="${MQL_COLLECTION:?collection is required}"
 _OPERATION="${MQL_OPERATION:?operation is required}"
-_FILTER="${MQL_FILTER:-{}}"
+# See mql/read.sh: an inline "${MQL_FILTER:-{}}" default corrupts the value
+# with a stray trailing '}' (bash parser pitfall) — two-step default instead.
+_FILTER="${MQL_FILTER:-}"
+[[ -z "$_FILTER" ]] && _FILTER='{}'
 _UPDATE="${MQL_UPDATE:-}"
 _DOCUMENT="${MQL_DOCUMENT:-}"
 _DOCUMENTS="${MQL_DOCUMENTS:-}"

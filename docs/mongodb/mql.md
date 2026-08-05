@@ -30,7 +30,7 @@ conventions with no special-casing here.
 
 ## Architecture & Flow
 
-```
+```text
 Operator / test-client (cluster-b)
      │  POST /tasks/mql%2Fread   {namespace, database, collection, operation, ...}
      │  POST /tasks/mql%2Fwrite  {namespace, database, collection, operation, dry_run, confirm, ...}
@@ -43,13 +43,19 @@ aqsh (mongo-core, cluster-a) → mongodb/mql/read.sh | mongodb/mql/write.sh
      │    well-formed JSON value of the expected type)
      │ 4. PROTECTED_DATABASE check: admin/local/config always refused
      │ 5. resolve (3-tier, no task inputs): sts_name, credentials
-     │ 6. mql/read: target_pod given? exec there directly
+     │ 6. mql/read: target_pod given? verify it is owned by the resolved
+     │             StatefulSet (TARGET_POD_NOT_MEMBER if not), then exec
+     │             there directly
      │             : else kubectl exec probe → mongosh rs.status() → PRIMARY
      │    mql/write: always the elected PRIMARY (no target_pod field)
-     │ 7. mql/read: run the operation, return the result               (read)
-     │    mql/write, dry_run=true: countDocuments+sample _ids (update/
-     │      delete) or echo the validated payload (insert) — nothing
-     │      changes, DRY_RUN_READY
+     │ 7. mql/read: run the operation, return the result — find/aggregate/
+     │      distinct results are capped at `limit`: find via cursor.limit(),
+     │      aggregate via a {$limit} stage appended after the caller's own
+     │      pipeline (aggregation cursors have no cursor.limit()), distinct
+     │      via a client-side array slice                             (read)
+     │    mql/write, dry_run=true: countDocuments (candidate_count) +
+     │      capped would_change_count/sample_ids (update/delete) or echo
+     │      the validated payload (insert) — nothing changes, DRY_RUN_READY
      │    mql/write, confirm=true: run the operation, return the
      │      driver's own result document                               (write)
      ▼
@@ -75,7 +81,7 @@ tasks are URL-encoded: `POST /tasks/mql%2Fread`, `POST /tasks/mql%2Fwrite`.
 | Input | Required | Default | Meaning |
 |---|---|---|---|
 | `namespace` | yes | — | Namespace of the MongoDB StatefulSet |
-| `target_pod` | no | `""` (→ elected PRIMARY) | Pod to query; must be an existing member pod |
+| `target_pod` | no | `""` (→ elected PRIMARY) | Pod to query; must be a member pod of the resolved StatefulSet (verified via the pod's own `ownerReferences` — `TARGET_POD_NOT_MEMBER` otherwise) |
 | `database` | yes | — | Database name |
 | `collection` | yes | — | Collection name (`system.*` is refused) |
 | `operation` | yes | — | `find` \| `aggregate` \| `count` \| `distinct` |
@@ -83,7 +89,7 @@ tasks are URL-encoded: `POST /tasks/mql%2Fread`, `POST /tasks/mql%2Fwrite`.
 | `projection` | no | `"{}"` | JSON object — `find` only |
 | `pipeline` | no | `"[]"` | JSON array — `aggregate` only |
 | `distinct_field` | required for `distinct` | `""` | Field name to distinct on |
-| `limit` | no | `"50"` (max `1000`) | `find` result cap |
+| `limit` | no | `"50"` (max `1000`) | Result cap for `find`/`aggregate`/`distinct`: `find` uses `cursor.limit()`, `aggregate` appends a `{$limit}` stage after the caller's own pipeline, `distinct` slices the returned array — a pipeline's own `$limit` cannot raise or remove the gateway's cap |
 
 Result (`.result.data`):
 
@@ -100,7 +106,8 @@ Result (`.result.data`):
 }
 ```
 
-`count` returns `{"count": N}`; `distinct` returns `{"values": [...]}`.
+`count` returns `{"count": N}`; `distinct` returns `{"values": [...]}` (also
+capped at `limit`, like `find`/`aggregate`).
 
 ### `mql/write` — gated mutation (dry_run → confirm)
 
@@ -123,7 +130,12 @@ Gate rules (identical to `ops/kill`/`profiler/set`): `dry_run=true`
 `dry_run=false` without `confirm=true` is rejected. There is no
 `target_pod` field — writes always resolve and target the elected PRIMARY.
 
-Dry-run preview (`update_one` example):
+Dry-run preview (`update_one` example — `candidate_count` is every document the
+filter matches; `would_change_count`/`sample_ids` are capped at 1 for
+`update_one`/`delete_one` since those operations can change at most one
+document even when the filter matches more. `update_many`/`delete_many`
+leave `would_change_count` equal to `candidate_count` and cap `sample_ids`
+at 5):
 
 ```json
 {
@@ -132,7 +144,7 @@ Dry-run preview (`update_one` example):
   "summary": "Dry-run only. Would apply the operation shown below.",
   "namespace": "mongo-1", "database": "app", "collection": "orders",
   "operation": "update_one",
-  "preview": {"matched_count": 3, "sample_ids": ["...", "...", "..."]},
+  "preview": {"candidate_count": 3, "would_change_count": 1, "sample_ids": ["..."]},
   "changed": false, "would_change": true
 }
 ```
@@ -146,7 +158,7 @@ Confirmed write:
   "summary": "Write applied.",
   "namespace": "mongo-1", "database": "app", "collection": "orders",
   "operation": "update_one",
-  "result": {"matchedCount": 3, "modifiedCount": 3, "upsertedId": null},
+  "result": {"matchedCount": 1, "modifiedCount": 1, "upsertedId": null},
   "changed": true
 }
 ```
@@ -165,6 +177,7 @@ insert.
 | `DRY_RUN_READY` | completed | `mql/write` preview; nothing changed |
 | `INVALID_INPUT` | failed | Gate violation, bad operation enum, or malformed/missing JSON field |
 | `PROTECTED_DATABASE` | failed | Target database is `admin`/`local`/`config` or internal-config-protected |
+| `TARGET_POD_NOT_MEMBER` | failed | `mql/read`'s `target_pod` is not an owned member of the resolved StatefulSet |
 | `NO_PRIMARY` | failed | No `target_pod` given (read) or no reachable PRIMARY at all |
 | `QUERY_FAILED` | failed | `mql/read`'s operation errored against the server |
 | `PREVIEW_FAILED` | failed | `mql/write`'s dry-run preview query errored against the server |
@@ -201,7 +214,8 @@ POST /tasks/mql%2Fwrite
  "update": "{\"$set\":{\"status\":\"cancelled\"}}"}
 ```
 
-Review `preview.matched_count` and `preview.sample_ids`, then:
+Review `preview.candidate_count`, `preview.would_change_count`, and
+`preview.sample_ids`, then:
 
 ```json
 POST /tasks/mql%2Fwrite
@@ -290,6 +304,19 @@ mongosh inside a member pod, not a Kubernetes API mutation.
   `MQL_PROTECTED_DATABASES_DEFAULT` can only add more names on top.
 - **`system.*` collections are refused** even inside a non-system
   database.
+- **`target_pod` is ownership-checked**: `mql/read`'s optional `target_pod`
+  is verified against its own `ownerReferences` before it is trusted as the
+  exec target (`TARGET_POD_NOT_MEMBER` otherwise). Without this check, a
+  caller could point the resolved deployment's credentials at an arbitrary
+  pod in the namespace rather than a genuine member of that StatefulSet.
+- **`find`/`aggregate`/`distinct` results are capped**: `limit` (default
+  50, max 1000) bounds mongosh/task memory regardless of collection size.
+  `find` uses `cursor.limit()`; MongoDB aggregation cursors don't support
+  `cursor.limit()` at all, so `aggregate` appends a `{$limit: limit}` stage
+  after whatever pipeline the caller supplied — always the last stage, so
+  it can't be raised or removed by the caller's own pipeline content;
+  `distinct` has no cursor (one command, one response), so its result
+  array is sliced instead.
 - **No `plan_hash` compare-and-swap**: unlike `secrets/apply`,
   `mql/write`'s dry-run preview reflects the matched document set *at
   preview time* — a confirm sent well after the preview could act on a
@@ -302,5 +329,5 @@ mongosh inside a member pod, not a Kubernetes API mutation.
 - **Weak/broad filters are accepted**: this API stores and executes what
   the caller sends — a `delete_many` with `filter: "{}"` is syntactically
   valid and will match every document in the collection. The dry-run
-  preview's `matched_count` is the intended safety net; review it before
-  confirming.
+  preview's `candidate_count`/`would_change_count` is the intended safety
+  net; review it before confirming.

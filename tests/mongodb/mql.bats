@@ -260,9 +260,11 @@ _mongo_eval_pod() {
   local pod="$1" js="$2" ctx="${3:-$CTX_A}"
   local user pass
   { IFS= read -r user; IFS= read -r pass; } < <(_mongo_creds "$PNS" "$ctx")
-  kubectl --context "$ctx" -n "$PNS" exec "$pod" -- mongosh --quiet --norc \
+  local out
+  out=$(kubectl --context "$ctx" -n "$PNS" exec "$pod" -- mongosh --quiet --norc \
     "mongodb://${user}:${pass}@localhost:27017/admin?authSource=admin&serverSelectionTimeoutMS=5000" \
-    --eval "$js" 2>/dev/null | tail -1 | tr -d '\r'
+    --eval "$js") || return 1
+  printf '%s\n' "$out" | tail -1 | tr -d '\r'
 }
 
 # ── mql/read ─────────────────────────────────────────────────────────────────
@@ -309,6 +311,30 @@ _mongo_eval_pod() {
   assert_equal "$sorted" "[1,2]"
 }
 
+@test "mql/read aggregate and distinct results are capped by limit" {
+  local body
+  body=$(jq -nc --arg ns "$PNS" --arg pipeline '[{"$sort":{"name":1}}]' \
+    '{namespace:$ns, database:"test", collection:"widgets", operation:"aggregate", pipeline:$pipeline, limit:"1"}')
+  run_mql_task "read" "$body"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq '.result | length')" "1"
+
+  body=$(jq -nc --arg ns "$PNS" \
+    '{namespace:$ns, database:"test", collection:"widgets", operation:"distinct", distinct_field:"qty", limit:"1"}')
+  run_mql_task "read" "$body"
+  assert_equal "$TASK_STATUS" "completed"
+  assert_equal "$(echo "$RESULT_DATA" | jq '.result.values | length')" "1"
+}
+
+@test "mql/read find rejects a filter containing more than one JSON document" {
+  local body
+  body=$(jq -nc --arg ns "$PNS" --arg filter '{} {}' \
+    '{namespace:$ns, database:"test", collection:"widgets", operation:"find", filter:$filter}')
+  run_mql_task "read" "$body"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
+}
+
 @test "mql/read distinct without distinct_field is rejected" {
   local body
   body=$(jq -nc --arg ns "$PNS" \
@@ -334,6 +360,15 @@ _mongo_eval_pod() {
   run_mql_task "read" "$body"
   assert_equal "$TASK_STATUS" "failed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "INVALID_INPUT"
+}
+
+@test "mql/read rejects a target_pod that is not a member of the resolved StatefulSet" {
+  local body
+  body=$(jq -nc --arg ns "$PNS" \
+    '{namespace:$ns, target_pod:"not-a-real-pod", database:"test", collection:"widgets", operation:"find"}')
+  run_mql_task "read" "$body"
+  assert_equal "$TASK_STATUS" "failed"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "TARGET_POD_NOT_MEMBER"
 }
 
 # ── mql/write gating ─────────────────────────────────────────────────────────
@@ -398,14 +433,14 @@ _mongo_eval_pod() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.result.count')" "1"
 }
 
-@test "mql/write update_one previews matched_count then updates, verified by mql/read" {
+@test "mql/write update_one previews would_change_count then updates, verified by mql/read" {
   local body
   body=$(jq -nc --arg ns "$PNS" --arg filter '{"name":"a"}' --arg update '{"$set":{"qty":100}}' \
     '{namespace:$ns, database:"test", collection:"widgets", operation:"update_one", filter:$filter, update:$update}')
   run_mql_task "write" "$body"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "DRY_RUN_READY"
-  assert_equal "$(echo "$RESULT_DATA" | jq -r '.preview.matched_count')" "1"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.preview.would_change_count')" "1"
 
   body=$(jq -nc --arg ns "$PNS" --arg filter '{"name":"a"}' --arg update '{"$set":{"qty":100}}' \
     '{namespace:$ns, database:"test", collection:"widgets", operation:"update_one", filter:$filter, update:$update, dry_run:"false", confirm:"true"}')
@@ -427,7 +462,7 @@ _mongo_eval_pod() {
   run_mql_task "write" "$body"
   assert_equal "$TASK_STATUS" "completed"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "DRY_RUN_READY"
-  assert_equal "$(echo "$RESULT_DATA" | jq -r '.preview.matched_count')" "1"
+  assert_equal "$(echo "$RESULT_DATA" | jq -r '.preview.would_change_count')" "1"
 
   body=$(jq -nc --arg ns "$PNS" --arg filter '{"name":"inserted-one"}' \
     '{namespace:$ns, database:"test", collection:"widgets", operation:"delete_one", filter:$filter, dry_run:"false", confirm:"true"}')

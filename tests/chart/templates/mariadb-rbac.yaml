@@ -23,9 +23,13 @@ rules:
   # Hand-rolled physical restore on a legacy operator pre-creates the datadir PVC
   # and runs a prepare Job (mbstream + mariabackup --prepare) before the new
   # instance adopts the PVC.
+  # delete: replication/rebuild must remove the standby's data volumes — a
+  # StatefulSet's PVCs outlive its CR, and a surviving datadir makes the
+  # operator skip bootstrapFrom and return the stale data the rebuild exists to
+  # replace.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch", "create"]

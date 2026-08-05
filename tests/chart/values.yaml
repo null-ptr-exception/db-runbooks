@@ -47,6 +47,11 @@ mariadb:
   # replicas > 1 turns on operator replication (1 primary + N-1 replicas),
   # required by the switch-primary e2e. Default 1 = standalone.
   replicas: 1
+  # Base for this instance's server_id range (pod N gets base+N). Unset = the
+  # operator's default, which is the same on every cluster — fine for a single
+  # instance, but two clusters that must replicate to each other need disjoint
+  # ranges. IMMUTABLE once deployed.
+  serverIdStartIndex: null
   rootPassword: mariadb-test-pass
   objectStorage:
     enabled: false
@@ -149,3 +154,20 @@ gateway:
   enabled: false
   # Each entry: { name, host, backendHost, backendPort }
   virtualServices: []
+
+# --- Cross-cluster replication mesh stand-in (test infrastructure only) ---
+# Reproduces the real deployment's Cilium mesh contract (<namespace>-rw) over
+# the sandbox's Istio TCP passthrough. See templates/replication-mesh.yaml.
+replicationMesh:
+  # cluster-a side: publish this namespace's primary on the shared gateway's
+  # MySQL listener so the peer cluster can reach it.
+  expose:
+    enabled: false
+    # Defaults to mariadb-primary.<namespace>.svc.cluster.local
+    backendHost: ""
+    backendPort: 3306
+  # cluster-b side: the ExternalName pair the tasks derive from the namespace.
+  peer:
+    enabled: false
+    # Any *.kind-a.test name — CoreDNS maps them all to the cluster-a node IP.
+    externalName: ""

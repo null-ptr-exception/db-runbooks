@@ -40,6 +40,13 @@ spec:
   replicas: {{ .Values.mariadb.replicas }}
   replication:
     enabled: true
+{{- if .Values.mariadb.serverIdStartIndex }}
+    # server_id must be unique across every server that participates in the same
+    # replication topology — including across clusters. The field is IMMUTABLE,
+    # so a standby deployed with the default range can never be repaired in
+    # place: MariaDB refuses the link with errno 1593.
+    serverIdStartIndex: {{ .Values.mariadb.serverIdStartIndex }}
+{{- end }}
     primary:
       podIndex: 0
     replica:

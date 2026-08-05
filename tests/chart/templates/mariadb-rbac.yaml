@@ -7,7 +7,15 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     resourceNames: ["mariadb"]
-    verbs: ["get"]
+    # patch/update: replication/attach quiesces the standby before overwriting
+    # its datadir in place, by scaling the StatefulSet to 0 and back. Restoring
+    # into a running mysqld would corrupt it, and the alternative — deleting and
+    # recreating the instance — is irreversible.
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets/scale"]
+    resourceNames: ["mariadb"]
+    verbs: ["get", "patch", "update"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list", "watch"]
@@ -27,12 +35,19 @@ rules:
   # Hand-rolled physical restore on a legacy operator pre-creates the datadir PVC
   # and runs a prepare Job (mbstream + mariabackup --prepare) before the new
   # instance adopts the PVC.
+  # delete: replication/rebuild must remove the standby's data volumes — a
+  # StatefulSet's PVCs outlive its CR, and a surviving datadir makes the
+  # operator skip bootstrapFrom and return the stale data the rebuild exists to
+  # replace.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create"]
+    # delete: the in-place restore Jobs are cleaned up after they succeed, and a
+    # stale one from an earlier attempt must not block a retry (a Job's pod
+    # template is immutable, so it cannot simply be re-applied).
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     # patch: tag the managed account password Secret with an owner annotation

@@ -379,3 +379,100 @@ mdbt_logical_backup_manifest() {
       }
     }'
 }
+
+# ---------------------------------------------------------------------------
+# Peer AQSH transport
+#
+# Submit a task to another cluster's AQSH over HTTP and poll it to completion.
+# The kube single-cluster boundary is preserved: the caller never holds the
+# peer's kubeconfig, only its AQSH URL and a bearer token the caller already
+# holds (both clusters validate against the same TokenReview backend).
+#
+# Factored out of mariadb-blue-green.sh so non-blue/green tasks can reuse it.
+# NOTE: this sends the payload VERBATIM. blue-green's bg_peer_call_task wraps
+# this and additionally injects peer_aqsh_url/peer_token, which its own tasks
+# declare as required inputs — injecting those into a task that does not
+# declare them (e.g. physical-backup) makes aqsh reject the request with 400.
+# ---------------------------------------------------------------------------
+
+MDBT_PEER_ERR=""
+
+mdbt_validate_url() {
+  local name="$1" value="$2" op="$3"
+  if [[ ! "$value" =~ ^https?://[A-Za-z0-9._:/-]+$ ]]; then
+    mdbt_fail "$op" "${name} must be an http(s) URL" \
+      "$(jq -n --arg field "$name" --arg value "$value" '{field: $field, value: $value}')" 2
+  fi
+}
+
+# mdbt_peer_call_task <peer_url> <peer_token> <task_path> <payload> [timeout_seconds]
+# Echoes the peer task's inner result data (compact JSON) on success, returns 0.
+# On any failure sets MDBT_PEER_ERR to a stable, public-safe marker and returns
+# 1 (does NOT exit, so callers can roll back).
+mdbt_peer_call_task() {
+  local peer_url="$1" peer_token="$2" task_path="$3" payload="$4" timeout="${5:-540}"
+  local encoded submit code body task_id resp status elapsed=0 curl_rc
+
+  MDBT_PEER_ERR=""
+  encoded="${task_path//\//%2F}"
+
+  if submit="$(curl -sS --connect-timeout 5 -m 60 -w $'\n%{http_code}' \
+    -X POST "${peer_url}/tasks/${encoded}" \
+    -H "Authorization: Bearer ${peer_token}" \
+    -H 'Content-Type: application/json' \
+    -d "$payload" 2>/dev/null)"; then
+    curl_rc=0
+  else
+    curl_rc=$?
+  fi
+  if (( curl_rc != 0 )); then
+    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    return 1
+  fi
+
+  code="$(printf '%s' "$submit" | tail -n1)"
+  body="$(printf '%s' "$submit" | sed '$d')"
+  if [[ "$code" != "202" ]]; then
+    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    return 1
+  fi
+  task_id="$(jq -r '.id // empty' <<<"$body" 2>/dev/null || true)"
+  if [[ -z "$task_id" ]]; then
+    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    return 1
+  fi
+
+  while (( elapsed < timeout )); do
+    if resp="$(curl -sS --connect-timeout 5 -m 15 \
+      -H "Authorization: Bearer ${peer_token}" \
+      "${peer_url}/executions/${task_id}" 2>/dev/null)"; then
+      curl_rc=0
+    else
+      curl_rc=$?
+    fi
+    if (( curl_rc != 0 )); then
+      MDBT_PEER_ERR='{"stage":"peer-operation"}'
+      return 1
+    fi
+    status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
+    case "$status" in
+      completed)
+        jq -c '
+          .result.data as $d
+          | (($d | try fromjson catch null) // (if ($d | type) == "object" then $d else {} end))
+          | (.data // {})
+        ' <<<"$resp" 2>/dev/null || printf '{}'
+        return 0
+        ;;
+      failed)
+        MDBT_PEER_ERR='{"stage":"peer-operation"}'
+        return 1
+        ;;
+    esac
+    sleep 5
+    elapsed=$(( elapsed + 5 ))
+  done
+
+  MDBT_PEER_ERR='{"stage":"peer-operation"}'
+  return 1
+}

@@ -160,6 +160,16 @@ setup() {
   [ "$SC_FAIL" -eq 1 ]
 }
 
+@test "L3 pass: lag at the old 10s Atlas default no longer warns (widened to 15s)" {
+  mongo_rs_lag() {
+    response_ok "mongo_rs_lag" "ok" \
+      '{"members":[{"member":"mongodb-0:27017","stateStr":"PRIMARY","lagSeconds":null},{"member":"mongodb-1:27017","stateStr":"SECONDARY","lagSeconds":10}]}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 0 ]
+}
+
 # ── Layer 3: oplog window ────────────────────────────────────────────────────
 
 @test "L3 fail: oplog window below the critical minimum" {
@@ -179,6 +189,35 @@ setup() {
   check_mongo_internals || true
   [ "$SC_FAIL" -eq 0 ]
   [ "$SC_WARN" -eq 1 ]
+}
+
+@test "L3 warn (not fail): freshly started node hasn't had time to build an oplog window" {
+  # 1h uptime — physically can't have accumulated a >=1-day critical window yet
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":3600,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":1,"windowSeconds":3600,"windowHours":1,"windowDays":0.04}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 1 ]
+}
+
+@test "L3 fail: oplog window still below critical once uptime clears the threshold" {
+  # 2 days uptime — old enough that a 0.04-day window is a real problem, not youth
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":172800,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":99,"windowSeconds":3600,"windowHours":1,"windowDays":0.04}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 1 ]
 }
 
 # ── Layer 3: server resources ────────────────────────────────────────────────

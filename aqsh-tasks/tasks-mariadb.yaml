@@ -267,7 +267,7 @@ tasks:
   mariadb_sanity_check: *mariadb_sanity_check_task
   create-account:
     script: mariadb/create-account.sh
-    description: "Create a new MariaDB account and grant scoped database privileges"
+    description: "Create or recreate a MariaDB account with scoped or all-database read-only grants"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -292,8 +292,9 @@ tasks:
         default: mariadb
       - name: database
         env: ACCOUNT_DATABASE
-        required: true
+        required: false
         type: string
+        default: ""
       - name: username
         env: ACCOUNT_USERNAME
         required: true
@@ -305,17 +306,59 @@ tasks:
         default: "%"
       - name: privileges
         env: ACCOUNT_PRIVILEGES
-        required: true
-        type: string
-      # The password Secret is a managed-database internal: its name is derived by
-      # convention (mariadb-account-<username>), its key defaults to "password",
-      # and the result returns it as password_secret.{name,key}. Not task inputs;
-      # ACCOUNT_PASSWORD_SECRET_NAME / _KEY / _PREFIX stay as env overrides only.
-      - name: generate_password
-        env: GENERATE_PASSWORD
         required: false
         type: string
-        default: "true"
+        default: SELECT
+      - name: allow_existing
+        env: ALLOW_EXISTING
+        required: false
+        type: string
+        default: "false"
+      - name: password_length
+        env: PASSWORD_LENGTH
+        required: false
+        type: string
+        default: "24"
+      - name: password_special_chars
+        env: PASSWORD_SPECIAL_CHARS
+        required: false
+        type: string
+        default: "!@#%^*_-+=."
+      - name: password_special_max
+        env: PASSWORD_SPECIAL_MAX
+        required: false
+        type: string
+        default: "4"
+      - name: password_delivery_mode
+        env: PASSWORD_DELIVERY_MODE
+        required: false
+        type: string
+        default: one_time_plaintext
+      - name: recipient_pgp_pubkey
+        env: RECIPIENT_PGP_PUBKEY
+        required: false
+        type: string
+        default: ""
+      - name: password_secret_name
+        env: PASSWORD_SECRET_NAME
+        required: false
+        type: string
+        default: ""
+      - name: password_secret_key
+        env: PASSWORD_SECRET_KEY
+        required: false
+        type: string
+        default: password
+      - name: password_expire_mode
+        env: PASSWORD_EXPIRE_MODE
+        required: false
+        type: string
+        default: first_login
+      - name: validity_days
+        env: VALIDITY_DAYS
+        required: false
+        type: string
+        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -323,11 +366,6 @@ tasks:
         default: "true"
       - name: confirm
         env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-      - name: allow_global
-        env: ALLOW_GLOBAL
         required: false
         type: string
         default: "false"

@@ -258,7 +258,9 @@ encrypt_password_payload() {
 
   gnupg_home=$(mktemp -d)
   chmod 700 "$gnupg_home"
-  trap 'rm -rf "$gnupg_home"' RETURN EXIT
+  # RETURN runs while the local is in scope; EXIT may run after it is gone.
+  # Use the exported path and guard it for set -u callers.
+  trap '[[ -n "${GNUPGHOME:-}" ]] && rm -rf "$GNUPGHOME" && unset GNUPGHOME' RETURN EXIT
 
   export GNUPGHOME="$gnupg_home"
 

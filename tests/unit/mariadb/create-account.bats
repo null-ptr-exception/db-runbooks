@@ -1,175 +1,92 @@
 #!/usr/bin/env bats
 
 setup() {
-  load '../../test_helper/bats-support/load.bash'
-  load '../../test_helper/bats-assert/load.bash'
-
-  export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
+  export TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/create-account.sh"
-  # These cases target a fixed "mariadb" CR; set it explicitly so the script
-  # uses it directly instead of auto-detecting from the (mocked) namespace.
   export MARIADB_NAME=mariadb
+  export SECRETS_AUTODETECT_DEFAULT=false
   export _LOG_CURRENT_LEVEL=4
   mkdir -p "${TEST_TMPDIR}/bin"
+
+  # PGP behavior is deterministic here; integration tests own real crypto.
+  cat > "${TEST_TMPDIR}/bin/gpg" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case " $* " in
+  *" --import "*) cat >/dev/null; [[ "${GPG_FAIL_IMPORT:-0}" != 1 ]]; exit 0 ;;
+  *" --with-colons "*) printf 'fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n'; exit 0 ;;
+  *" --encrypt "*) cat >/dev/null; printf '%s\n' '-----BEGIN PGP MESSAGE-----' 'encrypted-test-payload' '-----END PGP MESSAGE-----'; exit 0 ;;
+esac
+exit 1
+EOF
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-
 args=()
 while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --context|--namespace|--kubeconfig)
-      shift 2
-      ;;
-    -n)
-      shift 2
-      ;;
-    *)
-      args+=("$1")
-      shift
-      ;;
-  esac
+  if [[ "$1" == --context || "$1" == --namespace || "$1" == --kubeconfig || "$1" == -n ]]; then
+    shift 2
+  else
+    args+=("$1")
+    shift
+  fi
 done
-
 cmd="${args[0]:-}"
 
-if [[ "$cmd" == "cluster-info" ]]; then
-  if [[ "${KUBECTL_UNAVAILABLE:-0}" == "1" ]]; then
-    echo "connection refused" >&2
-    exit 1
-  fi
-  echo "Kubernetes control plane is running"
+if [[ "$cmd" == cluster-info ]]; then
+  [[ "${KUBECTL_UNAVAILABLE:-0}" != 1 ]] || exit 1
   exit 0
 fi
 
-if [[ "$cmd" == "create" && "${args[1]:-}" == "secret" ]]; then
-  if [[ "${KUBECTL_CREATE_FAIL:-0}" == "1" ]]; then
-    echo "simulated create failure" >&2
-    exit 1
-  fi
-  printf '%s\n' "${args[*]}" > "${TEST_TMPDIR}/created-secret.args"
-  exit 0
-fi
-
-if [[ "$cmd" == "annotate" ]]; then
-  printf '%s\n' "${args[*]}" > "${TEST_TMPDIR}/annotate-secret.args"
-  exit 0
-fi
-
-if [[ "$cmd" == "get" ]]; then
-  resource="${args[1]:-}"
-  name="${args[2]:-}"
-  output="${args[*]}"
-
-  if [[ "$resource" == "mariadb" && "$name" == "mariadb" ]]; then
+if [[ "$cmd" == get ]]; then
+  resource="${args[1]:-}"; name="${args[2]:-}"; output="${args[*]}"
+  if [[ "$resource" == mariadb && "$name" == mariadb ]]; then
     case "$output" in
-      *'.status.currentPrimary'*)
-        if [[ "${CURRENT_PRIMARY_EMPTY:-0}" == "1" ]]; then printf ''; else printf 'mariadb-0'; fi
-        ;;
-      *'.spec.replicas'*)
-        printf '%s' "${MOCK_REPLICAS:-1}"
-        ;;
-      *)
-        printf '{}'
-        ;;
+      *status.currentPrimary*) printf 'mariadb-0' ;;
+      *spec.replicas*) printf '1' ;;
+      *) exit 1 ;;
     esac
     exit 0
   fi
-
-  if [[ "$resource" == "statefulset" && "$name" == "mariadb" ]]; then
-    printf '%s' "${MOCK_REPLICAS:-1}"
-    exit 0
-  fi
-
-  if [[ "$resource" == "pods" ]]; then
-    printf ''
-    exit 0
-  fi
-
-  if [[ "$resource" == "secret" && "$output" == *annotations* ]]; then
-    printf '%s' "${MOCK_SECRET_OWNER:-}"
-    exit 0
-  fi
-
-  if [[ "$resource" == "secret" && "$name" == "mariadb-account-provided-password" ]]; then
-    printf 'UHJvdmlkZWRQYXNzMTIz'
-    exit 0
-  fi
-
-  if [[ "$resource" == "secret" && "$name" == "mariadb-account-invalid-password" ]]; then
-    printf 'YmFkJ3Bhc3N3b3Jk'
-    exit 0
-  fi
-
-  if [[ "$resource" == "secret" && "$name" == "mariadb-account-app-user-password" && "${KUBECTL_CREATE_FAIL:-0}" == "1" && "${SECRET_ALREADY_EXISTS:-0}" == "1" ]]; then
-    printf 'RXhpc3RpbmdQYXNzMTIz'
-    exit 0
-  fi
-
-  if [[ "$resource" == "secret" ]]; then
-    echo "secret ${name} not found" >&2
-    exit 1
+  if [[ "$resource" == statefulset && "$name" == mariadb ]]; then printf '1'; exit 0; fi
+  if [[ "$resource" == secret ]]; then
+    case "$name" in
+      svc-password) printf 'Rml4ZWRTZXJ2aWNlUGFzczEyMyE='; exit 0 ;;
+      empty-password) printf ''; exit 0 ;;
+      *) exit 1 ;;
+    esac
   fi
 fi
 
-if [[ "$cmd" == "exec" ]]; then
+if [[ "$cmd" == exec ]]; then
   pod="${args[1]:-}"
-  shift_index=0
-  for i in "${!args[@]}"; do
-    if [[ "${args[$i]}" == "--" ]]; then
-      shift_index=$((i + 1))
-      break
-    fi
-  done
-  command=("${args[@]:$shift_index}")
-
-  if [[ "$pod" == "mariadb-0" && "${command[*]}" == "printenv MARIADB_ROOT_PASSWORD" ]]; then
-    if [[ "${ROOT_PASSWORD_UNAVAILABLE:-0}" == "1" ]]; then
-      echo "root password unavailable" >&2
-      exit 1
-    fi
-    printf 'root-pass'
-    exit 0
+  split=0
+  for i in "${!args[@]}"; do [[ "${args[$i]}" != -- ]] || { split=$((i + 1)); break; }; done
+  command=("${args[@]:$split}")
+  if [[ "$pod" == mariadb-0 && "${command[*]}" == 'printenv MARIADB_ROOT_PASSWORD' ]]; then
+    printf 'root-pass'; exit 0
   fi
-
-  last_index=$((${#command[@]} - 1))
-  query="${command[$last_index]}"
+  query="${command[$((${#command[@]} - 1))]}"
   printf '%s\n' "$query" >> "${TEST_TMPDIR}/sql.log"
-
   case "$query" in
-    SELECT\ COUNT\(\*\)\ FROM\ mysql.user*)
-      if [[ "${SQL_FAIL_ACCOUNT_COUNT:-0}" == "1" ]]; then
-        echo "simulated account count failure" >&2
-        exit 1
-      fi
-      printf '%s\n' "${CREATE_ACCOUNT_COUNT:-${CREATE_ACCOUNT_EXISTS:-0}}"
+    SELECT\ COUNT\(\*\)*)
+      [[ "${SQL_FAIL_LOOKUP:-0}" != 1 ]] || exit 1
+      printf '%s\n' "${ACCOUNT_COUNT:-0}"
       ;;
-    CREATE\ USER*)
-      if [[ "${SQL_FAIL_CREATE:-0}" == "1" ]]; then
-        echo "simulated create failure" >&2
-        exit 1
-      fi
-      printf 'ok\n'
-      ;;
-    GRANT*)
-      if [[ "${SQL_FAIL_GRANT:-0}" == "1" ]]; then
-        echo "simulated grant failure" >&2
-        exit 1
-      fi
-      printf 'ok\n'
-      ;;
+    CREATE\ USER*|ALTER\ USER*) [[ "${SQL_FAIL_MUTATION:-0}" != 1 ]] || exit 1 ;;
+    GRANT*) [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1 ;;
     SHOW\ GRANTS*)
-      if [[ "${SQL_FAIL_VERIFY:-0}" == "1" ]]; then
-        echo "simulated verify failure" >&2
-        exit 1
+      [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
+      if [[ "${VERIFY_MISMATCH:-0}" == 1 ]]; then
+        printf "GRANT INSERT ON *.* TO 'svc'@'%%'\n"
+      elif [[ -n "${EXPECTED_DATABASE:-}" ]]; then
+        printf "GRANT %s ON \`%s\`.* TO 'svc'@'%%'\n" "${EXPECTED_PRIVILEGES:-SELECT}" "$EXPECTED_DATABASE"
+      else
+        printf "GRANT SELECT ON *.* TO 'svc'@'%%'\n"
       fi
-      printf 'ok\n'
-      ;;
-    *)
-      printf ''
       ;;
   esac
   exit 0
@@ -178,413 +95,188 @@ fi
 echo "unexpected kubectl invocation: ${args[*]}" >&2
 exit 1
 EOF
-  chmod +x "${TEST_TMPDIR}/bin/kubectl"
+  chmod +x "${TEST_TMPDIR}/bin/gpg" "${TEST_TMPDIR}/bin/kubectl"
 }
 
-common_args() {
-  echo "--context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json"
+actual_args() {
+  printf '%s\n' \
+    --namespace mariadb-1 --mdb mariadb --username svc \
+    --dry-run false --confirm true --json
 }
 
-assert_json() {
-  local field="$1" expected="$2" actual
-  actual="$(printf '%s' "$output" | jq -r "$field")"
-  assert_equal "$actual" "$expected"
-}
+json_field() { printf '%s' "$output" | jq -r "$1"; }
 
-@test "dry-run returns READY with a redacted SQL plan" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT,INSERT \
-    --password-secret-name mariadb-account-app-user-password \
-    --json
-
+@test "dry-run defaults to all-database SELECT and first-login expiry" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --json
   [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-  dry_run=$(printf '%s' "$output" | jq -r '.dry_run')
-  redacted=$(printf '%s' "$output" | jq -r '.sql_plan[]' | grep -c '<redacted>')
-
-  [ "$result_status" = "READY" ]
-  [ "$reason_code" = "DRY_RUN_READY" ]
-  [ "$dry_run" = "true" ]
-  [ "$redacted" -gt 0 ]
+  [ "$(json_field '.status')" = READY ]
+  [ "$(json_field '.scope.kind')" = all_databases_read_only ]
+  [ "$(json_field '.scope.grant')" = '*.*' ]
+  [ "$(json_field '.privileges | join(",")')" = SELECT ]
+  [ "$(json_field '.password_expire_mode')" = first_login ]
+  [ "$(json_field '.sql_plan[0]')" = "CREATE USER 'svc'@'%' IDENTIFIED BY '<redacted>' PASSWORD EXPIRE" ]
+  [[ "$output" != *password_secret* ]]
 }
 
-@test "actual run without confirm is blocked before changing anything" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "BLOCKED" ]
-  [ "$reason_code" = "CONFIRM_REQUIRED" ]
-  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
+@test "all-database scope fails closed for non-SELECT privileges" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --privileges SELECT,INSERT --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  [[ "$(json_field '.errors | join(" ")')" == *'permits exactly SELECT'* ]]
 }
 
-@test "invalid username is rejected" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username root \
-    --privileges SELECT \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "INVALID_INPUT" ]
+@test "explicit global database spelling is rejected" {
+  run "$SCRIPT" --namespace mariadb-1 --database '*.*' --username svc --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
 }
 
-@test "global scope is rejected by default" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database '*.*' \
-    --username app_user \
-    --privileges SELECT \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "INVALID_INPUT" ]
+@test "database scope retains requested allowed privileges" {
+  run "$SCRIPT" --namespace mariadb-1 --database app_db --username svc --privileges SELECT,INSERT --json
+  [ "$(json_field '.status')" = READY ]
+  [ "$(json_field '.scope.kind')" = database ]
+  [ "$(json_field '.scope.grant')" = '`app_db`.*' ]
+  [ "$(json_field '.privileges | join(",")')" = SELECT,INSERT ]
 }
 
-@test "admin privilege is rejected by default" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SUPER \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "INVALID_INPUT" ]
+@test "all native expiry modes produce their MariaDB SQL" {
+  local mode expected days
+  for mode in first_login never default; do
+    case "$mode" in
+      first_login) expected='PASSWORD EXPIRE' ;;
+      never) expected='PASSWORD EXPIRE NEVER' ;;
+      default) expected='PASSWORD EXPIRE DEFAULT' ;;
+    esac
+    run "$SCRIPT" --namespace mariadb-1 --username svc --password-expire-mode "$mode" --json
+    [ "$(json_field '.status')" = READY ]
+    [[ "$(json_field '.sql_plan[0]')" == *"$expected" ]]
+  done
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-expire-mode interval --validity-days 30 --json
+  [[ "$(json_field '.sql_plan[0]')" == *'PASSWORD EXPIRE INTERVAL 30 DAY' ]]
 }
 
-@test "unsafe host is rejected" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --host "bad host" \
-    --privileges SELECT \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "INVALID_INPUT" ]
+@test "expiry validity_days combinations are validated" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-expire-mode interval --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-expire-mode never --validity-days 7 --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-expire-mode interval --validity-days nope --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
 }
 
-@test "password Secret name outside the managed prefix is rejected" {
-  run "${SCRIPT}" \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name unrelated-secret \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "INVALID_INPUT" ]
+@test "password generation policy rejects short lengths and unsafe charsets" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-length 11 --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-special-max nope --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-special-chars "safe'no" --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
 }
 
-@test "actual run creates a password Secret and does not print the password" {
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT,INSERT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-  managed=$(printf '%s' "$output" | jq -r '.password_secret.managed')
-
-  [ "$result_status" = "CREATED" ]
-  [ "$reason_code" = "ACCOUNT_CREATED" ]
-  [ "$managed" = "true" ]
-  [ -f "${TEST_TMPDIR}/created-secret.args" ]
-  ! printf '%s' "$output" | grep -q 'stringData'
-  ! printf '%s' "$output" | grep -q 'root-pass'
+@test "generated plaintext delivery follows the MongoDB payload shape and policy" {
+  run "$SCRIPT" $(actual_args)
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_CREATED ]
+  [ "$(json_field '.delivery_payload.mode')" = one_time_plaintext ]
+  password="$(json_field '.delivery_payload.password')"
+  [ "${#password}" -eq 24 ]
+  [[ "$password" =~ [a-z] && "$password" =~ [A-Z] && "$password" =~ [0-9] ]]
+  specials="$(printf '%s' "$password" | tr -cd '!@#%^*_-+=.')"
+  [ "${#specials}" -le 4 ]
 }
 
-@test "password Secret name is derived by convention when not provided" {
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --dry-run true \
-    --json
-
-  [ "$status" -eq 0 ]
-  # underscores in the username are normalised into a valid Secret name
-  [ "$(printf '%s' "$output" | jq -r '.password_secret.name')" = "mariadb-account-app-user" ]
-  [ "$(printf '%s' "$output" | jq -r '.password_secret.key')" = "password" ]
+@test "encrypted delivery returns the MongoDB-compatible payload" {
+  run "$SCRIPT" $(actual_args) --password-delivery-mode encrypted_payload --recipient-pgp-pubkey test-key
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.delivery_payload.mode')" = encrypted_payload ]
+  [ "$(json_field '.delivery_payload.recipient_key_fingerprint')" = 0123456789ABCDEF0123456789ABCDEF01234567 ]
+  [ "$(json_field '.delivery_payload.content_type')" = application/pgp-encrypted ]
+  [[ "$(json_field '.delivery_payload.ciphertext')" == *'BEGIN PGP MESSAGE'* ]]
+  [ "$(json_field '.delivery_payload.password // empty')" = '' ]
 }
 
-@test "secret-provided password path blocks when Secret is unreadable" {
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-missing-password \
-    --generate-password false \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "BLOCKED" ]
-  [ "$reason_code" = "PASSWORD_SECRET_UNAVAILABLE" ]
+@test "encryption failure returns DELIVERY_ENCRYPT_FAILED without mutation" {
+  export GPG_FAIL_IMPORT=1
+  run "$SCRIPT" $(actual_args) --password-delivery-mode encrypted_payload --recipient-pgp-pubkey invalid-key
+  [ "$(json_field '.reason_code')" = DELIVERY_ENCRYPT_FAILED ]
+  ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
-@test "SQL create failure returns SQL_FAILED" {
-  export SQL_FAIL_CREATE=1
-
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "SQL_FAILED" ]
+@test "generator failure returns PASSWORD_GENERATION_FAILED without mutation" {
+  cat > "${TEST_TMPDIR}/bin/python3" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/python3"
+  run "$SCRIPT" $(actual_args)
+  [ "$(json_field '.reason_code')" = PASSWORD_GENERATION_FAILED ]
+  ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
-@test "SQL account lookup failure returns SQL_FAILED" {
-  export SQL_FAIL_ACCOUNT_COUNT=1
-
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "SQL_FAILED" ]
+@test "caller-provided Secret is read-only and returned by reference" {
+  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.delivery_payload.mode')" = caller_provided_secret ]
+  [ "$(json_field '.delivery_payload.secret_name')" = svc-password ]
+  [ "$(json_field '.delivery_payload.secret_key')" = password ]
+  [[ "$output" != *FixedServicePass123* ]]
+  [ ! -e "${TEST_TMPDIR}/secret-write" ]
 }
 
-@test "SQL grant failure returns SQL_FAILED" {
+@test "caller Secret and generated delivery options are mutually exclusive" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --password-secret-name svc-password --password-delivery-mode encrypted_payload --recipient-pgp-pubkey key --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+}
+
+@test "protected and missing caller Secrets fail without exposing credentials" {
+  run "$SCRIPT" $(actual_args) --password-secret-name mariadb
+  [ "$(json_field '.reason_code')" = PROTECTED_SECRET ]
+  run "$SCRIPT" $(actual_args) --password-secret-name missing
+  [ "$(json_field '.reason_code')" = PASSWORD_SECRET_UNAVAILABLE ]
+  [[ "$output" != *root-pass* ]]
+}
+
+@test "existing account fails by default" {
+  export ACCOUNT_COUNT=1
+  run "$SCRIPT" $(actual_args)
+  [ "$(json_field '.status')" = ERROR ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_ALREADY_EXISTS ]
+  ! grep -qE '^(ALTER|GRANT|REVOKE)' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "allow_existing recreates credential and replaces grants" {
+  export ACCOUNT_COUNT=1 EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='SELECT, INSERT'
+  run "$SCRIPT" $(actual_args) --database app_db --privileges SELECT,INSERT --allow-existing true --password-expire-mode never
+  [ "$(json_field '.status')" = RECREATED ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_RECREATED ]
+  grep -q '^ALTER USER .*PASSWORD EXPIRE NEVER; REVOKE ALL PRIVILEGES, GRANT OPTION FROM' "${TEST_TMPDIR}/sql.log"
+  grep -q '^GRANT SELECT, INSERT ON `app_db`\.\*' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "SHOW GRANTS must contain the effective requested grant" {
+  export VERIFY_MISMATCH=1
+  run "$SCRIPT" $(actual_args)
+  [ "$(json_field '.reason_code')" = SQL_VERIFY_FAILED ]
+  [ "$(json_field '.mutation_applied')" = true ]
+}
+
+@test "grant failure reports an explicit partial mutation" {
   export SQL_FAIL_GRANT=1
-
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-
-  [ "$result_status" = "ERROR" ]
-  [ "$reason_code" = "SQL_FAILED" ]
+  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  [ "$(json_field '.reason_code')" = SQL_FAILED ]
+  [ "$(json_field '.mutation_applied')" = true ]
+  [[ "$(json_field '.summary')" == *'credential changed'* ]]
+  [[ "$output" != *FixedServicePass123* ]]
 }
 
-@test "KUBECTL_UNAVAILABLE when cluster-info fails" {
-  export KUBECTL_UNAVAILABLE=1
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'ERROR'
-  assert_json '.reason_code' 'KUBECTL_UNAVAILABLE'
+@test "SQL mutation failures are redacted" {
+  export SQL_FAIL_MUTATION=1
+  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  [ "$(json_field '.reason_code')" = ACCOUNT_MUTATION_FAILED ]
+  [[ "$output" != *FixedServicePass123* ]]
+  [[ "$output" != *root-pass* ]]
 }
 
-@test "CURRENT_PRIMARY_EMPTY when no primary or pods can be determined" {
-  export CURRENT_PRIMARY_EMPTY=1
-  export MOCK_REPLICAS=0
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'ERROR'
-  assert_json '.reason_code' 'CURRENT_PRIMARY_EMPTY'
-}
-
-@test "ROOT_PASSWORD_UNAVAILABLE when password cannot be read" {
-  export ROOT_PASSWORD_UNAVAILABLE=1
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'ERROR'
-  assert_json '.reason_code' 'ROOT_PASSWORD_UNAVAILABLE'
-}
-
-@test "PASSWORD_SECRET_WRITE_FAILED when generated Secret cannot be created or read" {
-  export KUBECTL_CREATE_FAIL=1
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'ERROR'
-  assert_json '.reason_code' 'PASSWORD_SECRET_WRITE_FAILED'
-}
-
-@test "PASSWORD_SECRET_INVALID when provided Secret contains unsafe password" {
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-invalid-password \
-    --generate-password false \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  assert_success
-  assert_json '.status' 'BLOCKED'
-  assert_json '.reason_code' 'PASSWORD_SECRET_INVALID'
-}
-
-@test "SQL_VERIFY_FAILED when SHOW GRANTS fails after successful create" {
-  export SQL_FAIL_VERIFY=1
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'ERROR'
-  assert_json '.reason_code' 'SQL_VERIFY_FAILED'
-}
-
-@test "existing generated password Secret is reused instead of overwritten" {
-  export KUBECTL_CREATE_FAIL=1
-  export SECRET_ALREADY_EXISTS=1
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_success
-  assert_json '.status' 'CREATED'
-  assert_json '.reason_code' 'ACCOUNT_CREATED'
-  assert_json '.password_secret.managed' 'false'
-}
-
-@test "PASSWORD_SECRET_CONFLICT when the derived Secret belongs to a different account" {
-  export KUBECTL_CREATE_FAIL=1        # Secret already exists
-  export SECRET_ALREADY_EXISTS=1
-  export MOCK_SECRET_OWNER=other_user # owned by a different account
-
-  run "${SCRIPT}" $(common_args)
-
-  assert_json '.status' 'BLOCKED'
-  assert_json '.reason_code' 'PASSWORD_SECRET_CONFLICT'
-}
-
-@test "existing account is idempotent and does not rewrite password Secret" {
-  export CREATE_ACCOUNT_EXISTS=1
-
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-app-user-password \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  reason_code=$(printf '%s' "$output" | jq -r '.reason_code')
-  exists=$(printf '%s' "$output" | jq -r '.account_exists')
-
-  [ "$result_status" = "UNCHANGED" ]
-  [ "$reason_code" = "ACCOUNT_EXISTS" ]
-  [ "$exists" = "true" ]
-  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
-  ! grep -q '^GRANT' "${TEST_TMPDIR}/sql.log"
-}
-
-@test "secret-provided password path is supported" {
-  run "${SCRIPT}" \
-    --context kind-cluster-dbs \
-    --namespace mariadb-2 \
-    --database app_db \
-    --username app_user \
-    --privileges SELECT \
-    --password-secret-name mariadb-account-provided-password \
-    --generate-password false \
-    --dry-run false \
-    --confirm true \
-    --json
-
-  [ "$status" -eq 0 ]
-  result_status=$(printf '%s' "$output" | jq -r '.status')
-  managed=$(printf '%s' "$output" | jq -r '.password_secret.managed')
-
-  [ "$result_status" = "CREATED" ]
-  [ "$managed" = "false" ]
-  [ ! -f "${TEST_TMPDIR}/created-secret.args" ]
+@test "confirmed execution is required for mutations" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --dry-run false --json
+  [ "$(json_field '.reason_code')" = CONFIRM_REQUIRED ]
+  [ ! -e "${TEST_TMPDIR}/sql.log" ]
 }

@@ -35,8 +35,9 @@ rules:
     verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["secrets"]
-    # patch: tag the managed account password Secret with an owner annotation
-    # (create-account collision guard).
+    # Shared gateway rule: create-account itself only reads a caller-provided
+    # password Secret (get). create/patch/delete remain necessary for the
+    # secrets/* task family, whose protected-name gate is enforced in code.
     verbs: ["get", "create", "patch", "delete"]
   - apiGroups: [""]
     resources: ["configmaps"]

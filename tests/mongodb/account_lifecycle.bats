@@ -303,6 +303,7 @@ _submit_task_allow_failure() {
 
   local result status user_exists policy_status
   result="$(_task_result_data)"
+  [[ "$result" != *"unbound variable"* ]]
   status=$(echo "$result" | jq -r '.status')
   [ "$status" = "CREATED" ] || [ "$status" = "RECREATED" ]
 
@@ -464,6 +465,7 @@ _submit_task_allow_failure() {
   _submit_task "reset-password" "$payload"
 
   result="$(_task_result_data)"
+  [[ "$result" != *"unbound variable"* ]]
   mode=$(echo "$result" | jq -r '.delivery_payload.mode // empty')
   [ "$mode" = "encrypted_payload" ]
 
@@ -986,6 +988,7 @@ _submit_task_allow_failure() {
 
   local result reason_code
   result="$(_task_result_data)"
+  [ "$(echo "$result" | jq -r '.status // empty')" = "ERROR" ]
   reason_code=$(echo "$result" | jq -r '.reason_code // empty')
   [ "$reason_code" = "INVALID_INPUT" ]
 }

@@ -1,46 +1,28 @@
 # Task: create-account
 
-Create a MariaDB user and grant scoped privileges through AQSH.
+Create or recreate a MariaDB account with an explicit grant scope, native
+password expiry, and the same password-delivery contract as MongoDB
+`create-account`.
 
-## Description
+## Safety defaults
 
-The task is conservative by default:
-
-- `dry_run=true` by default.
-- `dry_run=false` requires `confirm=true`.
-- Passwords are never written to logs or task results.
-- Generated passwords are stored in a Kubernetes Secret.
-- Global grants and admin privileges are blocked unless explicitly allowed.
-- Existing accounts return an idempotent `UNCHANGED` result without changing
-  grants or password Secrets.
-
-The password Secret is a managed-database internal: for a new account its name
-is **derived by convention** (`mariadb-account-<username>`, normalised to a valid
-Secret name), not supplied by the caller. The result returns
-`password_secret.{name,key}` so the caller can find the credentials. For existing
-accounts, the task does not create or backfill a missing password Secret, because
-it cannot know the pre-existing account's password.
-
-Because usernames are normalised, two distinct usernames could map to the same
-Secret name (e.g. `App_User` and `app-user`). To prevent one account reusing
-another's password, the managed Secret is tagged with an owner annotation; a run
-whose derived Secret already belongs to a different account is blocked
-(`PASSWORD_SECRET_CONFLICT`) — pass `password_secret_name` explicitly to
-disambiguate.
-
-When `generate_password=true`, the task creates the generated password Secret
-before running `CREATE USER`, so the password can be recovered if the task fails
-before the account is created. Secret creation is create-only: if the Secret
-already exists, the task reads and reuses that password instead of overwriting
-it. If `CREATE USER` succeeds but a later step such as `GRANT` or `SHOW GRANTS`
-verification fails, the next run sees `ACCOUNT_EXISTS=true` and will not
-regenerate or overwrite the Secret.
-
-The derived (or operator-overridden) Secret name must start with
-`mariadb-account-`. This keeps the task from reading unrelated Secrets even though
-Kubernetes RBAC grants namespace-scoped Secret access for account password
-management. Operators can still pin a name via the `ACCOUNT_PASSWORD_SECRET_NAME`
-/ `_PREFIX` / `_KEY` environment overrides, but they are no longer task inputs.
+- `dry_run=true`; a mutation requires `dry_run=false` and `confirm=true`.
+- Existing accounts fail with `ACCOUNT_ALREADY_EXISTS` unless
+  `allow_existing=true`.
+- Recreating an account changes its credential, revokes all existing grants,
+  applies only the requested effective grant, and verifies it with
+  `SHOW GRANTS`.
+- Generated credentials are returned once as plaintext or encrypted for the
+  caller. They are not persisted to a task-owned Kubernetes Secret.
+- A caller-provided Secret is a read-only input. This task never creates,
+  patches, or deletes it, and refuses protected machinery/root Secrets.
+- Password values never appear in task logs or error results. The only allowed
+  plaintext result is `delivery_payload.password` when
+  `password_delivery_mode=one_time_plaintext`.
+- Every result includes `mutation_applied`. It remains `false` until MariaDB
+  accepts the credential change; a later grant or verification error returns
+  `mutation_applied=true` so callers can distinguish an explicit partial result
+  from a pre-mutation failure.
 
 ## Endpoint
 
@@ -48,145 +30,221 @@ management. Operators can still pin a name via the `ACCOUNT_PASSWORD_SECRET_NAME
 POST /tasks/create-account
 ```
 
-Served by **aqsh-mariadb** on NodePort `30081`.
+The task is served by `aqsh-mariadb`.
 
-## Request
+## Scope and privileges
 
-```json
-{
-  "namespace": "mariadb-2",
-  "resource": "mariadb",
-  "mdb": "mariadb",
-  "database": "app_db",
-  "username": "app_user",
-  "host": "%",
-  "privileges": "SELECT,INSERT",
-  "password_secret_name": "mariadb-account-app-user-password",
-  "password_secret_key": "password",
-  "generate_password": "true",
-  "dry_run": "true",
-  "confirm": "false",
-  "allow_global": "false",
-  "allow_admin_privileges": "false"
-}
-```
-
-## Input Fields
-
-| Field | Env Var | Required | Default | Description |
-|-------|---------|----------|---------|-------------|
-| `namespace` | `DB_NAMESPACE` | yes | - | Target MariaDB namespace |
-| `resource` | `MARIADB_RESOURCE` | no | `mariadb` | MariaDB CR kind |
-| `mdb` | `MARIADB_NAME` | no | _auto-detect_ | MariaDB CR / StatefulSet name. When omitted, auto-detected from the namespace (single CR, else single StatefulSet); several matches return `MARIADB_AMBIGUOUS`. |
-| `container` | `MARIADB_CONTAINER` | no | `mariadb` | MariaDB container name |
-| `database` | `ACCOUNT_DATABASE` | yes | - | Database grant scope |
-| `username` | `ACCOUNT_USERNAME` | yes | - | User to create |
-| `host` | `ACCOUNT_HOST` | no | `%` | MariaDB account host |
-| `privileges` | `ACCOUNT_PRIVILEGES` | yes | - | Comma-separated privileges |
-| `generate_password` | `GENERATE_PASSWORD` | no | `true` | Generate and write password Secret |
-| `dry_run` | `DRY_RUN` | no | `true` | Return redacted SQL plan only |
-| `confirm` | `CONFIRM` | no | `false` | Required for real execution |
-| `allow_global` | `ALLOW_GLOBAL` | no | `false` | Allow `*.*` grant scope |
-| `allow_admin_privileges` | `ALLOW_ADMIN_PRIVILEGES` | no | `false` | Allow broad/admin privileges |
-
-## Allowed Privileges
-
-Default allow list:
-
-- `SELECT`
-- `INSERT`
-- `UPDATE`
-- `DELETE`
-- `CREATE`
-- `ALTER`
-- `INDEX`
-- `EXECUTE`
-- `SHOW VIEW`
-
-The task rejects `ALL`, `ALL PRIVILEGES`, `SUPER`, `FILE`, `PROCESS`, `RELOAD`,
-`SHUTDOWN`, and `GRANT OPTION` unless `allow_admin_privileges=true`.
-
-## Result
-
-Dry-run:
+With a database, the task applies database-scoped grants:
 
 ```json
 {
-  "status": "READY",
-  "reason_code": "DRY_RUN_READY",
+  "namespace": "mariadb-1",
   "database": "app_db",
   "username": "app_user",
-  "host": "%",
-  "privileges": ["SELECT", "INSERT"],
-  "dry_run": true,
-  "sql_plan": [
-    "CREATE USER IF NOT EXISTS 'app_user'@'%' IDENTIFIED BY '<redacted>'",
-    "GRANT SELECT, INSERT ON `app_db`.* TO 'app_user'@'%'",
-    "FLUSH PRIVILEGES",
-    "SHOW GRANTS FOR 'app_user'@'%'"
-  ]
+  "privileges": "SELECT,INSERT"
 }
 ```
 
-Real execution returns one of:
+Without `database`, the only permitted effective grant is `SELECT ON *.*`.
+Omitted `privileges` defaults to `SELECT`; any other privilege or privilege
+combination fails `INVALID_INPUT`.
 
-| Status | Reason | Meaning |
-|--------|--------|---------|
-| `CREATED` | `ACCOUNT_CREATED` | Account was created and grants verified |
-| `UNCHANGED` | `ACCOUNT_EXISTS` | Account already existed; grants and password Secret were not changed |
-| `BLOCKED` | `CONFIRM_REQUIRED` | `dry_run=false` without `confirm=true` |
-| `BLOCKED` | `PASSWORD_SECRET_REQUIRED` | New account requested without a password Secret |
-| `BLOCKED` | `PASSWORD_SECRET_UNAVAILABLE` | Requested new account but password Secret is missing or unreadable |
-| `BLOCKED` | `PASSWORD_SECRET_INVALID` | Password Secret value contains unsupported characters |
-| `BLOCKED` | `PASSWORD_SECRET_CONFLICT` | The derived Secret already belongs to a different account (name collision) — pass `password_secret_name` explicitly |
-| `ERROR` | `INVALID_INPUT` | Validation failed |
-| `ERROR` | `KUBECTL_UNAVAILABLE` | `kubectl` or the target cluster API is unavailable |
-| `ERROR` | `CURRENT_PRIMARY_EMPTY` | No primary MariaDB pod was found during operation |
-| `ERROR` | `ROOT_PASSWORD_UNAVAILABLE` | Root password is not available from target pods |
-| `ERROR` | `PASSWORD_SECRET_WRITE_FAILED` | Failed to create password Secret and no existing password Secret could be read |
-| `ERROR` | `SQL_FAILED` | SQL execution failed |
-| `ERROR` | `SQL_VERIFY_FAILED` | Post-change SQL verification failed |
-
-## Permissions
-
-The task needs the same MariaDB read/exec permissions as `sanity-check`, plus
-namespaced Secret access in the target database namespace:
-
-| Resource | Verbs | Purpose |
-|----------|-------|---------|
-| `pods`, `pods/exec` | `get`, `list`, `watch`, `create` | Resolve primary and execute SQL |
-| `statefulsets`, `mariadbs.k8s.mariadb.com` | `get`, `list`, `watch` | Resolve target topology |
-| `secrets` | `get`, `create`, `patch` | Read/create namespace-scoped account password Secrets (names must pass the prefix check); `patch` tags the owner annotation for the collision guard |
-
-## CLI Example
-
-```bash
-LIB_DIR="$PWD/aqsh-tasks/lib" \
-  aqsh-tasks/scripts/mariadb/create-account.sh \
-  --context kind-cluster-a \
-  --namespace mariadb-1 \
-  --database app_db \
-  --username app_user \
-  --privileges SELECT,INSERT \
-  --dry-run true \
-  --json | jq .
+```json
+{
+  "namespace": "mariadb-1",
+  "username": "report_reader"
+}
 ```
 
-The password Secret name is derived automatically (here:
-`mariadb-account-app-user`); operators can still override it with
-`--password-secret-name` if needed.
+Important: MariaDB `SELECT ON *.*` includes system schemas. Use this scope only
+when the account is allowed to read those schemas too. Pass a specific database
+for ordinary application isolation. Explicit `database="*"` or `"*.*"` is
+rejected; omit the field to request the guarded all-database read-only scope.
 
-Real execution:
+The database-scoped allowlist is `SELECT`, `INSERT`, `UPDATE`, `DELETE`,
+`CREATE`, `ALTER`, `INDEX`, `EXECUTE`, and `SHOW VIEW`. Broad/admin privileges
+remain gated by `allow_admin_privileges=true`; that gate never relaxes the
+all-database SELECT-only rule.
 
-```bash
-LIB_DIR="$PWD/aqsh-tasks/lib" \
-  aqsh-tasks/scripts/mariadb/create-account.sh \
-  --context kind-cluster-a \
-  --namespace mariadb-1 \
-  --database app_db \
-  --username app_user \
-  --privileges SELECT,INSERT \
-  --dry-run false \
-  --confirm true \
-  --json | jq .
+Dry-run and final results expose the effective contract:
+
+```json
+{
+  "database": null,
+  "scope": {"kind": "all_databases_read_only", "grant": "*.*"},
+  "privileges": ["SELECT"]
+}
 ```
+
+## Existing accounts
+
+`allow_existing=false` is the default and returns:
+
+```json
+{"status":"ERROR","reason_code":"ACCOUNT_ALREADY_EXISTS"}
+```
+
+With `allow_existing=true`, the task uses `ALTER USER` to replace the password,
+then `REVOKE ALL PRIVILEGES, GRANT OPTION`, applies the requested grant, and
+verifies it. A successful replacement returns `RECREATED` /
+`ACCOUNT_RECREATED`. Prior broader grants are not retained; a later grant
+failure therefore leaves the account fail-closed rather than over-privileged.
+
+## Password generation
+
+| Input | Default | Rule |
+|---|---:|---|
+| `password_length` | `24` | Minimum `12` |
+| `password_special_chars` | `!@#%^*_-+=.` | Quotes, backslash, spaces, and control characters are rejected |
+| `password_special_max` | `4` | Non-negative integer |
+
+The shared MongoDB generator guarantees at least one uppercase letter, one
+lowercase letter, and one digit. Special characters are drawn only from the
+configured set, never exceed `password_special_max`, and are not required to
+appear.
+
+## Password delivery
+
+### One-time plaintext (default)
+
+```json
+{
+  "delivery_payload": {
+    "mode": "one_time_plaintext",
+    "password": "<generated>"
+  }
+}
+```
+
+Capture this response securely; the task does not retain the generated value.
+
+### Caller-encrypted payload
+
+Set `password_delivery_mode=encrypted_payload` and provide an ASCII-armored or
+base64-encoded armored `recipient_pgp_pubkey`:
+
+```json
+{
+  "delivery_payload": {
+    "mode": "encrypted_payload",
+    "recipient_key_fingerprint": "...",
+    "content_type": "application/pgp-encrypted",
+    "ciphertext": "-----BEGIN PGP MESSAGE-----\n..."
+  }
+}
+```
+
+Encryption is completed before the account is mutated, so an unusable recipient
+key fails with `DELIVERY_ENCRYPT_FAILED` without changing the account.
+
+### Caller-provided Secret
+
+Set `password_secret_name` and optionally `password_secret_key` (default
+`password`) to use a fixed password already stored in the target namespace:
+
+```json
+{
+  "delivery_payload": {
+    "mode": "caller_provided_secret",
+    "secret_name": "svc-account-credentials",
+    "secret_key": "password"
+  }
+}
+```
+
+`password_secret_name` is mutually exclusive with encrypted/generated delivery
+options. The task requires only Secret `get` for this path. The gateway's shared
+Role may still have `create`, `patch`, and `delete` because the separate
+`secrets/*` family needs them; `create-account` does not use those verbs.
+
+## Native MariaDB password expiry
+
+| `password_expire_mode` | Additional SQL | `validity_days` |
+|---|---|---|
+| `first_login` (default) | `PASSWORD EXPIRE` | forbidden |
+| `interval` | `PASSWORD EXPIRE INTERVAL <n> DAY` | required, positive integer |
+| `never` | `PASSWORD EXPIRE NEVER` | forbidden |
+| `default` | `PASSWORD EXPIRE DEFAULT` | forbidden |
+
+This is native MariaDB state. There is no MongoDB-style policy collection,
+scheduled reconciliation, or deletion on expiry.
+
+Non-interactive service accounts—especially accounts using caller-provided
+Secrets—normally need `password_expire_mode=never`. An expired-password login
+requires a client and server configuration compatible with MariaDB's
+`disconnect_on_expired_password` flow; otherwise the client may be disconnected
+before it can change the password.
+
+## Inputs
+
+| Field | Required | Default | Purpose |
+|---|---|---|---|
+| `namespace` | yes | — | Target namespace |
+| `resource` | no | `mariadb` | MariaDB CR kind |
+| `mdb` | no | auto-detect | CR/StatefulSet name |
+| `container` | no | `mariadb` | Database container |
+| `database` | no | omitted | Database scope; omission means guarded `*.*` read-only |
+| `username` | yes | — | MariaDB username |
+| `host` | no | `%` | MariaDB account host |
+| `privileges` | no | `SELECT` | Comma-separated privileges |
+| `allow_existing` | no | `false` | Replace credential and grants |
+| `password_length` | no | `24` | Generated length |
+| `password_special_chars` | no | `!@#%^*_-+=.` | Generated special-character set |
+| `password_special_max` | no | `4` | Generated special-character maximum |
+| `password_delivery_mode` | no | `one_time_plaintext` | Generated delivery mode |
+| `recipient_pgp_pubkey` | conditional | empty | Required for encrypted delivery |
+| `password_secret_name` | no | empty | Existing fixed-password Secret |
+| `password_secret_key` | no | `password` | Password data key |
+| `password_expire_mode` | no | `first_login` | Native expiry mode |
+| `validity_days` | conditional | empty | Required only for `interval` |
+| `dry_run` | no | `true` | Return redacted plan only |
+| `confirm` | no | `false` | Required for mutation |
+| `allow_admin_privileges` | no | `false` | Database-scoped admin privilege gate |
+
+## Examples
+
+Database-scoped service account using an existing Secret:
+
+```json
+{
+  "namespace": "mariadb-1",
+  "database": "orders",
+  "username": "orders_service",
+  "privileges": "SELECT,INSERT,UPDATE",
+  "password_secret_name": "orders-db-credentials",
+  "password_expire_mode": "never",
+  "dry_run": "false",
+  "confirm": "true"
+}
+```
+
+Recreate a global reporting account and encrypt the new password:
+
+```json
+{
+  "namespace": "mariadb-1",
+  "username": "report_reader",
+  "allow_existing": "true",
+  "password_delivery_mode": "encrypted_payload",
+  "recipient_pgp_pubkey": "-----BEGIN PGP PUBLIC KEY BLOCK-----\n...",
+  "password_expire_mode": "interval",
+  "validity_days": "30",
+  "dry_run": "false",
+  "confirm": "true"
+}
+```
+
+## Breaking-change migration
+
+This contract intentionally replaces the old generated-Secret API:
+
+| Removed old field/result | Replacement |
+|---|---|
+| `generate_password=true` | Omit `password_secret_name`; choose a delivery mode |
+| `generate_password=false` | Set `password_secret_name` / `password_secret_key` |
+| `allow_global=true` with `database="*.*"` | Omit `database`; only `SELECT` is accepted |
+| result `password_secret` | result `delivery_payload` |
+| existing result `UNCHANGED/ACCOUNT_EXISTS` | error by default, or `allow_existing=true` replacement |
+
+Callers must capture `one_time_plaintext` exactly once or use
+`encrypted_payload`. No task-owned password Secret is created after migration.

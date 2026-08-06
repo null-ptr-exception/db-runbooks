@@ -139,10 +139,9 @@ Notes:
 For a system/service account whose password must stay constant (never
 rotated through this API), pass `password_secret_name` (+ optionally
 `password_secret_key`, default `password`) instead of a
-`password_delivery_mode`. This mirrors MariaDB `create-account`'s
-`generate_password=false` path
-([create-account.md](../mariadb/create-account.md)), with one difference:
-this task never creates or writes the Secret, only reads it — provision the
+`password_delivery_mode`. This is the same caller-provided-Secret contract as
+MariaDB `create-account` ([create-account.md](../mariadb/create-account.md)):
+both tasks never create or write the Secret, only read it — provision the
 Secret yourself first, typically via `secrets/plan` → `secrets/apply`
 ([secrets.md](secrets.md#usage-scenarios)).
 

@@ -160,6 +160,16 @@ setup() {
   [ "$SC_FAIL" -eq 1 ]
 }
 
+@test "L3 pass: lag at the old 10s Atlas default no longer warns (widened to 15s)" {
+  mongo_rs_lag() {
+    response_ok "mongo_rs_lag" "ok" \
+      '{"members":[{"member":"mongodb-0:27017","stateStr":"PRIMARY","lagSeconds":null},{"member":"mongodb-1:27017","stateStr":"SECONDARY","lagSeconds":10}]}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 0 ]
+}
+
 # ── Layer 3: oplog window ────────────────────────────────────────────────────
 
 @test "L3 fail: oplog window below the critical minimum" {
@@ -179,6 +189,72 @@ setup() {
   check_mongo_internals || true
   [ "$SC_FAIL" -eq 0 ]
   [ "$SC_WARN" -eq 1 ]
+}
+
+@test "L3 warn (not fail): freshly started node hasn't had time to build an oplog window" {
+  # 1h uptime — physically can't have accumulated a >=1-day critical window yet
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":3600,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":1,"windowSeconds":3600,"windowHours":1,"windowDays":0.04}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 1 ]
+}
+
+@test "L3 fail: oplog window still below critical once uptime clears the threshold" {
+  # 2 days uptime — old enough that a 0.04-day window is a real problem, not youth
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":172800,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":99,"windowSeconds":3600,"windowHours":1,"windowDays":0.04}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 1 ]
+}
+
+@test "L3 warn (not fail): uptime 1s under the 1-day critical boundary must not round up to it" {
+  # 86399s rounds to "1.00" days at the 2dp display precision the check uses
+  # for uptime_days — classification must compare raw uptime_sec against the
+  # threshold in seconds, not the rounded display value, or this wrongly
+  # escalates to a critical FAIL instead of the startup-warning branch.
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":86399,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":1,"windowSeconds":3600,"windowHours":1,"windowDays":0.04}'
+  }
+  check_mongo_internals || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 1 ]
+}
+
+@test "L3 warn: uptime 1s under the 3-day recommendation boundary still reads as startup, not a real shortfall" {
+  # Same rounding hazard as the 1-day case, one level up: 259199s rounds to
+  # "3.00" days at 2dp and must not compare equal-or-above the 3-day
+  # threshold. Assert on the message text since both branches emit WARN.
+  mongo_server_status() {
+    response_ok "mongo_server_status" "ok" \
+      '{"uptime":259199,"connections":{"current":5,"available":95},"globalLock":{"currentQueue":{"total":0,"readers":0,"writers":0}}}'
+  }
+  mongo_oplog_status() {
+    response_ok "mongo_oplog_status" "ok" \
+      '{"sizeMB":100,"usedMB":50,"windowSeconds":172800,"windowHours":48,"windowDays":2}'
+  }
+  local out_file="${BATS_TEST_TMPDIR}/check_mongo_internals.out"
+  check_mongo_internals > "$out_file" || true
+  [ "$SC_FAIL" -eq 0 ]
+  [ "$SC_WARN" -eq 1 ]
+  grep -q "can't yet reflect real retention" "$out_file"
 }
 
 # ── Layer 3: server resources ────────────────────────────────────────────────

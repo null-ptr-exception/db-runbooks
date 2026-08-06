@@ -120,14 +120,31 @@ Once `status` is `completed`, the `result.data` field contains:
 | Check | WARN threshold | FAIL threshold |
 |-------|---------------|----------------|
 | Replica set member health | transitional states | error states |
-| Replication lag | ≥ 10 s | ≥ 60 s |
+| Replication lag | ≥ 15 s | ≥ 60 s |
 | Oplog window | < 3 days | < 1 day |
 | WiredTiger cache dirty pages | ≥ 80% | ≥ 95% |
 | Connection utilisation | ≥ 80% | ≥ 90% |
 | Global lock queue | ≥ 3 | ≥ 10 |
 | Long-running operations | ops > 60 s | — |
 
-Thresholds follow MongoDB Atlas default alert levels. Standalone instances skip RS-only checks automatically.
+Thresholds follow MongoDB Atlas default alert levels, except replication lag
+WARN, which is widened from Atlas' 10 s to 15 s — mongod writes a periodic
+no-op to the oplog roughly every 10 s to advance the majority commit point
+when idle, and at 1-second timestamp granularity that cadence alone can read
+as ~10 s of lag on a quiet or freshly started replica set, flapping the
+alert right at the boundary. Standalone instances skip RS-only checks
+automatically.
+
+Both the replication-lag and oplog-window checks read live/near-instant
+signals, so both can misfire immediately after a member starts (or is
+freshly wiped/recovered): oplog window in particular is bounded by mongod's
+own uptime, not by how the oplog is sized. When `uptime` (from
+`serverStatus`) is below the relevant threshold, an oplog-window WARN/FAIL
+that would otherwise fire is downgraded to an informational WARN noting the
+node hasn't been up long enough to evaluate — the startup downgrade ends
+once uptime passes the threshold. If the window is still actually too small
+at that point, the normal WARN/FAIL classification resumes; the downgrade
+only defers judgment, it doesn't clear the underlying condition.
 
 ## Permissions
 
@@ -179,7 +196,7 @@ resolves `PVC path` live per the auto-detect above, so it will read
 Namespace       : mongo-1
 STS             : mongodb
 PVC path        : /data/db  (warn: 80%  crit: 90%)
-Lag thresholds  : warn ≥ 10s  crit ≥ 60s
+Lag thresholds  : warn ≥ 15s  crit ≥ 60s
 Oplog thresholds: warn < 3d  crit < 1d
 Connections     : warn ≥ 80%  crit ≥ 90%
 WT cache dirty  : warn ≥ 80%  crit ≥ 95%

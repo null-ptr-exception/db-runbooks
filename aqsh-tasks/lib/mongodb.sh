@@ -1442,9 +1442,12 @@ check_mongo_internals() {
       below_warn=$(awk  "BEGIN{print ($window_days < $OPLOG_WARN_DAYS) ? 1 : 0}" 2>/dev/null || echo "0")
       uptime_below_crit=0
       uptime_below_warn=0
-      if [[ -n "$uptime_days" ]]; then
-        uptime_below_crit=$(awk "BEGIN{print ($uptime_days < $OPLOG_CRIT_DAYS) ? 1 : 0}" 2>/dev/null || echo "0")
-        uptime_below_warn=$(awk  "BEGIN{print ($uptime_days < $OPLOG_WARN_DAYS) ? 1 : 0}" 2>/dev/null || echo "0")
+      if [[ -n "$uptime_sec" ]]; then
+        # Compare raw uptime_sec, not the display-rounded uptime_days — e.g.
+        # 86399s (just under 1 day) rounds to "1.00" at 2dp, which would
+        # wrongly compare equal-or-above a 1-day threshold.
+        uptime_below_crit=$(awk "BEGIN{print ($uptime_sec < ($OPLOG_CRIT_DAYS * 86400)) ? 1 : 0}" 2>/dev/null || echo "0")
+        uptime_below_warn=$(awk  "BEGIN{print ($uptime_sec < ($OPLOG_WARN_DAYS * 86400)) ? 1 : 0}" 2>/dev/null || echo "0")
       fi
 
       if [[ "$below_crit" == "1" && "$uptime_below_crit" == "1" ]]; then

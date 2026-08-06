@@ -141,8 +141,10 @@ freshly wiped/recovered): oplog window in particular is bounded by mongod's
 own uptime, not by how the oplog is sized. When `uptime` (from
 `serverStatus`) is below the relevant threshold, an oplog-window WARN/FAIL
 that would otherwise fire is downgraded to an informational WARN noting the
-node hasn't been up long enough to evaluate — it clears on its own once
-uptime passes the threshold, with no manual step needed.
+node hasn't been up long enough to evaluate — the startup downgrade ends
+once uptime passes the threshold. If the window is still actually too small
+at that point, the normal WARN/FAIL classification resumes; the downgrade
+only defers judgment, it doesn't clear the underlying condition.
 
 ## Permissions
 

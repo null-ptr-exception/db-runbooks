@@ -206,10 +206,10 @@ echo "$CIPHERTEXT" | gpg --decrypt
 Everything above assumes a **generated** password delivered to a human. For
 a system/service account that must keep one constant password (never
 rotated through this API), skip `password_delivery_mode` entirely and instead
-point CREATE at a Secret you already populated. This is the same
-caller-provided-Secret contract as MariaDB `create-account`
-([../mariadb/create-account.md](../mariadb/create-account.md)): both tasks only
-ever *read* the Secret and never create or own it. Provision it
+point CREATE at a Secret you already populated — mirrors MariaDB
+`create-account`'s `generate_password=false` path
+([../mariadb/create-account.md](../mariadb/create-account.md)), except this
+task only ever *reads* the Secret, never creates or owns it. Provision it
 first via `secrets/plan` → `secrets/apply` ([secrets.md](secrets.md)).
 
 ```bash

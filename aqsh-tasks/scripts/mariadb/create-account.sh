@@ -28,6 +28,17 @@ source "${LIB_DIR}/mongodb-account.sh"
 # shellcheck source=../../lib/secrets.sh
 source "${LIB_DIR}/secrets.sh"
 
+# mongodb-account.sh leaves its temporary GPG cleanup traps installed after
+# encrypt_password_payload returns. Contain that helper behavior here so this
+# task does not need to modify the MongoDB implementation.
+mariadb_encrypt_password_payload() {
+  local status=0
+  encrypt_password_payload "$@" || status=$?
+  trap - RETURN EXIT
+  unset GNUPGHOME
+  return "$status"
+}
+
 usage() {
   cat >&2 <<'EOF'
 Usage:
@@ -433,7 +444,7 @@ case "$EFFECTIVE_DELIVERY_MODE" in
     DELIVERY_PAYLOAD="$(jq -nc --arg password "$PASSWORD_VALUE" '{mode:"one_time_plaintext",password:$password}')"
     ;;
   encrypted_payload)
-    if ! DELIVERY_PAYLOAD="$(encrypt_password_payload "$PASSWORD_VALUE" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null)"; then
+    if ! DELIVERY_PAYLOAD="$(mariadb_encrypt_password_payload "$PASSWORD_VALUE" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null)"; then
       SUMMARY="Failed to encrypt password payload with the recipient public key"
       emit_result "$(result_json ERROR DELIVERY_ENCRYPT_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
     fi

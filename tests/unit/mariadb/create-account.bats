@@ -35,6 +35,11 @@ while [[ $# -gt 0 ]]; do
   fi
 done
 cmd="${args[0]:-}"
+if [[ "$cmd" == exec ]]; then
+  printf 'exec %s\n' "${args[1]:-}" >> "${TEST_TMPDIR}/kubectl.log"
+else
+  printf '%s\n' "${args[*]}" >> "${TEST_TMPDIR}/kubectl.log"
+fi
 
 if [[ "$cmd" == cluster-info ]]; then
   [[ "${KUBECTL_UNAVAILABLE:-0}" != 1 ]] || exit 1
@@ -77,6 +82,7 @@ if [[ "$cmd" == exec ]]; then
       printf '%s\n' "${ACCOUNT_COUNT:-0}"
       ;;
     CREATE\ USER*|ALTER\ USER*) [[ "${SQL_FAIL_MUTATION:-0}" != 1 ]] || exit 1 ;;
+    REVOKE*) [[ "${SQL_FAIL_REVOKE:-0}" != 1 ]] || exit 1 ;;
     GRANT*) [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1 ;;
     SHOW\ GRANTS*)
       [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
@@ -122,6 +128,12 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
   run "$SCRIPT" --namespace mariadb-1 --username svc --privileges SELECT,INSERT --json
   [ "$(json_field '.reason_code')" = INVALID_INPUT ]
   [[ "$(json_field '.errors | join(" ")')" == *'permits exactly SELECT'* ]]
+}
+
+@test "invalid privileges produce an empty privileges array" {
+  run "$SCRIPT" --namespace mariadb-1 --username svc --privileges NOT_ALLOWED --json
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  [ "$(json_field '.privileges | length')" -eq 0 ]
 }
 
 @test "explicit global database spelling is rejected" {
@@ -179,7 +191,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
   password="$(json_field '.delivery_payload.password')"
   [ "${#password}" -eq 24 ]
   [[ "$password" =~ [a-z] && "$password" =~ [A-Z] && "$password" =~ [0-9] ]]
-  specials="$(printf '%s' "$password" | tr -cd '!@#%^*_-+=.')"
+  specials="$(printf '%s' "$password" | sed 's/[[:alnum:]]//g')"
   [ "${#specials}" -le 4 ]
 }
 
@@ -218,7 +230,15 @@ EOF
   [ "$(json_field '.delivery_payload.secret_name')" = svc-password ]
   [ "$(json_field '.delivery_payload.secret_key')" = password ]
   [[ "$output" != *FixedServicePass123* ]]
-  [ ! -e "${TEST_TMPDIR}/secret-write" ]
+  grep -q '^get secret svc-password ' "${TEST_TMPDIR}/kubectl.log"
+  ! grep -qE '^(create|apply|patch|replace|delete|annotate|label) secret ' "${TEST_TMPDIR}/kubectl.log"
+}
+
+@test "caller-provided Secret supports a dotted data key" {
+  run "$SCRIPT" $(actual_args) --password-secret-name svc-password --password-secret-key db.password
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.delivery_payload.secret_key')" = db.password ]
+  grep -Fq "jsonpath={.data['db.password']}" "${TEST_TMPDIR}/kubectl.log"
 }
 
 @test "caller Secret and generated delivery options are mutually exclusive" {
@@ -243,12 +263,19 @@ EOF
 }
 
 @test "allow_existing recreates credential and replaces grants" {
-  export ACCOUNT_COUNT=1 EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='SELECT, INSERT'
+  export ACCOUNT_COUNT=1 EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='INSERT, SELECT'
   run "$SCRIPT" $(actual_args) --database app_db --privileges SELECT,INSERT --allow-existing true --password-expire-mode never
   [ "$(json_field '.status')" = RECREATED ]
   [ "$(json_field '.reason_code')" = ACCOUNT_RECREATED ]
-  grep -q '^ALTER USER .*PASSWORD EXPIRE NEVER; REVOKE ALL PRIVILEGES, GRANT OPTION FROM' "${TEST_TMPDIR}/sql.log"
+  grep -q '^ALTER USER .*PASSWORD EXPIRE NEVER;' "${TEST_TMPDIR}/sql.log"
+  grep -q '^REVOKE ALL PRIVILEGES, GRANT OPTION FROM' "${TEST_TMPDIR}/sql.log"
   grep -q '^GRANT SELECT, INSERT ON `app_db`\.\*' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "SHOW GRANTS verification accepts canonical ALL PRIVILEGES" {
+  export EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='ALL PRIVILEGES'
+  run "$SCRIPT" $(actual_args) --database app_db --privileges ALL --allow-admin-privileges true
+  [ "$(json_field '.status')" = CREATED ]
 }
 
 @test "SHOW GRANTS must contain the effective requested grant" {
@@ -265,6 +292,14 @@ EOF
   [ "$(json_field '.mutation_applied')" = true ]
   [[ "$(json_field '.summary')" == *'credential changed'* ]]
   [[ "$output" != *FixedServicePass123* ]]
+}
+
+@test "revoke failure after ALTER reports an explicit partial mutation" {
+  export ACCOUNT_COUNT=1 SQL_FAIL_REVOKE=1
+  run "$SCRIPT" $(actual_args) --allow-existing true --password-secret-name svc-password
+  [ "$(json_field '.reason_code')" = SQL_FAILED ]
+  [ "$(json_field '.mutation_applied')" = true ]
+  [[ "$(json_field '.summary')" == *'revoking the prior grants failed'* ]]
 }
 
 @test "SQL mutation failures are redacted" {

@@ -302,7 +302,11 @@ result_json() {
   local status="$1" reason="$2" summary="$3" primary="${4:-}" existing="${5:-false}"
   local plan="${6:-[]}" errors="${7:-[]}" delivery="${8:-null}" candidates="${9:-[]}"
   local privileges_json
-  privileges_json="$(printf '%s\n' "${PRIVILEGES[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  if [[ "${#PRIVILEGES[@]}" -eq 0 ]]; then
+    privileges_json='[]'
+  else
+    privileges_json="$(printf '%s\n' "${PRIVILEGES[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  fi
   jq -nc \
     --arg status "$status" --arg reason_code "$reason" --arg summary "$summary" \
     --arg context "${CONTEXT:-}" --arg namespace "$NAMESPACE" --arg resource "$RESOURCE" --arg mdb "$MDB" \
@@ -336,7 +340,7 @@ emit_result() {
 
 read_secret_password() {
   local encoded
-  encoded="$(_kubectl get secret "$PASSWORD_SECRET_NAME" -o "jsonpath={.data.${PASSWORD_SECRET_KEY}}" 2>/dev/null)" || return 1
+  encoded="$(_kubectl get secret "$PASSWORD_SECRET_NAME" -o "jsonpath={.data['${PASSWORD_SECRET_KEY}']}" 2>/dev/null)" || return 1
   [[ -n "$encoded" ]] || return 1
   printf '%s' "$encoded" | base64 -d
 }
@@ -438,9 +442,11 @@ esac
 
 PASSWORD_LITERAL="$(sql_string_literal "$PASSWORD_VALUE")"
 if [[ "$ACCOUNT_EXISTS" == true ]]; then
-  ACCOUNT_SQL="ALTER USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL}; REVOKE ALL PRIVILEGES, GRANT OPTION FROM ${ACCOUNT_REF};"
+  ACCOUNT_SQL="ALTER USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
+  REVOKE_SQL="REVOKE ALL PRIVILEGES, GRANT OPTION FROM ${ACCOUNT_REF};"
 else
   ACCOUNT_SQL="CREATE USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
+  REVOKE_SQL=""
 fi
 GRANT_SQL="GRANT ${PRIVILEGES_SQL} ON ${GRANT_SCOPE} TO ${ACCOUNT_REF};"
 
@@ -449,6 +455,10 @@ if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_SQL" >/dev/null; 
   emit_result "$(result_json ERROR ACCOUNT_MUTATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi
 MUTATION_APPLIED=true
+if [[ -n "$REVOKE_SQL" ]] && ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$REVOKE_SQL" >/dev/null; then
+  SUMMARY="Account credential changed but revoking the prior grants failed"
+  emit_result "$(result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+fi
 if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$GRANT_SQL" >/dev/null; then
   SUMMARY="Account credential changed but applying the requested grant failed"
   emit_result "$(result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
@@ -457,8 +467,26 @@ if ! SHOW_GRANTS="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SHOW GRANTS
   SUMMARY="Account was changed but SHOW GRANTS verification failed"
   emit_result "$(result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi
-EXPECTED_GRANT="GRANT ${PRIVILEGES_SQL} ON ${GRANT_SCOPE} TO"
-if ! printf '%s\n' "$SHOW_GRANTS" | tr '[:lower:]' '[:upper:]' | grep -Fq "$(printf '%s' "$EXPECTED_GRANT" | tr '[:lower:]' '[:upper:]')"; then
+GRANTS_UPPER="$(printf '%s\n' "$SHOW_GRANTS" | tr '[:lower:]' '[:upper:]')"
+SCOPE_UPPER="$(printf '%s' " ON ${GRANT_SCOPE} TO" | tr '[:lower:]' '[:upper:]')"
+SCOPE_LINE="$(printf '%s\n' "$GRANTS_UPPER" | grep -F "$SCOPE_UPPER" | head -n 1 || true)"
+VERIFY_OK=true
+[[ -n "$SCOPE_LINE" ]] || VERIFY_OK=false
+GRANTED_CLAUSE="${SCOPE_LINE#GRANT }"
+GRANTED_CLAUSE="${GRANTED_CLAUSE%% ON *}"
+IFS=',' read -r -a GRANTED_PRIVILEGES <<< "$GRANTED_CLAUSE"
+for item in "${PRIVILEGES[@]}"; do
+  [[ "$item" != ALL ]] || item="ALL PRIVILEGES"
+  privilege_found=false
+  for granted_item in "${GRANTED_PRIVILEGES[@]}"; do
+    if [[ "$(normalize_privilege "$granted_item")" == "$item" ]]; then
+      privilege_found=true
+      break
+    fi
+  done
+  [[ "$privilege_found" == true ]] || VERIFY_OK=false
+done
+if [[ "$VERIFY_OK" != true ]]; then
   SUMMARY="SHOW GRANTS did not contain the requested effective grant"
   emit_result "$(result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi

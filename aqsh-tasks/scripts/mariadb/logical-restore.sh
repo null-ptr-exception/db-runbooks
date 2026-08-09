@@ -54,15 +54,68 @@ ROOT_SECRET_KEY="password"
 REPLICAS="1"                           # restore is standalone by design
 
 logical_restore_unhandled_error() {
-  local code="$?"
-  local line="${BASH_LINENO[0]:-unknown}"
   trap - ERR
-  mdbt_write_result "$(response_err "${OP:-logical-restore}" "logical-restore aborted before completing at line ${line} (exit ${code})" \
-    "$(jq -n --arg namespace "${NAMESPACE:-}" --arg target "${TARGET:-}" \
-       '{namespace: $namespace, target: $target}')" "$code")" || true
-  exit "$code"
+  mdbt_write_result "$(mdbt_error_response "${OP:-logical-restore}" "logical restore failed" \
+    "$(jq -n --arg namespace "${NAMESPACE:-}" --argjson dry "$(mdbt_bool_json "${DRY_RUN:-false}")" \
+       '{namespace:$namespace,contentType:"Logical",state:"FAILED",dryRun:$dry,provisioned:false,restored:false}')" \
+    1 "INTERNAL_ERROR")"
+  exit 1
 }
 trap logical_restore_unhandled_error ERR
+
+# Convert Kubernetes/Go-style wait values (for example 1500ms, 10m, or 1h30m)
+# into one overall restore deadline shared by both conditions. Python is part
+# of the task image and keeps decimal/sub-second compatibility with kubectl;
+# positive sub-second values round up to the next whole second.
+logical_restore_timeout_seconds() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
+
+value = sys.argv[1]
+if value.startswith("+"):
+    value = value[1:]
+
+token = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:ns|us|µs|μs|ms|s|m|h)")
+scales = {
+    "ns": Decimal("0.000000001"),
+    "us": Decimal("0.000001"),
+    "µs": Decimal("0.000001"),
+    "μs": Decimal("0.000001"),
+    "ms": Decimal("0.001"),
+    "s": Decimal(1),
+    "m": Decimal(60),
+    "h": Decimal(3600),
+}
+
+position = 0
+total = Decimal(0)
+try:
+    while position < len(value):
+        match = token.match(value, position)
+        if match is None:
+            raise ValueError
+        part = match.group(0)
+        unit = next(unit for unit in scales if part.endswith(unit))
+        total += Decimal(part[:-len(unit)]) * scales[unit]
+        position = match.end()
+except (InvalidOperation, ValueError):
+    sys.exit(1)
+
+if not value or total <= 0 or total > Decimal(2_147_483_647):
+    sys.exit(1)
+print(int(total.to_integral_value(rounding=ROUND_CEILING)))
+PY
+}
+
+WAIT_TIMEOUT_SECONDS=0
+if [[ "$WAIT_TIMEOUT" != "0" ]]; then
+  if ! WAIT_TIMEOUT_SECONDS="$(logical_restore_timeout_seconds "$WAIT_TIMEOUT")"; then
+    mdbt_fail "$OP" "wait_timeout must be 0 or a positive duration" \
+      "$(jq -n '{field:"wait_timeout"}')" 2 "INVALID_REQUEST"
+  fi
+fi
 
 # Confirm is required to apply; a dry run renders the plan without it.
 if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
@@ -70,13 +123,17 @@ if [[ "$(mdbt_bool_json "$DRY_RUN")" != "true" ]]; then
 fi
 
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
+if [[ -n "$BACKUP_NAME" ]]; then
+  mdbt_validate_dns_label "backup" "$BACKUP_NAME" "$OP"
+fi
 if [[ -n "$K8S_CONTEXT" ]]; then
-  mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
+  mdbt_validate_internal_or_fail "$OP" "INTERNAL_ERROR" "database service is unavailable" \
+    mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
 fi
 
 mariadb_set_target "$K8S_CONTEXT" "$NAMESPACE"
 
-# Name the restored instance for the caller when they didn't.
+# Name the restored instance when the platform did not supply one.
 if [[ -z "$TARGET" ]]; then
   TARGET="${NAMESPACE}-lrestore-$(date +%Y%m%d%H%M%S)"
 fi
@@ -100,22 +157,27 @@ if [[ -z "$IMAGE" ]]; then
   if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
     IMAGE="$NS_IMAGES"
   elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
-    mdbt_fail "$OP" "'${NAMESPACE}' runs multiple MariaDB versions; cannot pick the restore version automatically — operator: set the RESTORE_SOURCE or RESTORE_IMAGE override" \
-      "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
+    mdbt_fail "$OP" "restore configuration is ambiguous" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "DATABASE_CONFIGURATION_AMBIGUOUS"
   fi
   if [[ -z "$IMAGE" ]]; then
-    mdbt_fail "$OP" "could not determine the MariaDB version for '${NAMESPACE}' (no instance to derive it from) — operator: set the RESTORE_IMAGE override" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+    mdbt_fail "$OP" "restore configuration is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
   fi
 fi
 if [[ -z "$STORAGE_SIZE" ]]; then
-  mdbt_fail "$OP" "could not determine the storage size for '${NAMESPACE}' (no instance to derive it from) — operator: set the RESTORE_SOURCE or STORAGE_SIZE override" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+  mdbt_fail "$OP" "restore configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
 fi
 
-mdbt_validate_dns_label "target" "$TARGET" "$OP"
-mdbt_validate_image "image" "$IMAGE" "$OP"
-mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
+# Platform-derived values must never be reflected through the public contract.
+_validate_restore_internal() {
+  mdbt_validate_internal_or_fail "$OP" "RESTORE_CAPABILITY_UNAVAILABLE" \
+    "restore configuration is unavailable" "$@"
+}
+_validate_restore_internal mdbt_validate_dns_label "target" "$TARGET" "$OP"
+_validate_restore_internal mdbt_validate_image "image" "$IMAGE" "$OP"
+_validate_restore_internal mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
 
 # Build the MariaDB CR with bootstrapFrom.backupRef (logical). backupRef is
 # resolved to a concrete Backup name below (dry run may leave it auto).
@@ -146,81 +208,120 @@ build_manifest() {
     }'
 }
 
-CONNECTION_HOST="${TARGET}-primary.${NAMESPACE}.svc.cluster.local"
-
+# restore_result <provisioned:bool> <restored:bool> <dryRun:bool> <state>
 restore_result() {
-  local restored="$1" dry="$2" backup_ref="$3"
   jq -n \
     --arg namespace "$NAMESPACE" \
-    --arg target "$TARGET" \
-    --arg source "${SOURCE_NAME:-}" \
-    --arg image "$IMAGE" \
-    --arg backupRef "$backup_ref" \
-    --arg host "$CONNECTION_HOST" \
-    --arg secretName "$ROOT_SECRET_NAME" \
-    --arg secretKey "$ROOT_SECRET_KEY" \
-    --arg manifest "$(build_manifest "$backup_ref")" \
-    --argjson restored "$restored" \
-    --argjson dry "$dry" \
+    --arg state "$4" \
+    --argjson provisioned "$1" \
+    --argjson restored "$2" \
+    --argjson dry "$3" \
     '{
       namespace: $namespace,
-      target: $target,
-      source: (if $source == "" then null else $source end),
-      image: $image,
-      backup: {ref: $backupRef, contentType: "Logical"},
-      connection: {host: $host, port: 3306},
-      credentialsRef: {secretName: $secretName, secretKey: $secretKey},
+      contentType: "Logical",
+      state: $state,
       dryRun: $dry,
+      provisioned: $provisioned,
       restored: $restored
-    } + (if $dry then {manifest: $manifest} else {} end)'
+    }'
 }
 
+# Mutating and dry-run routes both need a confidently resolved operator API.
+# Keep discovery and CRD details behind the public capability reason.
+operator_confidence_rc=0
+mdb_operator_group_is_confident >/dev/null 2>&1 || operator_confidence_rc=$?
+if [[ "$operator_confidence_rc" -ne 0 ]]; then
+  mdbt_fail "$OP" "logical restore capability is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
+fi
+
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-  # Dry run: show the plan. backupRef is echoed as given ("" → resolved at apply).
-  mdbt_write_result "$(response_ok "$OP" "dry run: logical restore manifest rendered for ${TARGET}" "$(restore_result false true "${BACKUP_NAME:-<latest-at-apply>}")")"
+  # Validate that an internal manifest can be prepared, but never return it.
+  if ! build_manifest "${BACKUP_NAME:-logical-backup}" >/dev/null 2>&1; then
+    trap - ERR
+    mdbt_fail "$OP" "logical restore could not be prepared" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+      1 "INTERNAL_ERROR"
+  fi
+  mdbt_write_result "$(response_ok "$OP" "logical restore dry run completed" "$(restore_result false false true PLANNED)")"
   exit 0
 fi
 
-# The `Backup` CRD must exist — actionable failure instead of `no matches`.
-mdb_require_crd backups "$OP" "install the mariadb-operator CRDs" || exit 1
+# Capability failures are public categories, not CRD or API-group diagnostics.
+if ! mdb_has_crd backups >/dev/null 2>&1; then
+  mdbt_fail "$OP" "logical restore capability is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
+fi
 
 # Resolve which Backup to restore: explicit name, else the most recent one.
 if [[ -z "$BACKUP_NAME" ]]; then
-  BACKUP_NAME="$(_kubectl get backup \
-    -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null \
-    | sed '/^\s*$/d' | sort -r | head -1 | cut -f2)"
+  BACKUP_ROWS=""
+  if ! BACKUP_ROWS="$(_kubectl get backup \
+    -o jsonpath='{range .items[*]}{.metadata.creationTimestamp}{"\t"}{.metadata.name}{"\n"}{end}' 2>/dev/null)"; then
+    trap - ERR
+    mdbt_fail "$OP" "logical restore capability is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
+  fi
+  BACKUP_NAME="$(printf '%s' "$BACKUP_ROWS" | sed '/^[[:space:]]*$/d' | sort -r | head -1 | cut -f2)"
   if [[ -z "$BACKUP_NAME" ]]; then
     trap - ERR
-    mdbt_fail "$OP" "no Backup found in '${NAMESPACE}' to restore from (create one with logical-backup first)" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+    mdbt_fail "$OP" "no logical backup is available to restore" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+      2 "BACKUP_NOT_FOUND"
   fi
 fi
 if ! _kubectl get backup "$BACKUP_NAME" >/dev/null 2>&1; then
   trap - ERR
-  mdbt_fail "$OP" "Backup '${BACKUP_NAME}' not found in '${NAMESPACE}'" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg b "$BACKUP_NAME" '{namespace: $ns, backup: $b}')" 2
+  mdbt_fail "$OP" "logical backup is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+    2 "BACKUP_NOT_FOUND"
 fi
 
 # Restore never overwrites in place — refuse if the target already exists.
 if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
   trap - ERR
-  mdbt_fail "$OP" "target MariaDB '${TARGET}' already exists; restore provisions a NEW instance and never overwrites in place (choose a different target name)" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 2
+  mdbt_fail "$OP" "restore target is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+    1 "RESTORE_FAILED"
 fi
 
-MANIFEST="$(build_manifest "$BACKUP_NAME")"
-if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
+if ! MANIFEST="$(build_manifest "$BACKUP_NAME" 2>/dev/null)"; then
   trap - ERR
-  mdbt_fail "$OP" "failed to apply MariaDB logical-restore manifest: ${apply_out}" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 3
+  mdbt_fail "$OP" "logical restore could not be prepared" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+    1 "INTERNAL_ERROR"
+fi
+if ! printf '%s\n' "$MANIFEST" | _kubectl apply -f - >/dev/null 2>&1; then
+  trap - ERR
+  mdbt_fail "$OP" "logical restore could not be started" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+    1 "RESTORE_FAILED"
 fi
 
 if [[ "$WAIT_TIMEOUT" != "0" ]]; then
-  if ! mdbt_wait_mariadb_backup_restored "$TARGET" "$WAIT_TIMEOUT" >/dev/null 2>&1 \
-      || ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
-    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready or finish restoring its Backup within ${WAIT_TIMEOUT}" "$(restore_result true false "$BACKUP_NAME")" 1)"
+  wait_deadline=$((SECONDS + WAIT_TIMEOUT_SECONDS))
+  wait_remaining=$((wait_deadline - SECONDS))
+  if [[ "$wait_remaining" -le 0 ]] \
+      || ! mdbt_wait_mariadb_backup_restored "$TARGET" "${wait_remaining}s" >/dev/null 2>&1; then
+    mdbt_write_result "$(mdbt_error_response "$OP" "logical restore is still pending" \
+      "$(restore_result true false false PENDING)" 1 "RESTORE_TIMEOUT")"
+    exit 1
+  fi
+  wait_remaining=$((wait_deadline - SECONDS))
+  if [[ "$wait_remaining" -lt 0 ]]; then
+    wait_remaining=0
+  fi
+  # Even at the deadline, perform one non-blocking Ready observation so an
+  # already-complete restore is not reported as pending due to rounding.
+  if ! mdbt_wait_mariadb_ready "$TARGET" "${wait_remaining}s" >/dev/null 2>&1; then
+    mdbt_write_result "$(mdbt_error_response "$OP" "logical restore is still pending" \
+      "$(restore_result true false false PENDING)" 1 "RESTORE_TIMEOUT")"
     exit 1
   fi
 fi
 
-mdbt_write_result "$(response_ok "$OP" "MariaDB logically restored into new instance ${TARGET} from Backup ${BACKUP_NAME}" "$(restore_result true false "$BACKUP_NAME")")"
+if [[ "$WAIT_TIMEOUT" == "0" ]]; then
+  mdbt_write_result "$(response_ok "$OP" "logical restore requested" "$(restore_result true false false REQUESTED)")"
+else
+  mdbt_write_result "$(response_ok "$OP" "logical restore completed" "$(restore_result true true false COMPLETED)")"
+fi

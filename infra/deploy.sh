@@ -87,6 +87,28 @@ EOF
   done
 }
 
+
+# ---------------------------------------------------------------------------
+# provision_ephemeral_pgp_key
+# Generates a throwaway RSA3072 encr-only PGP keypair for the secrets/* task
+# family's aqsh.pgpKey (test suites only — a real deployment provisions this
+# out-of-band). Prints the armored secret key on stdout; prints nothing when
+# gpg is unavailable on the host, so callers can skip PGP-dependent tests
+# instead of failing the whole suite.
+# ---------------------------------------------------------------------------
+provision_ephemeral_pgp_key() {
+  command -v gpg >/dev/null 2>&1 || return 0
+
+  local PGP_HOME
+  PGP_HOME=$(mktemp -d)
+  chmod 700 "$PGP_HOME"
+  GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
+    --quick-generate-key "aqsh-secrets-e2e" rsa3072 encr 7d >/dev/null 2>&1
+  GNUPGHOME="$PGP_HOME" gpg --batch --pinentry-mode loopback --passphrase '' \
+    --armor --export-secret-keys
+  rm -rf "$PGP_HOME"
+}
+
 setup_infra() {
   local INFRA_DIR
   INFRA_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

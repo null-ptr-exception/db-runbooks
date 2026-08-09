@@ -76,7 +76,6 @@ Served by **aqsh-mariadb** on NodePort `30081`.
 | Field | Env Var | Required | Default | Description |
 |-------|---------|----------|---------|-------------|
 | `namespace` | `DB_NAMESPACE` | yes | - | Target MariaDB namespace |
-| `context` | `K8S_CONTEXT` | no | current / in-cluster | Kubernetes context |
 | `resource` | `MARIADB_RESOURCE` | no | `mariadb` | MariaDB CR kind |
 | `mdb` | `MARIADB_NAME` | no | _auto-detect_ | MariaDB CR / StatefulSet name. When omitted, auto-detected from the namespace (single CR, else single StatefulSet); several matches return `MARIADB_AMBIGUOUS`. |
 | `container` | `MARIADB_CONTAINER` | no | `mariadb` | MariaDB container name |

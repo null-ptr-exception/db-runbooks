@@ -62,17 +62,6 @@ mdbt_pr_source_object() {
   return 0
 }
 
-# mdbt_pr_s3_secret_manifest creates short-lived AWS-compatible credentials for
-# the s5cmd init container. The endpoint is non-secret and stays in the Job.
-mdbt_pr_s3_secret_manifest() {
-  local name="$1" namespace="$2" access="$3" secret="$4"
-  jq -n --arg name "$name" --arg namespace "$namespace" \
-    --arg access "$access" --arg secret "$secret" \
-    '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:$namespace,
-      labels:{"app.kubernetes.io/managed-by":"aqsh-mariadb-restore"}},
-      type:"Opaque",stringData:{AWS_ACCESS_KEY_ID:$access,AWS_SECRET_ACCESS_KEY:$secret}}'
-}
-
 # mdbt_pr_pvc_manifest <name> <namespace> <size>
 mdbt_pr_pvc_manifest() {
   jq -n --arg name "$1" --arg namespace "$2" --arg size "$3" \
@@ -82,16 +71,20 @@ mdbt_pr_pvc_manifest() {
       spec: {accessModes: ["ReadWriteOnce"], resources: {requests: {storage: $size}}}}'
 }
 
-# mdbt_pr_job_manifest <jobname> <namespace> <pvc> <bucket> <object> <endpoint> <image>
+# mdbt_pr_job_manifest <jobname> <namespace> <pvc> <bucket> <object> <endpoint>
+#   <image> <access-secret> <access-key> <secret-secret> <secret-key>
 # A Job that downloads the .xb (s5cmd init container) then extracts + prepares it
 # into the datadir PVC (mariadb container), leaving a restored, chowned datadir.
 mdbt_pr_job_manifest() {
   local jobname="$1" namespace="$2" pvc="$3" bucket="$4" object="$5" endpoint="$6"
-  local image="$7"
+  local image="$7" access_secret="$8" access_key="$9"
+  local secret_secret="${10}" secret_key="${11}"
   jq -n \
     --arg jobname "$jobname" --arg namespace "$namespace" --arg pvc "$pvc" \
     --arg bucket "$bucket" --arg object "$object" --arg endpoint "$endpoint" \
     --arg image "$image" --arg s5cmdImage "$S5CMD_IMAGE" --argjson uid "$MARIADB_RUN_AS_USER" \
+    --arg accessSecret "$access_secret" --arg accessKey "$access_key" \
+    --arg secretSecret "$secret_secret" --arg secretKey "$secret_key" \
     '{
       apiVersion: "batch/v1", kind: "Job",
       metadata: {name: $jobname, namespace: $namespace,
@@ -111,8 +104,8 @@ mdbt_pr_job_manifest() {
             command: ["/s5cmd"],
             args: ["--endpoint-url", $endpoint, "cp", ("s3://" + $bucket + "/" + $object), "/work/backup.xb"],
             env: [
-              {name: "AWS_ACCESS_KEY_ID", valueFrom: {secretKeyRef: {name: ($jobname + "-s3"), key: "AWS_ACCESS_KEY_ID"}}},
-              {name: "AWS_SECRET_ACCESS_KEY", valueFrom: {secretKeyRef: {name: ($jobname + "-s3"), key: "AWS_SECRET_ACCESS_KEY"}}}
+              {name: "AWS_ACCESS_KEY_ID", valueFrom: {secretKeyRef: {name: $accessSecret, key: $accessKey}}},
+              {name: "AWS_SECRET_ACCESS_KEY", valueFrom: {secretKeyRef: {name: $secretSecret, key: $secretKey}}}
             ],
             volumeMounts: [{name: "work", mountPath: "/work"}]
           }],
@@ -193,15 +186,17 @@ mdbt_pr_plan() {
 }
 
 # mdbt_pr_orchestrate <target> <namespace> <image> <size> <root_secret> <root_key>
-#   <bucket> <object> <endpoint> <accessSecret> <accessKey> <secretKey> <apiVersion> <wait_timeout>
+#   <bucket> <object> <endpoint> <accessSecret> <accessKey>
+#   <secretAccessSecret> <secretKey> <apiVersion> <wait_timeout>
 # Full hand-rolled restore. Explicit return codes (called from an `if`, so the
 # caller's set -e/ERR trap does not fire on an internal failure):
 #   0 ok · 10 PVC apply · 11 Job apply/complete · 12 MariaDB apply
 #   13 not Ready · 14 verify failed (adoption or empty data)
 mdbt_pr_orchestrate() {
   local target="$1" namespace="$2" image="$3" size="$4" root_secret="$5" root_key="$6"
-  local bucket="$7" object="$8" endpoint="$9" accessSecret="${10}" accessKey="${11}" secretKey="${12}"
-  local apiVersion="${13}" wait_timeout="${14}"
+  local bucket="$7" object="$8" endpoint="$9" accessSecret="${10}" accessKey="${11}"
+  local secretAccessSecret="${12}" secretKey="${13}"
+  local apiVersion="${14}" wait_timeout="${15}"
   local pvc jobname
   pvc="$(mdbt_pr_pvc_name "$target")"
   jobname="${target}-prepare"
@@ -212,26 +207,13 @@ mdbt_pr_orchestrate() {
   _kubectl get job "$jobname" >/dev/null 2>&1 && return 11
   _kubectl get mariadb "$target" >/dev/null 2>&1 && return 12
 
-  local access secret
-  access="$(_kubectl get secret "$accessSecret" -o "jsonpath={.data.${accessKey}}" 2>/dev/null | base64 -d 2>/dev/null)" || return 10
-  secret="$(_kubectl get secret "$accessSecret" -o "jsonpath={.data.${secretKey}}" 2>/dev/null | base64 -d 2>/dev/null)" || return 10
-  [[ -n "$access" && -n "$secret" ]] || return 10
-  mdbt_pr_s3_secret_manifest "${jobname}-s3" "$namespace" "$access" "$secret" \
-    | _kubectl create -f - >/dev/null 2>&1 || return 10
-  if ! mdbt_pr_pvc_manifest "$pvc" "$namespace" "$size" | _kubectl create -f - >/dev/null 2>&1; then
-    _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
-    return 10
-  fi
+  mdbt_pr_pvc_manifest "$pvc" "$namespace" "$size" | _kubectl create -f - >/dev/null 2>&1 || return 10
   mdbt_pr_job_manifest "$jobname" "$namespace" "$pvc" "$bucket" "$object" "$endpoint" "$image" \
-    | _kubectl create -f - >/dev/null 2>&1 || {
-      _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
-      return 11
-    }
+    "$accessSecret" "$accessKey" "$secretAccessSecret" "$secretKey" \
+    | _kubectl create -f - >/dev/null 2>&1 || return 11
   if ! _kubectl wait --for=condition=complete "job/${jobname}" --timeout="$wait_timeout" >/dev/null 2>&1; then
-    _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || true
     return 11
   fi
-  _kubectl delete secret "${jobname}-s3" --ignore-not-found >/dev/null 2>&1 || return 11
   mdbt_pr_mariadb_manifest "$target" "$namespace" "$image" "$size" "$root_secret" "$root_key" "$apiVersion" \
     | _kubectl create -f - >/dev/null 2>&1 || return 12
   mdbt_wait_mariadb_ready "$target" "$wait_timeout" >/dev/null 2>&1 || return 13

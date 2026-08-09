@@ -24,11 +24,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -89,11 +84,6 @@ tasks:
         env: TARGET_POD_INDEX
         required: false
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: mdb
         env: MARIADB_NAME
         required: false
@@ -138,11 +128,6 @@ tasks:
         required: false
         type: string
         default: "all"
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: mdb
         env: MARIADB_NAME
         required: false
@@ -168,11 +153,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -192,6 +172,23 @@ tasks:
         required: false
         type: string
         default: "true"
+  connection-usage:
+    script: mariadb/connection-usage.sh
+    description: "Read-only point-in-time MariaDB connection usage grouped by database account across all instance pods"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: account_limit
+        env: ACCOUNT_LIMIT
+        required: false
+        type: string
+        default: "10"
+        pattern: '^([1-9]|[1-4][0-9]|50)$'
   sanity-check: &mariadb_sanity_check_task
     script: mariadb/sanity-check.sh
     description: "Read-only MariaDB health check: operator, service, SQL, replication, and semi-sync"
@@ -203,11 +200,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -284,11 +276,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -1132,7 +1119,7 @@ tasks:
         default: "false"
   backup:
     script: backup/backup-mariadb.sh
-    description: "Backup MariaDB database to MinIO"
+    description: "Create a logical backup for the database identified by namespace"
     timeout: 15m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -1141,16 +1128,9 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      # The MinIO bucket is a platform internal (db-backups by convention,
-      # MINIO_BUCKET from deploy config); not a task input. Env-overridable only.
-      - name: backup_databases
-        env: BACKUP_DATABASES
-        required: false
-        type: string
-        default: --all-databases
   physical-backup:
     script: mariadb/physical-backup.sh
-    description: "Take a physical (mariabackup) backup of a namespace's MariaDB to S3/MinIO — the restorable counterpart of restore; the S3 location and credentials are resolved internally"
+    description: "Create a restorable physical backup for the database identified by namespace"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # The namespace is the database identity; the S3 backup location and
@@ -1162,25 +1142,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      - name: target
-        env: BACKUP_TARGET
-        required: false
-        type: string
-        default: PreferReplica
-      - name: compression
-        env: BACKUP_COMPRESSION
-        required: false
-        type: string
-        default: bzip2
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -1200,7 +1161,7 @@ tasks:
         default: "false"
   logical-backup:
     script: mariadb/logical-backup.sh
-    description: "Take a logical (mariadb-dump) backup of a namespace's MariaDB to S3/MinIO via the operator Backup CR — the operator-managed logical counterpart of physical-backup; works on both operator generations. The S3 location and credentials are resolved internally"
+    description: "Create a logical backup for the database identified by namespace"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # Same user-facing surface as physical-backup, minus the physical-only
@@ -1212,15 +1173,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: mariadb
-        env: MARIADB_NAME
-        required: false
-        type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -1240,7 +1192,7 @@ tasks:
         default: "false"
   list-backups:
     script: backup/list-backups-mariadb.sh
-    description: "List the backups stored for a namespace (AWS RDS DescribeDBSnapshots); read-only. Location is resolved internally from the platform convention"
+    description: "List backups for the database identified by namespace; read-only"
     timeout: 2m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -1251,7 +1203,7 @@ tasks:
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
   delete-backup:
     script: backup/delete-backup-mariadb.sh
-    description: "Delete a named backup for a namespace (AWS RDS DeleteDBSnapshot); mutating (dry_run + confirm). Scoped to the namespace's own backup prefix"
+    description: "Delete a named backup for the database identified by namespace; mutating (dry_run + confirm)"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -1276,7 +1228,7 @@ tasks:
         default: "false"
   restore:
     script: mariadb/restore.sh
-    description: "Recreate a namespace's MariaDB from its physical backup (optionally point-in-time); the namespace is the database identity — version, storage, name, S3 location, and credentials are all resolved internally"
+    description: "Restore the database identified by namespace from a physical backup, optionally to a point in time"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # The namespace identifies the managed database; the engine version, storage
@@ -1289,11 +1241,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: target_time
         env: TARGET_TIME
         required: false
@@ -1317,7 +1264,7 @@ tasks:
         default: "false"
   logical-restore:
     script: mariadb/logical-restore.sh
-    description: "Recreate a namespace's MariaDB from a logical (mariadb-dump) Backup CR into a NEW instance via bootstrapFrom.backupRef — the logical counterpart of restore; works on both operator generations. Version, storage, name, and source Backup are resolved internally"
+    description: "Restore the database identified by namespace from a logical backup into a new database instance"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -1331,11 +1278,7 @@ tasks:
         env: BACKUP_NAME
         required: false
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -1353,3 +1296,210 @@ tasks:
         required: false
         type: string
         default: "false"
+  # Secrets gateway — safe CRUD for K8s Secrets in the DB namespace (see
+  # docs/mariadb/secrets.md). Values arrive PGP-encrypted against the
+  # deployment key (secrets/pubkey); plaintext never crosses the gateway.
+  # Upsert is plan -> apply with a stateless CAS plan_hash (reconfig model);
+  # delete is confirm-gated. The PGP key path and the protected-secret list
+  # are deliberately NOT task inputs — internal config + live auto-detect
+  # only (CLAUDE.md "Configuration Layers").
+  secrets/pubkey:
+    script: secrets/pubkey.sh
+    description: "Return the deployment PGP public key callers encrypt secrets payloads against"
+    timeout: 1m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/get:
+    script: secrets/get.sh
+    description: "Describe a Secret: key names + value sha256 fingerprints (values never returned)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/plan:
+    script: secrets/plan.sh
+    description: "Read-only upsert preview for a PGP-encrypted secret payload (returns plan_hash)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: payload
+        env: SECRETS_PAYLOAD
+        required: true
+        type: string
+      - name: mode
+        env: SECRETS_MODE
+        required: false
+        type: string
+        default: ""
+        pattern: '^(upsert|add_only|skip_existing)?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/apply:
+    script: secrets/apply.sh
+    description: "Execute a planned secret upsert (CAS on plan_hash; merge-only, values stdin-only)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: payload
+        env: SECRETS_PAYLOAD
+        required: true
+        type: string
+      - name: mode
+        env: SECRETS_MODE
+        required: false
+        type: string
+        default: ""
+        pattern: '^(upsert|add_only|skip_existing)?$'
+      - name: plan_hash
+        env: SECRETS_PLAN_HASH
+        required: true
+        type: string
+        pattern: '^sec[0-9a-f]{24}$'
+      - name: requested_by
+        env: REQUESTED_BY
+        required: false
+        type: string
+        default: ""
+      - name: request_id
+        env: REQUEST_ID
+        required: false
+        type: string
+        default: ""
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  secrets/delete:
+    script: secrets/delete.sh
+    description: "Delete a Secret (confirm=false previews key names/fingerprints; confirm=true deletes)"
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  # Pods gateway (see docs/mariadb/pods.md). Pure Kubernetes-level Pod
+  # list/delete for this namespace's MariaDB instance. The instance itself
+  # is deliberately NOT a task input — same auto-detect tier as
+  # list-backups/delete-backup (CLAUDE.md "Configuration Layers").
+  pods/list:
+    script: mariadb/pods/list.sh
+    description: "Read-only: list the live Pods belonging to this namespace's MariaDB instance"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
+  pods/delete:
+    script: mariadb/pods/delete.sh
+    description: "Delete a Pod belonging to this namespace's MariaDB instance (dry_run -> confirm); the StatefulSet recreates it"
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+        pattern: '^(true|false)$'
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+      - name: pod_uid
+        env: POD_UID
+        required: false
+        type: string
+        default: ""
+        pattern: '^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})?$'
+      - name: log_level
+        env: LOG_LEVEL
+        required: false
+        type: string
+        default: ""
+        pattern: '^(DEBUG|INFO|WARN|ERROR)?$'

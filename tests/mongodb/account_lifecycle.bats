@@ -751,6 +751,135 @@ _submit_task_allow_failure() {
   [ "$reason_code" = "INVALID_INPUT" ]
 }
 
+@test "create-account with password_secret_name uses the fixed password verbatim" {
+  _cleanup_account "qa_fixed_pw_user"
+  kubectl --context "$CTX_A" -n mongo-1 delete secret qa-fixed-pw-secret --ignore-not-found >/dev/null 2>&1
+
+  kubectl --context "$CTX_A" -n mongo-1 create secret generic qa-fixed-pw-secret \
+    --from-literal=password='Fixed-Pw-123!' >/dev/null
+
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_fixed_pw_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_secret_name: "qa-fixed-pw-secret",
+    password_secret_key: "password"
+  }')
+
+  _submit_task "create-account" "$payload"
+
+  local result status mode secret_name secret_key ping_ok policy_mode
+  result="$(_task_result_data)"
+  status=$(echo "$result" | jq -r '.status')
+  [ "$status" = "CREATED" ] || [ "$status" = "RECREATED" ]
+
+  mode=$(echo "$result" | jq -r '.delivery_payload.mode // empty')
+  [ "$mode" = "caller_provided_secret" ]
+  secret_name=$(echo "$result" | jq -r '.delivery_payload.secret_name // empty')
+  [ "$secret_name" = "qa-fixed-pw-secret" ]
+  secret_key=$(echo "$result" | jq -r '.delivery_payload.secret_key // empty')
+  [ "$secret_key" = "password" ]
+  # the password value itself must never appear anywhere in the task result
+  ! echo "$result" | grep -q 'Fixed-Pw-123!'
+
+  ping_ok=$(_mongo_exec_as "admin" "qa_fixed_pw_user" "Fixed-Pw-123!" "db.adminCommand({ping:1}).ok" | tail -1)
+  [ "$ping_ok" = "1" ]
+
+  policy_mode=$(_mongo_exec "const d=db.getSiblingDB('admin').getCollection('run_account_policies').findOne({username:'qa_fixed_pw_user', auth_db:'admin'}); print(d ? d.password_delivery_mode : 'missing');" | tail -1)
+  [ "$policy_mode" = "caller_provided_secret" ]
+
+  kubectl --context "$CTX_A" -n mongo-1 delete secret qa-fixed-pw-secret --ignore-not-found >/dev/null 2>&1
+}
+
+@test "create-account rejects password_secret_name combined with password_delivery_mode" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_secret_mode_conflict",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_secret_name: "qa-fixed-pw-secret",
+    password_delivery_mode: "encrypted_payload"
+  }')
+
+  _submit_task_allow_failure "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "create-account rejects invalid password_secret_name format" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_invalid_secret_name",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_secret_name: "Invalid_Secret_Name!"
+  }')
+
+  _submit_task_allow_failure "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "INVALID_INPUT" ]
+}
+
+@test "create-account fails when password_secret_name does not exist" {
+  _cleanup_account "qa_missing_secret_user"
+  kubectl --context "$CTX_A" -n mongo-1 delete secret qa-missing-secret --ignore-not-found >/dev/null 2>&1
+
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_missing_secret_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_secret_name: "qa-missing-secret"
+  }')
+
+  _submit_task_allow_failure "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "PASSWORD_SECRET_UNAVAILABLE" ]
+}
+
+@test "create-account fails when password_secret_name is the protected root-credential secret" {
+  local payload
+  payload=$(jq -nc '{
+    namespace: "mongo-1",
+    auth_db: "admin",
+    username: "qa_protected_secret_user",
+    roles_json: "[{\"role\":\"readWrite\",\"db\":\"admin\"}]",
+    dry_run: "false",
+    confirm: "true",
+    password_secret_name: "mongodb-credentials",
+    password_secret_key: "MONGO_ROOT_PASS"
+  }')
+
+  _submit_task_allow_failure "create-account" "$payload"
+
+  local result reason_code
+  result="$(_task_result_data)"
+  reason_code=$(echo "$result" | jq -r '.reason_code // empty')
+  [ "$reason_code" = "PROTECTED_SECRET" ]
+}
+
 @test "ban-account fails on non-existent account" {
   _cleanup_account "qa_nonexistent_ban"
 

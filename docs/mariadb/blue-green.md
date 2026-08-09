@@ -87,25 +87,19 @@ kexec "curl -s -X POST '${AQSH_A_URL}/tasks/blue-green%2Fcreate' \
   }'"
 ```
 
-The S3/MinIO backup location is resolved internally by the shared
-`mdbt_resolve_backup_location` helper (bucket `db-backups`, prefix
-`mariadb/<namespace>`, endpoint from `MINIO_ENDPOINT` in
-`/etc/aqsh/config/mariadb.env`) — the same convention `restore` reads, so a
-blue-green backup is restore-discoverable by namespace alone. `backup_bucket` /
-`backup_prefix` / `backup_endpoint` are **not** task inputs: Blue writes with its
-own config, and Green **re-resolves** the location with its own config (so each
-cluster uses its own MinIO endpoint rather than the other's). This relies on
-Green keeping the namespace identity (`green_namespace` defaults to `namespace`),
-which is the standard same-namespace, cross-cluster blue-green case. The three
-values stay env-readable as advanced overrides only.
+Backup storage is resolved internally by the platform on both sides of the
+workflow. Callers do not provide or receive backend locations or credential
+references. If the destination cannot resolve the matching backup, the operation
+fails safely with a stable public reason and generic guidance.
 
 `green_image` is the image Green is bootstrapped with (match Blue's version so
 restore is compatible). `target_image`, if set and different, triggers an
 in-place upgrade of Green after bootstrap. The task only succeeds once Green
 validates as a healthy replica of Blue caught up within `lag_threshold`
 (default `0`), mirroring AWS create completing with green in sync. Poll the
-returned task ID; the result includes the backup descriptor, bootstrap,
-upgrade, and final replication-validation sub-results.
+returned task ID; the result reports sanitized progress for backup, bootstrap,
+upgrade, and final replication validation without storage identifiers,
+credential references, manifests, raw status, or platform API details.
 
 ## Switchover
 

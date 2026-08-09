@@ -3,7 +3,7 @@
 # Contract tests for backup/list-backups-mariadb.sh — run against a mock `s5cmd`,
 # no MinIO. Lock down: namespace is the only input; the location is resolved
 # internally; `s5cmd --json ls` output (full s3:// keys, snake_case
-# last_modified) is normalised into a {name,size,lastModified} array; and the
+# last_modified) is normalised into a {name,sizeBytes,lastModified} array; and the
 # s5cmd empty-prefix semantic (exit 1 + 'no object found') maps to an EMPTY
 # LIST, while any other failure (auth/bucket) stays an error.
 #
@@ -15,11 +15,13 @@ setup() {
   LIB_DIR_REAL="${REPO_ROOT}/aqsh-tasks/lib"
   MOCK_DIR="$(mktemp -d)"
   RESULT="${MOCK_DIR}/result.json"
+  S5_CAPTURE="${MOCK_DIR}/s5.args"
 
   cat > "${MOCK_DIR}/s5cmd" <<'MOCK'
 #!/usr/bin/env bash
 # skip global flags (--json, --endpoint-url URL) to find the subcommand
 args=("$@"); cmd=""; target=""
+printf '%s\n' "$@" > "${MOCK_S5_CAPTURE}"
 i=0
 while (( i < ${#args[@]} )); do
   a="${args[$i]}"
@@ -32,7 +34,7 @@ done
 case "$cmd" in
   ls)
     if [[ "${MOCK_S5_AUTH_FAIL:-0}" == "1" ]]; then
-      echo 'ERROR session: fetching region failed: Forbidden: Forbidden status code: 403' >&2; exit 1
+      echo 'ERROR session: credential-marker-must-not-escape: Forbidden status code: 403' >&2; exit 1
     fi
     if [[ -z "${MOCK_S5_LS:-}" ]]; then
       echo "ERROR \"ls ${target}\": no object found" >&2; exit 1
@@ -50,9 +52,19 @@ teardown() { rm -rf "${MOCK_DIR}"; }
 
 run_list() {
   run env "PATH=${MOCK_DIR}:${PATH}" "LIB_DIR=${LIB_DIR_REAL}" \
-    "AQSH_RESULT_FILE=${RESULT}" "$@" bash "${SCRIPT}"
+    "AQSH_RESULT_FILE=${RESULT}" "MOCK_S5_CAPTURE=${S5_CAPTURE}" \
+    "$@" bash "${SCRIPT}"
 }
 field() { jq -r "$1" "${RESULT}"; }
+
+assert_public_result() {
+  [ "$(field '.data | keys | sort | join(",")')" = "backups,count,namespace" ]
+  [ "$(field '.data | has("location") or has("bucket") or has("endpoint") or has("prefix")')" = "false" ]
+}
+
+assert_public_backup_items() {
+  [ "$(field '[.data.backups[] | (keys | sort | join(","))] | unique | join(";")')" = "lastModified,name,sizeBytes" ]
+}
 
 @test "list-backups returns a normalised backup list" {
   # real s5cmd --json ls shapes: file has size + last_modified; directory has neither
@@ -67,9 +79,9 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.data.backups[0].lastModified')" = "2026-01-01T00:00:00.000Z" ]
   # trailing slash on a "directory" entry is trimmed
   [ "$(field '.data.backups[1].name')" = "physicalbackup-blue" ]
-  [ "$(field '.data.backups[1].size')" = "0" ]
-  [ "$(field '.data.location.bucket')" = "db-backups" ]
-  [ "$(field '.data.location.prefix')" = "mariadb/mariadb-1" ]
+  [ "$(field '.data.backups[1].sizeBytes')" = "0" ]
+  assert_public_result
+  assert_public_backup_items
 }
 
 @test "list-backups maps s5cmd 'no object found' (empty prefix) to an empty list, not an error" {
@@ -78,29 +90,39 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.status')" = "success" ]
   [ "$(field '.data.count')" = "0" ]
   [ "$(field '.data.backups')" = "[]" ]
+  assert_public_result
 }
 
 @test "list-backups surfaces a real s5cmd failure (auth) instead of reporting zero backups" {
   run_list MOCK_S5_AUTH_FAIL=1
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
-  [[ "$(field '.message')" == *"failed to list backups"* ]]
+  [ "$(field '.reason')" = "BACKUP_SERVICE_UNAVAILABLE" ]
+  [[ "$(cat "${RESULT}")" != *"credential-marker-must-not-escape"* ]]
+  [[ "$output" != *"credential-marker-must-not-escape"* ]]
 }
 
 @test "list-backups rejects a malformed namespace" {
   run_list DB_NAMESPACE="Bad_NS!"
   [ "$status" -ne 0 ]
   [ "$(field '.status')" = "error" ]
+  [ "$(field '.reason')" = "INVALID_REQUEST" ]
   [[ "$(field '.message')" == *"namespace"* ]]
 }
 
-@test "list-backups resolves the bucket/endpoint from deploy config" {
+@test "list-backups uses deploy config internally without returning storage details" {
   cat > "${MOCK_DIR}/mariadb.env" <<EOF
-MINIO_BUCKET=other-bucket
-MINIO_ENDPOINT=http://minio.kind-b.test:30080
+MINIO_BUCKET=internal-bucket-marker
+MINIO_ENDPOINT=http://internal-endpoint-marker.invalid
 EOF
   run_list MDBT_CONFIG_FILE="${MOCK_DIR}/mariadb.env"
   [ "$status" -eq 0 ]
-  [ "$(field '.data.location.bucket')" = "other-bucket" ]
-  [ "$(field '.data.location.endpoint')" = "http://minio.kind-b.test:30080" ]
+  grep -Fx -- "--endpoint-url" "${S5_CAPTURE}"
+  grep -Fx -- "http://internal-endpoint-marker.invalid" "${S5_CAPTURE}"
+  grep -Fx -- "s3://internal-bucket-marker/mariadb/mariadb-1/" "${S5_CAPTURE}"
+  assert_public_result
+  [[ "$(cat "${RESULT}")" != *"internal-bucket-marker"* ]]
+  [[ "$(cat "${RESULT}")" != *"internal-endpoint-marker"* ]]
+  [[ "$output" != *"internal-bucket-marker"* ]]
+  [[ "$output" != *"internal-endpoint-marker"* ]]
 }

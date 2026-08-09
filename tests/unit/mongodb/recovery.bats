@@ -94,7 +94,18 @@ case "$cmd" in
         fi
         exit 0 ;;
       pods)
-        printf 'mongodb-0\nmongodb-1\nmongodb-2\n'
+        if [[ "$flags" == *"-o json"* ]]; then
+          # ownerReferences derived from the pod-name convention <sts>-<ordinal>
+          out='{"items":['
+          sep=""
+          for p in mongodb-0 mongodb-1 mongodb-2; do
+            out+="${sep}{\"metadata\":{\"name\":\"${p}\",\"ownerReferences\":[{\"kind\":\"StatefulSet\",\"name\":\"${p%-*}\"}]}}"
+            sep=","
+          done
+          printf '%s]}\n' "$out"
+        else
+          printf 'mongodb-0\nmongodb-1\nmongodb-2\n'
+        fi
         exit 0 ;;
       pod)
         if [[ "$flags" == *"phase"* ]]; then

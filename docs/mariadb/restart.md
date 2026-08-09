@@ -37,7 +37,6 @@ separate, explicit promote-replica procedure for role changes.
 | Name | Env Var | Type | Required | Default | Notes |
 |------|---------|------|----------|---------|-------|
 | `namespace` | `DB_NAMESPACE` | string | yes | - | Validated `^mariadb-[0-9]+$` |
-| `context` | `K8S_CONTEXT` | string | no | `""` | Optional for in-cluster AQSH |
 | `resource` | `MARIADB_RESOURCE` | string | no | `mariadb` | MariaDB CR kind |
 | `mdb` | `MARIADB_NAME` | string | no | _auto-detect_ | MariaDB CR name. When omitted, auto-detected from the namespace (single CR); several return `MARIADB_AMBIGUOUS`, none returns `MARIADB_OPERATOR_REQUIRED`. |
 | `container` | `MARIADB_CONTAINER` | string | no | `mariadb` | MariaDB container name |

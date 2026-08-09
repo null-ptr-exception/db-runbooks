@@ -41,6 +41,10 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
 
+# Optional platform-selected MariaDB identity. Capture it before mariadb.sh
+# applies its compatibility default. It is not a task input.
+MDB_INPUT="${MARIADB_NAME:-}"
+
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
 # shellcheck source=../../lib/mariadb.sh
@@ -74,34 +78,25 @@ K8S_CONTEXT="${K8S_CONTEXT:-}"         # reachability hook (empty → in-cluster
 #     namespace's instance, never defaulted (an undersized PVC would truncate
 #     the restored data; a mismatched version is unsafe for a physical restore).
 TARGET="${RESTORE_TARGET:-}"
-SOURCE_NAME="${RESTORE_SOURCE:-}"
+SOURCE_NAME="${RESTORE_SOURCE:-$MDB_INPUT}"
 IMAGE="${RESTORE_IMAGE:-}"
 STORAGE_SIZE="${STORAGE_SIZE:-}"
 SOURCE_RESOURCES_JSON="null"
-# Backup location (bucket / prefix / endpoint) — resolved from deploy-time config
-# + the per-namespace naming convention, identically to the write side. Sets
-# BACKUP_BUCKET, BACKUP_PREFIX, BACKUP_ENDPOINT (each env-overridable).
-mdbt_resolve_backup_location "$NAMESPACE"
 ROOT_SECRET_NAME="mariadb"
 ROOT_SECRET_KEY="password"
-BACKUP_REGION="us-east-1"
-BACKUP_ACCESS_SECRET="minio"
-BACKUP_ACCESS_KEY="access-key-id"
-BACKUP_SECRET_KEY="secret-access-key"
+BACKUP_REGION="${BACKUP_REGION:-}"
+BACKUP_ACCESS_SECRET="${BACKUP_ACCESS_SECRET:-}"
+BACKUP_ACCESS_KEY="${BACKUP_ACCESS_KEY:-}"
+BACKUP_SECRET_ACCESS_SECRET="${BACKUP_SECRET_ACCESS_SECRET:-}"
+BACKUP_SECRET_KEY="${BACKUP_SECRET_KEY:-}"
 REPLICAS="1"                           # restore is standalone by design
 
 restore_unhandled_error() {
-  local code="$?"
-  local line="${BASH_LINENO[0]:-unknown}"
   trap - ERR
-  mdbt_write_result "$(response_err "${OP:-restore}" "restore task aborted before completing at line ${line} (exit ${code})" \
-    "$(jq -n \
-      --arg namespace "${NAMESPACE:-}" \
-      --arg target "${TARGET:-}" \
-      --arg source "${SOURCE_NAME:-}" \
-      '{namespace: $namespace, target: $target, source: (if $source == "" then null else $source end)}')" \
-    "$code")" || true
-  exit "$code"
+  mdbt_write_result "$(mdbt_error_response "${OP:-restore}" "restore failed" \
+    "$(jq -n --arg namespace "${NAMESPACE:-}" '{namespace: $namespace, restored: false, state: "FAILED"}')" \
+    1 "INTERNAL_ERROR")"
+  exit 1
 }
 trap restore_unhandled_error ERR
 
@@ -113,13 +108,11 @@ fi
 # Namespace is the one input the caller must provide.
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
 
-# K8S_CONTEXT is empty on the normal in-cluster path: aqsh runs inside
-# cluster-dbs, so the in-cluster config already targets the MariaDB cluster.
-# Out-of-cluster / multi-cluster callers pass `context` explicitly; validate it
-# so a malformed value can't silently provision into the wrong cluster
-# (per CLAUDE.md: "Always specify --context"). Validate before any kubectl call.
+# K8S_CONTEXT is a deployment-only reachability hook. Validate it before any
+# cluster call without exposing it through the public task contract.
 if [[ -n "$K8S_CONTEXT" ]]; then
-  mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
+  mdbt_validate_internal_or_fail "$OP" "INTERNAL_ERROR" "database service is unavailable" \
+    mdbt_validate_context "context" "$K8S_CONTEXT" "$OP"
 fi
 
 # Wire the cluster/namespace target through the canonical entry point (the same
@@ -141,7 +134,7 @@ fi
 # Both must match the source: a physical restore is version- and size-sensitive,
 # so neither the engine nor the PVC size is ever silently defaulted.
 if [[ -z "$SOURCE_NAME" && ( -z "$IMAGE" || -z "$STORAGE_SIZE" ) ]]; then
-  if SOURCE_NAME="$(mariadb_resolve_name)"; then :; else SOURCE_NAME=""; fi
+  if SOURCE_NAME="$(mariadb_resolve_name 2>/dev/null)"; then :; else SOURCE_NAME=""; fi
 fi
 
 # Fetch the source spec once (image + storage) to halve the API calls and avoid
@@ -173,28 +166,49 @@ if [[ -z "$IMAGE" ]]; then
   if [[ "$NS_IMAGE_COUNT" -eq 1 ]]; then
     IMAGE="$NS_IMAGES"
   elif [[ "$NS_IMAGE_COUNT" -gt 1 ]]; then
-    mdbt_fail "$OP" "'${NAMESPACE}' runs multiple MariaDB versions (e.g. mid blue-green upgrade); cannot pick the restore version automatically — operator: set the RESTORE_SOURCE or RESTORE_IMAGE override" \
-      "$(jq -n --arg c "$NS_IMAGES" '{versions: ($c | split("\n") | map(select(. != "")))}')" 2
+    mdbt_fail "$OP" "restore configuration is ambiguous" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "DATABASE_CONFIGURATION_AMBIGUOUS"
   fi
   if [[ -z "$IMAGE" ]]; then
-    mdbt_fail "$OP" "could not determine the MariaDB version for '${NAMESPACE}' (no instance to derive it from); full-loss restore needs the backup to carry the spec (future) — operator: set the RESTORE_IMAGE override meanwhile" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+    mdbt_fail "$OP" "restore configuration is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
   fi
 fi
 
 # Storage is never guessed: an undersized PVC would truncate the restored data.
 if [[ -z "$STORAGE_SIZE" ]]; then
-  mdbt_fail "$OP" "could not determine the storage size for '${NAMESPACE}' (no instance to derive it from); a physical restore must match the source PVC size — operator: set the RESTORE_SOURCE or STORAGE_SIZE override" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+  mdbt_fail "$OP" "restore configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
 fi
 
-# Validate the resolved user-facing + override values (internals are trusted).
-mdbt_validate_dns_label "target" "$TARGET" "$OP"
-mdbt_validate_image "image" "$IMAGE" "$OP"
-mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
-mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
-mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
-mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
+# Storage policy follows the selected source MariaDB. Full-loss restores that
+# have no remaining source retain the documented deploy-time fallback.
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$SOURCE_NAME"; then
+  trap - ERR
+  mdbt_fail "$OP" "restore source configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
+fi
+
+# Validate platform-owned values without reflecting their names or values.
+_validate_restore_internal() {
+  mdbt_validate_internal_or_fail "$OP" "RESTORE_CAPABILITY_UNAVAILABLE" \
+    "restore configuration is unavailable" "$@"
+}
+_validate_storage_internal() {
+  mdbt_validate_internal_or_fail "$OP" "BACKUP_CONFIGURATION_UNAVAILABLE" \
+    "restore source configuration is unavailable" "$@"
+}
+_validate_restore_internal mdbt_validate_dns_label "target" "$TARGET" "$OP"
+_validate_restore_internal mdbt_validate_image "image" "$IMAGE" "$OP"
+_validate_restore_internal mdbt_validate_storage_size "storage_size" "$STORAGE_SIZE" "$OP"
+_validate_storage_internal mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$OP"
+_validate_storage_internal mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$OP"
+_validate_storage_internal mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$OP"
+_validate_storage_internal mdbt_validate_region "backup_region" "$BACKUP_REGION" "$OP"
+_validate_storage_internal mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$OP"
+_validate_storage_internal mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$OP"
+_validate_storage_internal mdbt_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$OP"
+_validate_storage_internal mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$OP"
 if [[ -n "$TARGET_TIME" ]]; then
   mdbt_validate_rfc3339 "target_time" "$TARGET_TIME" "$OP"
 fi
@@ -221,6 +235,7 @@ if ! MANIFEST="$(jq -n \
   --arg region "$BACKUP_REGION" \
   --arg accessSecret "$BACKUP_ACCESS_SECRET" \
   --arg accessKey "$BACKUP_ACCESS_KEY" \
+  --arg secretAccessSecret "$BACKUP_SECRET_ACCESS_SECRET" \
   --arg secretKey "$BACKUP_SECRET_KEY" \
   --arg targetTime "$TARGET_TIME" \
   --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
@@ -242,55 +257,35 @@ if ! MANIFEST="$(jq -n \
           region: $region,
           tls: {enabled: $tls},
           accessKeyIdSecretKeyRef: {name: $accessSecret, key: $accessKey},
-          secretAccessKeySecretKeyRef: {name: $accessSecret, key: $secretKey}
+          secretAccessKeySecretKeyRef: {name: $secretAccessSecret, key: $secretKey}
         }
       } + (if $targetTime == "" then {} else {targetRecoveryTime: $targetTime} end))
     } + (($resourcesJson | try fromjson catch null) as $resources | if $resources == null then {} else {resources: $resources} end))
   }' 2>&1)"; then
   trap - ERR
-  mdbt_fail "$OP" "failed to render MariaDB restore manifest: ${MANIFEST}" \
-    "$(jq -n \
-      --arg ns "$NAMESPACE" \
-      --arg target "$TARGET" \
-      --arg source "${SOURCE_NAME:-}" \
-      --arg resourcesJson "$SOURCE_RESOURCES_JSON" \
-      '{namespace: $ns, target: $target, source: (if $source == "" then null else $source end), sourceResourcesJson: $resourcesJson}')" 3
+  mdbt_fail "$OP" "restore could not be prepared" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,restored:false,state:"FAILED"}')" 1 "INTERNAL_ERROR"
 fi
 
-# The restored instance is reachable at the operator-managed primary Service;
-# its root credentials live in the platform-managed Secret (returned by ref).
-CONNECTION_HOST="${TARGET}-primary.${NAMESPACE}.svc.cluster.local"
-
-# restore_result <restored:bool> <dryRun:bool>
+# restore_result <provisioned:bool> <restored:bool> <dryRun:bool> <state>
 restore_result() {
   jq -n \
     --arg namespace "$NAMESPACE" \
-    --arg target "$TARGET" \
-    --arg source "${SOURCE_NAME:-}" \
-    --arg image "$IMAGE" \
-    --arg bucket "$BACKUP_BUCKET" \
-    --arg prefix "$BACKUP_PREFIX" \
-    --arg endpoint "$BACKUP_ENDPOINT" \
     --argjson pitr "$(mdbt_bool_json "${TARGET_TIME:+true}")" \
     --arg targetTime "$TARGET_TIME" \
-    --arg host "$CONNECTION_HOST" \
-    --arg secretName "$ROOT_SECRET_NAME" \
-    --arg secretKey "$ROOT_SECRET_KEY" \
-    --arg manifest "$MANIFEST" \
-    --argjson restored "$1" \
-    --argjson dry "$2" \
+    --arg state "$4" \
+    --argjson provisioned "$1" \
+    --argjson restored "$2" \
+    --argjson dry "$3" \
     '{
       namespace: $namespace,
-      target: $target,
-      source: (if $source == "" then null else $source end),
-      image: $image,
-      backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, contentType: "Physical"},
+      contentType: "Physical",
       pointInTimeRecovery: {enabled: $pitr, targetRecoveryTime: (if $pitr then $targetTime else null end)},
-      connection: {host: $host, port: 3306},
-      credentialsRef: {secretName: $secretName, secretKey: $secretKey},
+      state: $state,
       dryRun: $dry,
+      provisioned: $provisioned,
       restored: $restored
-    } + (if $dry then {manifest: $manifest} else {} end)'
+    }'
 }
 
 # --- Route by operator capability: legacy has no physical bootstrapFrom -------
@@ -303,72 +298,60 @@ PHYSICAL_MODE="$(mdb_physical_backup_mode)" || mode_rc=$?
 if [[ "$mode_rc" -ne 0 ]]; then
   trap - ERR
   if [[ "$mode_rc" -eq 2 ]]; then
-    mdbt_fail "$OP" "could not determine the mariadb-operator generation or PhysicalBackup capability; refusing to choose a restore implementation" \
-      "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups", discovery: "unknown"}')" 2
+    mdbt_fail "$OP" "physical restore capability is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
   fi
-  mdbt_fail "$OP" "operator group $(mdb_operator_group) does not provide a supported physical restore path; install the current-generation PhysicalBackup CRD or use a legacy mmontes operator" \
-    "$(jq -n --arg g "$(mdb_operator_group)" '{operatorGroup: $g, capability: "physicalbackups"}')" 2
+  mdbt_fail "$OP" "physical restore capability is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "RESTORE_CAPABILITY_UNAVAILABLE"
 fi
 
 if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
   if [[ -n "$TARGET_TIME" ]]; then
     trap - ERR
-    mdbt_fail "$OP" "point-in-time recovery is not supported on the legacy operator's hand-rolled physical restore (omit target_time, or use logical-restore)" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2
+    mdbt_fail "$OP" "point-in-time recovery is unavailable for this database" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 2 "RESTORE_CAPABILITY_UNAVAILABLE"
   fi
 
+  if ! mdbt_s3_prepare_direct_client >/dev/null 2>&1; then
+    trap - ERR
+    mdbt_fail "$OP" "restore source configuration is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
+  fi
   if ! setup_minio_client >/dev/null 2>&1; then
     trap - ERR
-    mdbt_fail "$OP" "could not configure the S3/MinIO client for s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}" \
-      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p, discovery: "unknown"}')" 1
+    mdbt_fail "$OP" "restore source is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
   fi
-  PR_OBJECT="$(mdbt_pr_source_object "$BACKUP_BUCKET" "$BACKUP_PREFIX" "${RESTORE_BACKUP_OBJECT:-}")" || {
+  PR_OBJECT="$(mdbt_pr_source_object "$BACKUP_BUCKET" "$BACKUP_PREFIX" "${RESTORE_BACKUP_OBJECT:-}" 2>/dev/null)" || {
     trap - ERR
-    mdbt_fail "$OP" "could not list physical backups under s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}" \
-      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p}')" 1
+    mdbt_fail "$OP" "restore source is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
   }
-  PR_PVC="$(mdbt_pr_pvc_name "$TARGET")"
-
-  pr_result() {  # <restored:bool> <dryRun:bool>
-    jq -n \
-      --arg namespace "$NAMESPACE" --arg target "$TARGET" --arg image "$IMAGE" \
-      --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" --arg endpoint "$BACKUP_ENDPOINT" --arg object "$PR_OBJECT" \
-      --arg host "$CONNECTION_HOST" --arg pvc "$PR_PVC" \
-      --arg secretName "$ROOT_SECRET_NAME" --arg secretKey "$ROOT_SECRET_KEY" \
-      --argjson restored "$1" --argjson dry "$2" \
-      --argjson plan "$(mdbt_pr_plan "$BACKUP_BUCKET" "$PR_OBJECT" "$PR_PVC" "$TARGET")" \
-      '{
-        namespace: $namespace, target: $target, image: $image,
-        source: (if $object == "" then null else $object end),
-        backup: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint, object: $object, contentType: "Physical", mode: "hand-rolled"},
-        pointInTimeRecovery: {enabled: false, targetRecoveryTime: null},
-        connection: {host: $host, port: 3306},
-        credentialsRef: {secretName: $secretName, secretKey: $secretKey},
-        dryRun: $dry, restored: $restored
-      } + (if $dry then {plan: $plan} else {} end)'
+  pr_result() {  # <provisioned:bool> <restored:bool> <dryRun:bool> <state>
+    restore_result "$1" "$2" "$3" "$4"
   }
 
   if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-    mdbt_write_result "$(response_ok "$OP" "dry run: hand-rolled physical restore planned for ${TARGET} (legacy operator, no physical bootstrapFrom)" "$(pr_result false true)")"
+    mdbt_write_result "$(response_ok "$OP" "restore dry run completed" "$(pr_result false false true PLANNED)")"
     exit 0
   fi
 
   if [[ -z "$PR_OBJECT" ]]; then
     trap - ERR
-    mdbt_fail "$OP" "no physical backup (.xb) found under s3://${BACKUP_BUCKET}/${BACKUP_PREFIX} to restore from" \
-      "$(jq -n --arg b "$BACKUP_BUCKET" --arg p "$BACKUP_PREFIX" '{bucket: $b, prefix: $p}')" 2
+    mdbt_fail "$OP" "no backup is available to restore" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,restored:false,state:"FAILED"}')" 2 "BACKUP_NOT_FOUND"
   fi
 
   if [[ "$WAIT_TIMEOUT" == "0" ]]; then
     trap - ERR
-    mdbt_fail "$OP" "wait_timeout=0 is not supported by the hand-rolled restore because PVC/prepare/Ready verification is required before reporting success" \
-      "$(jq -n --arg t "$TARGET" '{target: $t, waitTimeout: 0}')" 2
+    mdbt_fail "$OP" "wait_timeout=0 is unavailable for this restore" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,waitTimeout:0}')" 2 "INVALID_REQUEST"
   fi
 
   if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
     trap - ERR
-    mdbt_fail "$OP" "target MariaDB '${TARGET}' already exists; restore provisions a NEW instance and never overwrites in place (choose a different target name)" \
-      "$(jq -n --arg ns "$NAMESPACE" --arg t "$TARGET" '{namespace: $ns, target: $t}')" 2
+    mdbt_fail "$OP" "restore target is unavailable" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,restored:false,state:"FAILED"}')" 1 "RESTORE_FAILED"
   fi
 
   rc=0
@@ -376,48 +359,53 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
   # OPERATOR_BACKUP_ENDPOINT is only for operator CRs.
   mdbt_pr_orchestrate "$TARGET" "$NAMESPACE" "$IMAGE" "$STORAGE_SIZE" "$ROOT_SECRET_NAME" "$ROOT_SECRET_KEY" \
     "$BACKUP_BUCKET" "$PR_OBJECT" "$BACKUP_ENDPOINT" \
-    "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_KEY" \
-    "$(mdb_operator_apiversion)" "$WAIT_TIMEOUT" || rc=$?
+    "$BACKUP_ACCESS_SECRET" "$BACKUP_ACCESS_KEY" "$BACKUP_SECRET_ACCESS_SECRET" "$BACKUP_SECRET_KEY" \
+    "$(mdb_operator_apiversion)" "$WAIT_TIMEOUT" >/dev/null 2>&1 || rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    mdbt_write_result "$(response_ok "$OP" "MariaDB physically restored into new instance ${TARGET} from ${PR_OBJECT}" "$(pr_result true false)")"
+    mdbt_write_result "$(response_ok "$OP" "database restore completed" "$(pr_result true true false COMPLETED)")"
     exit 0
   fi
   trap - ERR
-  mdbt_fail "$OP" "hand-rolled physical restore failed (exit ${rc}: 10=pvc, 11=prepare job, 12=mariadb apply, 13=not Ready, 14=verify — PVC not adopted or no user tables)" \
-    "$(pr_result false false)" 1
+  mdbt_fail "$OP" "database restore failed" \
+    "$(pr_result false false false FAILED)" 1 "RESTORE_FAILED"
 fi
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
-  mdbt_write_result "$(response_ok "$OP" "dry run: MariaDB restore manifest rendered for ${TARGET}" "$(restore_result false true)")"
+  mdbt_write_result "$(response_ok "$OP" "restore dry run completed" "$(restore_result false false true PLANNED)")"
   exit 0
 fi
 
 # Restore never overwrites in place — refuse if the target already exists so a
 # typo can't clobber a live instance. Operators clone to a new name instead.
 if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
-  mdbt_fail "$OP" "target MariaDB '${TARGET}' already exists; restore provisions a NEW instance and never overwrites in place (choose a different target name)" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 2
+  mdbt_fail "$OP" "restore target is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,restored:false,state:"FAILED"}')" 1 "RESTORE_FAILED"
 fi
 
-if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
+if ! printf '%s\n' "$MANIFEST" | _kubectl apply -f - >/dev/null 2>&1; then
   # Disable the ERR trap so its generic message can't mask the real apply error,
   # and use a minimal data payload (not restore_result) so nothing else can fail
-  # here and swallow ${apply_out}.
+  # here and swallow the public error.
   trap - ERR
-  mdbt_fail "$OP" "failed to apply MariaDB restore manifest: ${apply_out}" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" '{namespace: $ns, target: $target}')" 3
+  mdbt_fail "$OP" "database restore could not be started" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns,provisioned:false,restored:false,state:"FAILED"}')" \
+    1 "RESTORE_FAILED"
 fi
 
 # wait_timeout="0" returns immediately; otherwise wait for Ready. The instance is
 # already provisioned at this point, so a wait timeout must NOT lose the result —
-# emit a partial result (with the connection endpoint + credential ref) so the
-# caller can still reach the not-yet-Ready instance, then exit non-zero.
+# emit a sanitized partial result without backend resource details.
 if [[ "$WAIT_TIMEOUT" != "0" ]]; then
   if ! mdbt_wait_mariadb_backup_restored "$TARGET" "$WAIT_TIMEOUT" >/dev/null 2>&1 \
-      || ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
-    mdbt_write_result "$(response_err "$OP" "MariaDB ${TARGET} was provisioned but did not become Ready or finish restoring its backup within ${WAIT_TIMEOUT}" "$(restore_result true false)" 1)"
+      || ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT" >/dev/null 2>&1; then
+    mdbt_write_result "$(mdbt_error_response "$OP" "database restore is still pending" \
+      "$(restore_result true false false PENDING)" 1 "RESTORE_TIMEOUT")"
     exit 1
   fi
 fi
 
-mdbt_write_result "$(response_ok "$OP" "MariaDB restored into new instance ${TARGET}" "$(restore_result true false)")"
+if [[ "$WAIT_TIMEOUT" == "0" ]]; then
+  mdbt_write_result "$(response_ok "$OP" "database restore requested" "$(restore_result true false false REQUESTED)")"
+else
+  mdbt_write_result "$(response_ok "$OP" "database restore completed" "$(restore_result true true false COMPLETED)")"
+fi

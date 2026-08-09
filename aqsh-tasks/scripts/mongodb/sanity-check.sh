@@ -108,7 +108,11 @@ _resolve_primary_with_retry() {
   return 1
 }
 
-_SEED_HOST="${_STS_NAME}-0.${_STS_NAME}.${DB_NAMESPACE}.svc.cluster.local"
+# The STS's own spec.serviceName governs pod DNS and is not guaranteed to
+# equal the StatefulSet's name (e.g. Bitnami commonly uses "<sts>-headless").
+_HEADLESS_SVC=$(recovery_resolve_headless_service "$_STS_NAME")
+
+_SEED_HOST="${_STS_NAME}-0.${_HEADLESS_SVC}.${DB_NAMESPACE}.svc.cluster.local"
 _SEED_PORT="27017"
 log_debug "mongo-sanity-check" "resolving primary via seed: ${_SEED_HOST}:${_SEED_PORT}"
 
@@ -130,6 +134,16 @@ export STS_NAME="${_STS_NAME}"
 export MONGO_HOST MONGO_PORT
 export MONGO_AUTHDB="admin"
 export MONGO_USER="${_MONGO_USER}" MONGO_PASS="${_MONGO_PASS}"
+
+# ── Auto-detect PVC mount path ───────────────────────────────────────────────
+# Ask mongod itself for its real dbPath (same detection recovery/* uses) so
+# the Layer 1 disk-usage check works unchanged across Bitnami/official-image
+# layouts, instead of assuming one convention. Falls soft to
+# mongodb-recovery.sh's own hardcoded literal when detection can't reach
+# any pod in the StatefulSet.
+recovery_resolve_data_paths "${_STS_NAME}-0" "${_MONGO_USER}" "${_MONGO_PASS}" "${_STS_NAME}"
+export PVC_MOUNT_PATH="${_RECOVERY_MOUNT_PATH}"
+log_debug "mongo-sanity-check" "PVC mount path resolved: ${PVC_MOUNT_PATH}"
 
 # ── Run checks ────────────────────────────────────────────────────────────────
 source "${LIB_DIR}/mongodb_constant.sh"

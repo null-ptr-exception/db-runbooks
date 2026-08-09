@@ -26,6 +26,42 @@ setup_file() {
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=300s
 
+  # Regression fixture for #84: non-database Pods share the instance label but
+  # must never become scope=all mutation targets.
+  kubectl --context "$CTX_A" -n mariadb-1 apply -f - <<'YAML'
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mariadb-metrics
+      labels:
+        app.kubernetes.io/instance: mariadb
+        issue-84-auxiliary: "true"
+    spec:
+      containers:
+        - name: auxiliary
+          image: localhost:5005/db-runbooks:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep 3600"]
+  - apiVersion: v1
+    kind: Pod
+    metadata:
+      name: mariadb-query-exporter
+      labels:
+        app.kubernetes.io/instance: mariadb
+        issue-84-auxiliary: "true"
+    spec:
+      containers:
+        - name: auxiliary
+          image: localhost:5005/db-runbooks:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep 3600"]
+YAML
+  kubectl --context "$CTX_A" -n mariadb-1 wait pod \
+    -l issue-84-auxiliary=true --for=condition=Ready --timeout=120s
+
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN ORIG_FILE
 }
 
@@ -130,6 +166,8 @@ _pod_max_conn() {
   local data; data="$(_task_result_data)"
   assert_equal "$(echo "$data" | jq -r '.status')" "CHANGED"
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SRP_APPLIED"
+  assert_equal "$(echo "$data" | jq -r '.results | map(.pod) | sort | join(",")')" \
+    "mariadb-0,mariadb-1,mariadb-2"
   # the operator/server must actually report the new value on every pod
   assert_equal "$(_pod_max_conn mariadb-0)" "512"
   assert_equal "$(_pod_max_conn mariadb-1)" "512"

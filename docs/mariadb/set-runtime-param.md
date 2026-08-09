@@ -29,7 +29,6 @@ during connection exhaustion). AWS RDS analogue: `ModifyDBParameterGroup` for a
 | `value` | `RUNTIME_VALUE` | | — | Target value: absolute (`500` / `ON` / bytes) or **relative** to the live value (`*1.5`, `+100`, `-25%`) — relative works both directions and numeric params only |
 | `scope` | `RUNTIME_SCOPE` | | `all` | `all` \| `primary` \| `<pod-name>` |
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR |
-| `context` | `K8S_CONTEXT` | | `""` | Reachability hook |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply |
 

@@ -56,6 +56,13 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
+  # Throwaway deployment PGP keypair for the secrets/* task family (private
+  # key becomes the aqsh-pgp Secret via aqsh.pgpKey; callers fetch the public
+  # half through the secrets/pubkey task). No gpg on the host → no key; the
+  # secrets.bats file skips itself instead of failing the whole suite.
+  local PGP_PRIV
+  PGP_PRIV=$(provision_ephemeral_pgp_key)
+
   # Write runtime-discovered values to a temp file
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mongodb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
@@ -76,6 +83,13 @@ $(echo "$CA_B" | sed 's/^/      /')
     cluster-a-token: "${TOKEN_A}"
     cluster-b-token: "${TOKEN_B}"
 EOF
+  if [[ -n "$PGP_PRIV" ]]; then
+    cat >> "$RUNTIME_VALUES" <<EOF
+aqsh:
+  pgpKey: |
+$(echo "$PGP_PRIV" | sed 's/^/    /')
+EOF
+  fi
 
   # Second apply: inject real runtime values. Helm updates only the
   # resources whose values changed (Secret, ConfigMaps). Drift-free.
@@ -105,6 +119,16 @@ EOF
 teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
+
+  # Namespace deletion below is destructive to the aqsh pod's logs, and CI
+  # runs teardown as part of this same `bats tests/mongodb/` step — a
+  # later, separate "dump logs on failure" step would always find the
+  # namespace already gone. Capture unconditionally (cheap, always useful)
+  # before deleting anything, to a fixed path outside any bats tmpdir (bats
+  # deletes BATS_SUITE_TMPDIR itself right after teardown_suite returns) so
+  # a later CI step in the same job can still read it.
+  kubectl --context "$ctx_a" -n mongo-core logs -l app=aqsh --all-containers --tail=2000 --prefix \
+    > /tmp/aqsh-mongodb-teardown.log 2>&1 || true
 
   kubectl --context "$ctx_a" delete ns mongo-core mongo-1 --ignore-not-found  || true
   kubectl --context "$ctx_b" delete ns mongo-core minio --ignore-not-found  || true

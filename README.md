@@ -42,7 +42,15 @@ Istio Gateway (cluster-a:30080)
 
 Istio Gateway (cluster-b:30080)
     └─ minio.kind-b.test        → MinIO API
+
+Namespace-local database gateway (cluster-a / mariadb-1)
+    ├─ :3306 → mariadb-operator primary Service
+    └─ :3307 → mariadb-operator secondary Service
 ```
+
+The database gateway is a separate Envoy Deployment and Service owned by the
+MariaDB namespace. It models database-namespace lifecycle and ownership; it
+does not add MariaDB routes to the shared control-plane gateway.
 
 Cross-cluster DNS: `*.kind-a.test` → cluster-a IP, `*.kind-b.test` → cluster-b
 IP (via CoreDNS) — this only resolves *inside* the clusters, so API calls are
@@ -87,6 +95,7 @@ auto-detection) used by the MongoDB account/recovery tasks.
 | **aqsh-mongodb** | cluster-a | Async task queue for MongoDB (restart, sanity-check, account lifecycle, recovery/\*, backup) |
 | **Redis** | cluster-a | Shared task queue broker for aqsh |
 | **MariaDB** | cluster-a | Single instance via mariadb-operator (`mariadb-1`) |
+| **Database gateway** | cluster-a | Namespace-local Envoy gateway for MariaDB primary/secondary TCP routing |
 | **MongoDB** | cluster-a | Single StatefulSet instance (`mongo-1`) |
 | **MinIO** | cluster-b | S3-compatible object storage for backup tasks |
 | **test-client** | cluster-b | curl pod with a projected ServiceAccount token, used to call aqsh through the gateway |
@@ -122,6 +131,12 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `recovery/pre-check`, `/wipe`, `/reset`, `/status`, `/fix-no-primary`, `/recover` | Replica-set member recovery (gate checks, wipe + resync, no-primary diagnosis) | [docs/mongodb/recovery.md](docs/mongodb/recovery.md) |
 | `reconfig/plan`, `/apply`, `/force-dr`, `/freeze` | Gated replica-set reconfig (risk report → CAS apply, break-glass DR, change freeze) | [docs/mongodb/reconfig.md](docs/mongodb/reconfig.md) |
 | `fcv/status`, `fcv/set` | featureCompatibilityVersion report + gated upgrade/downgrade validated against the binary version | [docs/mongodb/fcv.md](docs/mongodb/fcv.md) |
+| `pbm/status`, `/backup`, `/list`, `/restore`, `/delete`, `/pitr`, `/logs`, `/cancel-backup`, `/schedule`, `/config` | Percona Backup for MongoDB: logical/physical/incremental backups, PITR, takeover restore, managed scheduling | [docs/mongodb/pbm.md](docs/mongodb/pbm.md) |
+| `secrets/pubkey`, `/get`, `/plan`, `/apply`, `/delete` | PGP-encrypted Secret CRUD, plan/apply CAS gated | [docs/mongodb/secrets.md](docs/mongodb/secrets.md) |
+| `sts/orphan-delete` | Detach the StatefulSet from its Pods (`--cascade=orphan`) — step 1 of the PVC-enlarge workaround | [docs/mongodb/sts-orphan-delete.md](docs/mongodb/sts-orphan-delete.md) |
+| `oplog/status`, `oplog/resize` | Per-member oplog size/window report + gated resize across every current member | [docs/mongodb/oplog.md](docs/mongodb/oplog.md) |
+| `ops/list`, `ops/kill` | Currently active operations on a node + gated kill by opid | [docs/mongodb/ops.md](docs/mongodb/ops.md) |
+| `profiler/status`, `profiler/set` | Query profiler level/threshold report + gated change on a node | [docs/mongodb/profiler.md](docs/mongodb/profiler.md) |
 | `backup` | Backup to MinIO | — |
 
 ### Task API Example
@@ -255,12 +270,16 @@ suites against fresh Kind clusters per job.
 ## 📦 Prerequisites
 
 - **Docker**
-- **[mise](https://mise.jdx.dev/)** (manages `kubectl`/`helm`/`helmfile`/`ctlptl`/`skaffold` versions per `.mise.toml`)
+- **[mise](https://mise.jdx.dev/)** (manages `kubectl`/`helm`/`helmfile`/`ctlptl` versions per `.mise.toml`)
 - **[Kind](https://kind.sigs.k8s.io/)**, **[BATS](https://bats-core.readthedocs.io/)**, `jq`
 
 Run `./scripts/preflight.sh` — it installs everything above (plus the
 `helm-diff` plugin helmfile needs) into `~/.local/bin` / mise, and clones the
 bats test helpers.
+
+Skaffold is intentionally not installed: the active suites build with Docker,
+load images with Kind, and deploy with Helmfile. Preflight also removes stale
+Skaffold installations and shims left on self-hosted runners.
 
 ### CI
 

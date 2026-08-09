@@ -3,8 +3,8 @@
 # Contract tests for mariadb/restore.sh.
 #
 # These run the script directly against a mock `kubectl` — no cluster, no
-# MinIO, no operator. They lock down the user-oriented surface and the manifest
-# the task renders:
+# MinIO, no operator. They lock down the user-oriented surface while inspecting
+# the captured apply payload separately for internal manifest correctness:
 #   - namespace is the only required input (the database identity); version,
 #     storage, restored name, source, credentials, and S3 location are all
 #     internal — NOT task inputs. RESTORE_SOURCE / RESTORE_TARGET / RESTORE_IMAGE
@@ -17,7 +17,8 @@
 #   - target_time is range-validated and, when given, injected as PITR
 #   - wait_timeout doubles as the wait switch ("0" = don't wait); a Ready-wait
 #     timeout still returns a partial result instead of losing it
-#   - the result returns the connection endpoint + credential reference
+#   - the public result is a high-level restore status only; generated resource
+#     names, manifests, storage, credentials, and operator details stay internal
 #
 # A live restore (real backup round-trip) belongs in the dual-cluster e2e suite
 # (tracked as a follow-up — bootstrapFrom / S3 wiring / Ready reconciliation are
@@ -92,10 +93,27 @@ run_restore() {
 
 result_field() { jq -r "$1" "${RESULT}"; }
 
+assert_restore_contract() {
+  jq -e '
+    .data
+    | keys == [
+        "contentType", "dryRun", "namespace", "pointInTimeRecovery",
+        "provisioned", "restored", "state"
+      ]
+  ' "${RESULT}" >/dev/null
+  jq -e '.data.pointInTimeRecovery | keys == ["enabled", "targetRecoveryTime"]' \
+    "${RESULT}" >/dev/null
+}
+
+assert_error_reason() {
+  [ "$(result_field '.status')" = "error" ]
+  [ "$(result_field '.reason')" = "$1" ]
+}
+
 @test "restore requires confirm=true to apply" {
   run_restore DRY_RUN=false CONFIRM=false
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
+  assert_error_reason INVALID_REQUEST
   [[ "$(result_field '.message')" == *"confirm=true is required"* ]]
 }
 
@@ -103,29 +121,31 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=1
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"already exists"* ]]
+  assert_error_reason RESTORE_FAILED
+  [ "$(result_field '.message')" = "restore target is unavailable" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb-restored"* ]]
 }
 
 @test "restore rejects a malformed target_time" {
   run_restore RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi TARGET_TIME="not-a-timestamp"
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
+  assert_error_reason INVALID_REQUEST
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
 @test "restore rejects an out-of-range target_time" {
   run_restore RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi TARGET_TIME="2026-99-99T25:61:61Z"
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
+  assert_error_reason INVALID_REQUEST
   [[ "$(result_field '.message')" == *"RFC3339"* ]]
 }
 
 @test "restore rejects a malformed context" {
   run_restore RESTORE_IMAGE=mariadb:11.4 K8S_CONTEXT="bad context!"
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"context"* ]]
+  assert_error_reason INTERNAL_ERROR
+  [ "$(result_field '.message')" = "database service is unavailable" ]
+  [[ "$(cat "${RESULT}")" != *"bad context"* ]]
 }
 
 @test "restore accepts a well-formed context" {
@@ -134,27 +154,27 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ "$(result_field '.status')" = "success" ]
 }
 
-@test "restore dry_run renders the manifest without confirm or apply" {
+@test "restore dry_run returns a sanitized plan without confirm, manifest, or apply" {
   run_restore DRY_RUN=true CONFIRM=false RESTORE_TARGET=mariadb-restored RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.dryRun')" = "true" ]
+  [ "$(result_field '.data.provisioned')" = "false" ]
   [ "$(result_field '.data.restored')" = "false" ]
+  [ "$(result_field '.data.state')" = "PLANNED" ]
+  assert_restore_contract
   [ ! -f "${CAPTURE}" ]
-  [ "$(result_field '.data.manifest | fromjson | .kind')" = "MariaDB" ]
-  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.backupContentType')" = "Physical" ]
 }
 
-@test "restore resolves internals and returns a connection endpoint" {
+@test "restore resolves internals but returns only sanitized completion state" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     MOCK_SOURCES=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
   [ "$(result_field '.data.restored')" = "true" ]
+  [ "$(result_field '.data.provisioned')" = "true" ]
+  [ "$(result_field '.data.state')" = "COMPLETED" ]
   [ "$(result_field '.data.pointInTimeRecovery.enabled')" = "false" ]
-
-  [ "$(result_field '.data.connection.host')" = "mariadb-restored-primary.mariadb-bg.svc.cluster.local" ]
-  [ "$(result_field '.data.connection.port')" = "3306" ]
-  [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
+  assert_restore_contract
 
   [ "$(jq -r '.spec.bootstrapFrom.backupContentType' "${CAPTURE}")" = "Physical" ]
   [ "$(jq -r '.spec.bootstrapFrom.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-bg" ]
@@ -188,11 +208,13 @@ EOF
 }
 
 @test "restore accepts a URL-form S3 endpoint (scheme allowed)" {
-  run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=0 \
     BACKUP_ENDPOINT="http://minio.kind-b.test:30080"
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
-  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" = "minio.kind-b.test:30080" ]
+  assert_restore_contract
+  [ "$(jq -r '.spec.bootstrapFrom.s3.endpoint' "${CAPTURE}")" = "minio.kind-b.test:30080" ]
 }
 
 @test "restore with target_time injects point-in-time recovery" {
@@ -204,55 +226,63 @@ EOF
   [ "$(jq -r '.spec.bootstrapFrom.targetRecoveryTime' "${CAPTURE}")" = "2026-06-14T03:21:00Z" ]
 }
 
-@test "restore auto-generates a target name when omitted" {
-  run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi
+@test "restore auto-generates a target name internally without disclosing it" {
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    MOCK_TARGET_EXISTS=0
   [ "$status" -eq 0 ]
   local target
-  target="$(result_field '.data.target')"
+  target="$(jq -r '.metadata.name' "${CAPTURE}")"
   [[ "$target" =~ ^mariadb-bg-restore-[0-9]+$ ]]
-  [ "$(result_field '.data.connection.host')" = "${target}-primary.mariadb-bg.svc.cluster.local" ]
+  assert_restore_contract
+  [[ "$(cat "${RESULT}")" != *"${target}"* ]]
 }
 
 @test "restore derives image and storage from the auto-detected source" {
-  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     MOCK_SOURCES=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.source')" = "mariadb-green" ]
-  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
-  [ "$(result_field '.data.manifest | fromjson | .spec.storage.size')" = "5Gi" ]
+  assert_restore_contract
+  [ "$(jq -r '.spec.image' "${CAPTURE}")" = "mariadb:10.11" ]
+  [ "$(jq -r '.spec.storage.size' "${CAPTURE}")" = "5Gi" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb-green"* ]]
+  [[ "$(cat "${RESULT}")" != *"mariadb:10.11"* ]]
 }
 
 @test "restore fails when the source is gone and no version can be derived" {
   run_restore DRY_RUN=true   # MOCK_SOURCES empty → no source found
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"version"* ]]
+  assert_error_reason RESTORE_CAPABILITY_UNAVAILABLE
+  [ "$(result_field '.message')" = "restore configuration is unavailable" ]
 }
 
 @test "restore resolves the version when several instances share it (no source needed)" {
   # Several instances share a version, so `image` derives from the scan — but no
   # single source means storage can't be derived, so it is passed explicitly.
-  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored STORAGE_SIZE=1Gi \
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored STORAGE_SIZE=1Gi \
     MOCK_SOURCES=$'mariadb-green\nmariadb-bg-restore-1' MOCK_SOURCE_IMAGES="mariadb:10.11"
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
-  [ "$(result_field '.data.source')" = "null" ]
+  assert_restore_contract
+  [ "$(jq -r '.spec.image' "${CAPTURE}")" = "mariadb:10.11" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb:10.11"* ]]
 }
 
 @test "restore fails on mixed versions without source/image" {
   run_restore DRY_RUN=true \
     MOCK_SOURCES=$'mariadb-blue\nmariadb-green' MOCK_SOURCE_IMAGES=$'mariadb:10.11\nmariadb:10.6'
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"multiple MariaDB versions"* ]]
+  assert_error_reason DATABASE_CONFIGURATION_AMBIGUOUS
+  [ "$(result_field '.message')" = "restore configuration is ambiguous" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb-blue"* ]]
+  [[ "$(cat "${RESULT}")" != *"mariadb:10.11"* ]]
 }
 
 @test "restore uses an explicit source override" {
-  run_restore DRY_RUN=true RESTORE_TARGET=mariadb-restored \
+  run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_SOURCE=mariadb-green MOCK_SOURCE_IMAGE=mariadb:10.11 MOCK_SOURCE_STORAGE=5Gi
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.source')" = "mariadb-green" ]
-  [ "$(result_field '.data.image')" = "mariadb:10.11" ]
+  assert_restore_contract
+  [ "$(jq -r '.spec.image' "${CAPTURE}")" = "mariadb:10.11" ]
+  [[ "$(cat "${RESULT}")" != *"mariadb-green"* ]]
 }
 
 @test "restore never silently defaults storage when the source is gone" {
@@ -260,21 +290,22 @@ EOF
   # fail rather than under-provision the PVC and truncate the restored data.
   run_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4   # MOCK_SOURCES empty
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"storage size"* ]]
+  assert_error_reason RESTORE_CAPABILITY_UNAVAILABLE
+  [ "$(result_field '.message')" = "restore configuration is unavailable" ]
 }
 
 @test "restore returns a partial result (not lost) when Ready wait times out" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_TARGET=mariadb-restored \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_TARGET_EXISTS=0 MOCK_WAIT_FAIL=1
   [ "$status" -ne 0 ]
-  [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"did not become Ready"* ]]
-  # The instance was applied, so the result still carries how to reach it.
+  assert_error_reason RESTORE_TIMEOUT
+  [ "$(result_field '.message')" = "database restore is still pending" ]
+  # The instance was applied, so the sanitized result preserves its state.
   [ -f "${CAPTURE}" ]
-  [ "$(result_field '.data.restored')" = "true" ]
-  [ "$(result_field '.data.connection.host')" = "mariadb-restored-primary.mariadb-bg.svc.cluster.local" ]
-  [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
+  [ "$(result_field '.data.provisioned')" = "true" ]
+  [ "$(result_field '.data.restored')" = "false" ]
+  [ "$(result_field '.data.state')" = "PENDING" ]
+  assert_restore_contract
 }
 
 @test "restore with wait_timeout=0 applies without waiting for Ready" {
@@ -282,6 +313,30 @@ EOF
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi WAIT_TIMEOUT=0 \
     MOCK_TARGET_EXISTS=0 MOCK_WAIT_FAIL=1   # wait would fail, but it must not run
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.restored')" = "true" ]
+  [ "$(result_field '.data.provisioned')" = "true" ]
+  [ "$(result_field '.data.restored')" = "false" ]
+  [ "$(result_field '.data.state')" = "REQUESTED" ]
+  assert_restore_contract
   [ -f "${CAPTURE}" ]
+}
+
+@test "restore never exposes storage, Secret, generated resource, or manifest details" {
+  run_restore DRY_RUN=true RESTORE_TARGET=internal-restore-target \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    BACKUP_ENDPOINT="https://storage.internal.invalid:9443" \
+    BACKUP_BUCKET="private-backup-bucket" BACKUP_PREFIX="tenant/private/database" \
+    BACKUP_REGION="private-region-1" \
+    BACKUP_ACCESS_SECRET="private-access-secret" BACKUP_ACCESS_KEY="private-access-key" \
+    BACKUP_SECRET_ACCESS_SECRET="private-secret-access-secret" BACKUP_SECRET_KEY="private-secret-key"
+  [ "$status" -eq 0 ]
+  assert_restore_contract
+  local public_output="$(cat "${RESULT}")${output}"
+  local marker
+  for marker in \
+    internal-restore-target storage.internal.invalid private-backup-bucket \
+    tenant/private/database private-region-1 private-access-secret \
+    private-access-key private-secret-access-secret private-secret-key \
+    bootstrapFrom secretKeyRef apiVersion PersistentVolumeClaim Job manifest; do
+    [[ "$public_output" != *"$marker"* ]]
+  done
 }

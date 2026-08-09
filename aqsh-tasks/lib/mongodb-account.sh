@@ -61,6 +61,25 @@ extract_secret_value() {
   printf '%s' "$encoded" | base64 -d
 }
 
+# ---------------------------------------------------------------------------
+# _mongo_account_headless_service <namespace> <sts_name>
+# A StatefulSet's pod DNS is <pod>.<spec.serviceName>.<ns>.svc.cluster.local
+# — spec.serviceName is NOT guaranteed to equal the StatefulSet's own name
+# (e.g. Bitnami's chart commonly names it "<release>-headless"). Read it back
+# from the STS spec instead of assuming they match. Fails soft (empty
+# output) so callers fall back to sts_name unchanged, same convention as
+# _recovery_detect_headless_service in mongodb-recovery.sh.
+# ---------------------------------------------------------------------------
+_mongo_account_headless_service() {
+  local namespace="${1:?namespace is required}"
+  local sts_name="${2:?sts_name is required}"
+  local svc
+  svc=$(kubectl -n "$namespace" get statefulset "$sts_name" -o jsonpath='{.spec.serviceName}' 2>/dev/null) || return 1
+  [[ -z "$svc" ]] && return 1
+  printf '%s' "$svc"
+  return 0
+}
+
 mongo_account_set_connection_from_root_secret() {
   local namespace="${1:?namespace is required}"
   local sts_name="${2:-mongodb}"
@@ -68,16 +87,31 @@ mongo_account_set_connection_from_root_secret() {
   local user_key="${4:-MONGO_ROOT_USER}"
   local pass_key="${5:-MONGO_ROOT_PASS}"
 
-  local root_user root_pass seed_host primary_out primary_host primary_port
+  local root_user root_pass seed_host primary_out primary_host primary_port headless_svc
   root_user=$(extract_secret_value "$namespace" "$cred_secret" "$user_key") || return 1
   root_pass=$(extract_secret_value "$namespace" "$cred_secret" "$pass_key") || return 1
 
-  seed_host="${sts_name}-0.${sts_name}.${namespace}.svc.cluster.local"
+  # Same 3-tier resolution as recovery_resolve_headless_service in
+  # mongodb-recovery.sh (which account scripts don't source): internal
+  # config -> live spec.serviceName auto-detect -> sts_name itself.
+  headless_svc="${MONGO_HEADLESS_SVC_DEFAULT:-}"
+  if [[ -z "$headless_svc" ]]; then
+    headless_svc=$(_mongo_account_headless_service "$namespace" "$sts_name") || headless_svc="$sts_name"
+  fi
+  [[ "$headless_svc" != "$sts_name" ]] && \
+    log_info "mongo_account_set_connection_from_root_secret" \
+      "headless service resolved: ${headless_svc} (sts=${sts_name})"
+  seed_host="${sts_name}-0.${headless_svc}.${namespace}.svc.cluster.local"
+  log_debug "mongo_account_set_connection_from_root_secret" "resolving primary via seed: ${seed_host}"
   primary_out=$(mongo_resolve_primary "$seed_host" "27017" "$root_user" "$root_pass" "admin") || return 1
   primary_host=$(echo "$primary_out" | sed -n '1p')
   primary_port=$(echo "$primary_out" | sed -n '2p')
 
-  [[ -n "$primary_host" ]] || return 1
+  if [[ -z "$primary_host" ]]; then
+    log_error "mongo_account_set_connection_from_root_secret" \
+      "mongo_resolve_primary returned empty host for seed ${seed_host}"
+    return 1
+  fi
 
   export MONGO_HOST="$primary_host"
   export MONGO_PORT="${primary_port:-27017}"

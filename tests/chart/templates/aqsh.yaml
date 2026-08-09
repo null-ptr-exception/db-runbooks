@@ -1,4 +1,7 @@
 {{- if .Values.aqsh.enabled }}
+{{- if and .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
+{{- fail "aqsh.pgpKey and aqsh.pgpSecretName are mutually exclusive — set exactly one" }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -28,11 +31,19 @@ spec:
             - sh
             - -c
             - until redis-cli -h redis -p 6379 ping | grep -q PONG; do sleep 1; done
-      {{- if .Values.aqsh.config }}
+      {{- if or .Values.aqsh.config .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
       volumes:
+        {{- if .Values.aqsh.config }}
         - name: aqsh-config
           configMap:
             name: aqsh-config
+        {{- end }}
+        {{- if or .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
+        - name: aqsh-pgp
+          secret:
+            secretName: {{ .Values.aqsh.pgpSecretName | default "aqsh-pgp" }}
+            defaultMode: 0400
+        {{- end }}
       {{- end }}
       containers:
         - name: aqsh
@@ -53,11 +64,18 @@ spec:
               value: "true"
             - name: AQSH_WORKER_QUEUES
               value: {{ .Values.aqsh.workerQueues }}
-          {{- if .Values.aqsh.config }}
+          {{- if or .Values.aqsh.config .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
           volumeMounts:
+            {{- if .Values.aqsh.config }}
             - name: aqsh-config
               mountPath: /etc/aqsh/config
               readOnly: true
+            {{- end }}
+            {{- if or .Values.aqsh.pgpKey .Values.aqsh.pgpSecretName }}
+            - name: aqsh-pgp
+              mountPath: /etc/aqsh/pgp
+              readOnly: true
+            {{- end }}
           {{- end }}
           ports:
             - containerPort: 8080
@@ -97,6 +115,22 @@ data:
   {{ $filename }}: |
     {{ $content | nindent 4 }}
   {{- end }}
+{{- end }}
+{{- if .Values.aqsh.pgpKey }}
+---
+# Deployment PGP private key for the secrets/* task family (mounted at
+# /etc/aqsh/pgp/private.asc — see SECRETS_PGP_KEY_PATH_DEFAULT). The suites
+# generate a throwaway keypair in setup_suite.bash and inject it via
+# runtime-values.yaml; a real deployment provisions this Secret out-of-band.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aqsh-pgp
+  namespace: {{ .Release.Namespace }}
+type: Opaque
+stringData:
+  private.asc: |
+    {{ .Values.aqsh.pgpKey | nindent 4 }}
 {{- end }}
 ---
 apiVersion: v1

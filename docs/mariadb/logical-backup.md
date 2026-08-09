@@ -1,38 +1,97 @@
 # MariaDB Logical Backup AQSH Runbook
 
-`logical-backup` creates a one-shot mariadb-operator `Backup` CR. The operator
-runs `mariadb-dump` and writes the logical artifact to the configured S3/MinIO
-bucket. Restore these artifacts with `logical-restore`; they are not physical
-`restore` inputs.
+`logical-backup` creates a logical backup for the managed MariaDB in a
+namespace. Restore it with the logical restore task; it is not a physical
+`restore` input.
 
-## Operator compatibility
+**The namespace is the database identity.** Backup location, credentials,
+workload selection, and platform compatibility are resolved internally and are
+not caller inputs.
 
-The task supports both mariadb-operator API generations and fails closed when
-the generation cannot be determined:
+## Behavior
 
-| Operator group | S3 layout |
-|---|---|
-| `k8s.mariadb.com` | `mariadb-logical/<namespace>` via `spec.storage.s3.prefix` |
-| `mariadb*.mmontes.io` | Bucket root; the legacy v0.0.24 S3 schema has no `prefix` field |
+| Step | Detail |
+|------|--------|
+| Plan (default) | With `dry_run=true`, returns a sanitized preview without creating a backup. Internal manifests and backend configuration are never returned. |
+| Guard | To create a backup, set `dry_run=false` and `confirm=true`. |
+| Validate | Confirms that the namespace is eligible for logical backup. Platform-resolution failures use a stable public reason and generic guidance. |
+| Create | Starts one logical backup and returns its public name and state. |
+| Wait | Waits for completion up to `wait_timeout`. Set it to `0` to return after creation. A timeout returns the last public state and a generic warning. |
 
-The legacy manifest intentionally omits `spec.storage.s3.prefix`; including it
-causes strict decoding to reject the entire `Backup` object. Consequently, the
-legacy operator cannot provide prefix-based namespace isolation inside a shared
-bucket. Deployments that require storage-level isolation should configure a
-dedicated bucket or credentials boundary for the legacy operator. AQSH reports
-`backup.prefix=null`, `prefixSupported=false`, and
-`storageLayout="bucket-root"` on this path instead of claiming that the
-namespace prefix was applied.
+## Inputs
 
-## Inputs and behavior
+The only required input is `namespace`.
 
-- `namespace` is required and identifies the database namespace.
-- `mariadb` is optional when the namespace contains exactly one MariaDB.
-- `dry_run=true` renders the generation-specific manifest without applying it.
-- Applying requires `dry_run=false` and `confirm=true`.
-- `wait_timeout` defaults to `10m`; set it to `0` to return after creating the
-  Backup CR without waiting for `condition=Complete`.
-- The source MariaDB must be `Ready` before the Backup CR is created.
+| Input | Required | Default | Notes |
+|-------|:--:|---------|-------|
+| `namespace` | ✓ | — | Database namespace to back up. |
+| `dry_run` | | `true` | Preview only. Set to `false` with `confirm=true` to create the backup. |
+| `wait_timeout` | | `10m` | Completion wait. `0` returns immediately after creation. |
+| `confirm` | | `false` | Must be `true` when `dry_run=false`. |
 
-S3 endpoint, bucket, region, and credential references are deployment
-configuration rather than task inputs.
+The compatibility `backup` task accepts only `namespace`; it exposes the same
+sanitized storage boundary and starts the backup immediately.
+
+## Logical restore
+
+`logical-restore` provisions a new database from a logical backup. Its public
+inputs are limited to caller decisions:
+
+| Input | Required | Default | Notes |
+|-------|:--:|---------|-------|
+| `namespace` | ✓ | — | Database namespace whose logical backup will be restored. |
+| `backup` | | latest | Logical backup name. When omitted, the platform selects the latest available backup when applying the restore. |
+| `dry_run` | | `true` | Return a sanitized plan. No manifest or platform resource name is returned. |
+| `wait_timeout` | | `10m` | Completion wait. `0` returns after the restore request is accepted. |
+| `confirm` | | `false` | Must be `true` when `dry_run=false`. |
+
+The public result is limited to `namespace`, `contentType`, `state`, `dryRun`,
+`provisioned`, and `restored`. The selected backup and generated database
+resource stay internal. State and progress flags have the following meanings:
+
+| Outcome | `state` | `provisioned` | `restored` | `dryRun` |
+|---------|---------|:-------------:|:----------:|:--------:|
+| Sanitized plan | `PLANNED` | `false` | `false` | `true` |
+| Request accepted without waiting | `REQUESTED` | `true` | `false` | `false` |
+| Wait elapsed while restore is still running | `PENDING` | `true` | `false` | `false` |
+| Restore completed | `COMPLETED` | `true` | `true` | `false` |
+
+Errors use the stable top-level `reason` contract. When progress data is
+returned, it uses only this sanitized shape; invalid public inputs may identify
+the caller-provided field. Neither success, dry-run, nor error responses expose
+a rendered manifest, generated target, internal source or image, credential or
+Secret reference, operator/Kubernetes detail, or raw diagnostic output.
+
+## Examples
+
+Preview the operation:
+
+```bash
+curl -sX POST "$MARIADB_AQSH_URL/tasks/logical-backup" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{ "namespace": "mariadb-1" }'
+```
+
+Create the backup:
+
+```bash
+curl -sX POST "$MARIADB_AQSH_URL/tasks/logical-backup" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{ "namespace": "mariadb-1", "dry_run": "false", "confirm": "true" }'
+```
+
+## Result
+
+```json
+{
+  "namespace": "mariadb-1",
+  "backupName": "logical-20260630122000",
+  "contentType": "Logical",
+  "state": "COMPLETED",
+  "created": true,
+  "dryRun": false
+}
+```
+
+Results never contain backend locations, credential references, rendered
+manifests, or platform resource details.

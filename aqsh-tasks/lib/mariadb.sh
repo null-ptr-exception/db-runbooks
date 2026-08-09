@@ -135,6 +135,36 @@ mariadb_list_pods() {
   printf '%s\n' "$pods" | sed '/^$/d' | sort
 }
 
+# Exact workload membership for callers that must not use the broad label/name
+# fallback in mariadb_list_pods. Resolve the replica count from the selected CR
+# first, then its same-named StatefulSet for compatible/legacy deployments,
+# then intersect the generated ordinal names against _k8s_sts_owned_pod_names
+# (live ownerReferences, lib/k8s.sh — always sourced ahead of this file by
+# every caller). Ordinal names alone only prove a *pattern* match; a Pod that
+# merely happens to carry the expected name during a recreation race is not
+# necessarily owned by this StatefulSet, and callers (pods/delete in
+# particular) rely on this list as their sole membership gate against an
+# otherwise namespace-wide unscoped `delete` RBAC grant — see
+# docs/mariadb/pods.md. An owned Pod that hasn't been created yet (e.g. a
+# scale-up in progress) is silently absent from the result, same as
+# pods_status_json's own "no matching live pod" contract; that is not a
+# membership failure. Returns 1 without output only when the replica count
+# or the live ownership listing itself cannot be established.
+mariadb_list_member_pods() {
+  local replicas
+
+  replicas="$(mariadb_cr_replicas || true)"
+  if [[ -z "$replicas" ]]; then
+    replicas="$(mariadb_sts_replicas || true)"
+  fi
+  [[ "$replicas" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  local owned
+  owned="$(_k8s_sts_owned_pod_names "$MARIADB_NAME")" || return 1
+
+  mariadb_list_pods "$replicas" | grep -Fxf <(printf '%s\n' "$owned") || true
+}
+
 mariadb_exec() {
   local pod="${1:?pod is required}"
   shift

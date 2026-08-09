@@ -28,6 +28,16 @@ aqsh:
   tasksConfig: /etc/aqsh/task-mariadb.yaml
   workerQueues: mariadb
   config: {}
+  # PGP private key for the secrets/* task family — exactly one of:
+  #   pgpKey:        ASCII-armored key content; the chart renders it into
+  #                  Secret aqsh-pgp (test suites inject a per-run throwaway
+  #                  key via runtime-values.yaml — see tests/*/setup_suite.bash)
+  #   pgpSecretName: name of a pre-created Secret (key `private.asc`),
+  #                  provisioned out-of-band — the production path, key
+  #                  material never transits helm values/release storage
+  # Both empty = no mount; secrets/plan|apply|pubkey fail PGP_KEY_UNAVAILABLE.
+  pgpKey: ""
+  pgpSecretName: ""
   authProxy:
     image: ghcr.io/rophy/kube-auth-proxy:0.4.1
     imagePullPolicy: IfNotPresent
@@ -48,6 +58,15 @@ mariadb:
   # required by the switch-primary e2e. Default 1 = standalone.
   replicas: 1
   rootPassword: mariadb-test-pass
+  objectStorage:
+    enabled: false
+    secretName: mariadb-object-storage
+    endpoint: http://minio.kind-b.test:30080
+    bucket: db-backups
+    region: us-east-1
+    prefix: ""
+    accessKey: minioadmin
+    secretKey: minioadmin-changeme-prod
   storage: 1Gi
   resources:
     requests:
@@ -59,6 +78,28 @@ mariadb:
 # --- mariadb RBAC ---
 mariadbRbac:
   enabled: false
+  # Additional database namespaces served by the same AQSH deployment.
+  namespaces: []
+
+# --- namespace-local MariaDB gateway fixture ---
+# The Envoy workload and Service are installed with the official Istio gateway
+# chart in the MariaDB namespace. These values render the matching Gateway CR,
+# TCP VirtualService, and an in-cluster client used by the E2E tests.
+databaseGateway:
+  enabled: false
+  name: database-gateway
+  hosts:
+    - "*.db.test"
+  ports:
+    readWrite: 3306
+    readOnly: 3307
+  destinations:
+    readWriteService: mariadb-primary
+    readOnlyService: mariadb-secondary
+    port: 3306
+  testClient:
+    enabled: false
+    image: mariadb:10.6
 
 # --- mongodb ---
 mongodb:
@@ -84,7 +125,9 @@ mongodb:
   reconfigAuditConfigmap: mongodb-reconfig-audit
   # S3 credentials secret the pbm/* tasks read in the DB namespace (keys
   # access-key-id / secret-access-key — same shape the MariaDB operator flow
-  # uses). Pairs with PBM_S3_CREDENTIALS_SECRET_DEFAULT in mongodb.env.
+  # uses). Pairs with PBM_S3_CREDENTIALS_SECRET_DEFAULT in mongodb.env AND
+  # with SECRETS_PROTECTED_NAMES_DEFAULT (the secrets/* family must refuse
+  # to write it) — rename all three together.
   backupSecret: minio
   # The CronJob pbm/schedule manages in the DB namespace. Pairs with
   # PBM_SCHEDULE_CRONJOB_DEFAULT in mongodb.env.

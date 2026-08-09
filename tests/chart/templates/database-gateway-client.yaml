@@ -1,0 +1,29 @@
+{{- if and .Values.databaseGateway.enabled .Values.databaseGateway.testClient.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: database-gateway-client
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: database-gateway-client
+  template:
+    metadata:
+      labels:
+        app: database-gateway-client
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: mariadb-client
+          image: {{ .Values.databaseGateway.testClient.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["sleep", "infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+{{- end }}

@@ -26,6 +26,10 @@
 # Layers"); detection reads the real --dbpath this profile's mongod was
 # started with directly, no per-call override needed.
 #
+# Also covers sanity-check's own PVC-mount-path auto-detect (last test
+# below): it reuses this same layout to prove sanity-check.sh's Layer 1
+# disk-usage check no longer assumes /data/db.
+#
 # Reuses mongo-1's own object names (mongodb / mongodb-credentials /
 # mongodb-recovery-config) but in namespace mongo-bitnami, so the existing
 # aqsh-mongo-manager ClusterRole's resourceNames already match by name —
@@ -520,4 +524,32 @@ _wipe_target() {
   kubectl --context "$CTX_A" -n "$BNS" wait pod "$target" \
     --for=condition=Ready --timeout=180s >/dev/null 2>&1 || true
   _wait_for_rs_healthy "$BNS" "$target" "$CTX_A" 180
+}
+
+# ── sanity-check: PVC path auto-detect (recovery_resolve_data_paths reuse) ───
+
+@test "sanity-check auto-detects the Bitnami PVC mount path (no fallback to /data/db)" {
+  http_post "${AQSH_URL}/tasks/sanity-check" "{\"namespace\":\"${BNS}\"}"
+  assert_equal "$HTTP_CODE" "202"
+
+  local task_id
+  task_id=$(echo "$HTTP_BODY" | jq -r '.id')
+  wait_for_task "$AQSH_URL" "$task_id" 120
+
+  local result status fail_count pass_count
+  result=$(echo "$TASK_RESPONSE" | jq -r '.result.data // empty')
+  status=$(echo "$result" | jq -r '.status // "unknown"')
+  fail_count=$(echo "$result" | jq -r '.fail // "missing"')
+  pass_count=$(echo "$result" | jq -r '.pass // 0')
+  echo "sanity result (bitnami, /bitnami/mongodb layout): ${result}" >&2
+
+  # This StatefulSet has no /data/db path at all — its PVC is mounted at
+  # /bitnami/mongodb, dbpath nested two levels under that (setup_file above).
+  # sanity-check.sh now calls recovery_resolve_data_paths to ask mongod for
+  # its real dbPath before running Layer 1's disk-usage check; falling
+  # through to the historical /data/db literal here would make `df` fail
+  # inside the pod and surface as a fail/warn instead of a clean pass.
+  assert_equal "$fail_count" "0"
+  assert [ "$status" != "critical" ]
+  assert [ "$pass_count" -gt 0 ]
 }

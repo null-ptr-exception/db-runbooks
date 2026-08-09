@@ -3,12 +3,13 @@
 # Contract tests for mariadb/physical-backup.sh.
 #
 # Run the script directly against a mock `kubectl` — no cluster, no MinIO, no
-# operator. They lock down the user-oriented surface and the PhysicalBackup CR
-# the task renders:
+# operator. They lock down the sanitized user-oriented surface and, separately,
+# the internal PhysicalBackup CR applied through kubectl:
 #   - namespace is the only required input; the S3 location + credentials are
 #     internal (resolved via mdbt_resolve_backup_location), not task inputs
-#   - the instance to back up is auto-detected from the namespace (or given)
-#   - confirm=true is mandatory to apply; dry_run (default) only renders
+#   - the instance to back up is auto-detected from the namespace
+#   - confirm=true is mandatory to apply; dry_run (default) returns only a
+#     high-level plan result and never exposes the rendered manifest
 #   - the source must exist and be Ready before a backup is created
 #   - wait_timeout doubles as the wait switch ("0" = don't wait); a Complete-wait
 #     timeout still returns a partial result instead of losing it
@@ -81,29 +82,61 @@ run_backup() {
 
 result_field() { jq -r "$1" "${RESULT}"; }
 
+assert_public_backup_data() {
+  jq -e '
+    (.data | keys) ==
+    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+  ' "${RESULT}" >/dev/null
+}
+
+assert_response_hides() {
+  local combined marker
+  combined="$(cat "${RESULT}")"$'\n'"${output:-}"
+  for marker in "$@"; do
+    [[ "$combined" != *"$marker"* ]]
+  done
+}
+
 @test "physical-backup requires confirm=true to apply" {
   run_backup DRY_RUN=false CONFIRM=false MARIADB_NAME=mariadb
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
+  [ "$(result_field '.reason')" = "INVALID_REQUEST" ]
   [[ "$(result_field '.message')" == *"confirm=true is required"* ]]
 }
 
-@test "physical-backup dry_run renders the manifest without confirm or apply" {
-  run_backup DRY_RUN=true CONFIRM=false MARIADB_NAME=mariadb
+@test "physical-backup dry_run returns only the sanitized plan summary" {
+  run_backup DRY_RUN=true CONFIRM=false MARIADB_NAME=mariadb \
+    BACKUP_ENDPOINT=https://private-storage.example.invalid \
+    BACKUP_BUCKET=private-bucket-marker \
+    BACKUP_PREFIX=private/prefix-marker \
+    BACKUP_REGION=private-region-marker \
+    BACKUP_ACCESS_SECRET=private-access-secret \
+    BACKUP_ACCESS_KEY=private-access-key \
+    BACKUP_SECRET_ACCESS_SECRET=private-secret-secret \
+    BACKUP_SECRET_KEY=private-secret-key
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
   [ "$(result_field '.data.dryRun')" = "true" ]
   [ "$(result_field '.data.created')" = "false" ]
+  [ "$(result_field '.data.state')" = "PLANNED" ]
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  assert_public_backup_data
   [ ! -f "${CAPTURE}" ]
-  [ "$(result_field '.data.manifest | fromjson | .kind')" = "PhysicalBackup" ]
+  assert_response_hides \
+    private-storage.example.invalid private-bucket-marker private/prefix-marker \
+    private-region-marker private-access-secret private-access-key \
+    private-secret-secret private-secret-key manifest plan credentialsRef \
+    PhysicalBackup k8s.mariadb.com
 }
 
 @test "physical-backup resolves internals and writes to the shared convention" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb
   [ "$status" -eq 0 ]
+  assert_public_backup_data
   [ "$(result_field '.data.created')" = "true" ]
-  [ "$(result_field '.data.backup.contentType')" = "Physical" ]
-  [ "$(result_field '.data.restorableBy.task')" = "restore" ]
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  [ "$(result_field '.data.state')" = "COMPLETED" ]
   [ "$(jq -r '.kind' "${CAPTURE}")" = "PhysicalBackup" ]
   [ "$(jq -r '.spec.mariaDbRef.name' "${CAPTURE}")" = "mariadb" ]
   [ "$(jq -r '.spec.storage.s3.prefix' "${CAPTURE}")" = "mariadb/mariadb-1" ]
@@ -114,7 +147,8 @@ result_field() { jq -r "$1" "${RESULT}"; }
 @test "physical-backup auto-detects the single instance when omitted" {
   run_backup DRY_RUN=false CONFIRM=true MOCK_SOURCES=mariadb
   [ "$status" -eq 0 ]
-  [ "$(result_field '.data.mariadb')" = "mariadb" ]
+  assert_public_backup_data
+  [ "$(jq -r '.spec.mariaDbRef.name' "${CAPTURE}")" = "mariadb" ]
   [ "$(jq -r '.metadata.name' "${CAPTURE}")" != "null" ]
 }
 
@@ -122,57 +156,68 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_backup DRY_RUN=false CONFIRM=true MOCK_SOURCES=""
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"no MariaDB instance found"* ]]
+  [ "$(result_field '.reason')" = "DATABASE_NOT_FOUND" ]
+  [[ "$(result_field '.message')" == *"database not found"* ]]
 }
 
-@test "physical-backup fails (not guesses) when several instances exist and 'mariadb' is omitted" {
+@test "physical-backup fails without exposing candidates when several instances exist" {
   run_backup DRY_RUN=false CONFIRM=true MOCK_SOURCES=$'mariadb-a\nmariadb-b'
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"several MariaDB instances"* ]]
+  [ "$(result_field '.reason')" = "DATABASE_CONFIGURATION_AMBIGUOUS" ]
+  assert_response_hides mariadb-a mariadb-b
 }
 
 @test "physical-backup fails when the source is not Ready" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_READY=False
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"must be Ready"* ]]
+  [ "$(result_field '.reason')" = "DATABASE_NOT_READY" ]
 }
 
 @test "physical-backup fails when the source does not exist" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_FOUND=0
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"not found"* ]]
+  [ "$(result_field '.reason')" = "DATABASE_NOT_FOUND" ]
+  assert_response_hides mariadbs.k8s.mariadb.com
 }
 
-@test "physical-backup surfaces a real kubectl error instead of reporting not-found" {
+@test "physical-backup maps a kubectl failure to a stable public reason" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_GET_ERR=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"failed to query source MariaDB"* ]]
-  [[ "$(result_field '.message')" != *"not found"* ]]
+  [ "$(result_field '.reason')" = "BACKUP_CONFIGURATION_UNAVAILABLE" ]
+  assert_response_hides "Unable to connect" "dial tcp" kubectl k8s.mariadb.com
 }
 
-@test "physical-backup rejects an invalid target" {
-  run_backup DRY_RUN=true MARIADB_NAME=mariadb BACKUP_TARGET=Bogus
+@test "physical-backup hides invalid platform storage settings" {
+  run_backup DRY_RUN=true MARIADB_NAME=mariadb \
+    BACKUP_ENDPOINT=https://private-storage.example.invalid \
+    BACKUP_ACCESS_SECRET=Invalid_Private_Secret
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"target"* ]]
+  [ "$(result_field '.reason')" = "BACKUP_CONFIGURATION_UNAVAILABLE" ]
+  assert_response_hides private-storage.example.invalid Invalid_Private_Secret \
+    backup_access_secret secretKeyRef Secret
 }
 
 @test "physical-backup returns a partial result (not lost) when the Complete wait times out" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_WAIT_FAIL=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.status')" = "error" ]
-  [[ "$(result_field '.message')" == *"did not Complete"* ]]
-  [ "$(result_field '.data.backup.contentType')" = "Physical" ]
+  [ "$(result_field '.reason')" = "BACKUP_TIMEOUT" ]
+  assert_public_backup_data
+  [ "$(result_field '.data.contentType')" = "Physical" ]
+  [ "$(result_field '.data.state')" = "PENDING" ]
 }
 
 @test "physical-backup with wait_timeout=0 applies without waiting" {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb WAIT_TIMEOUT=0 MOCK_WAIT_FAIL=1
   [ "$status" -eq 0 ]
+  assert_public_backup_data
   [ "$(result_field '.data.created')" = "true" ]
+  [ "$(result_field '.data.state')" = "REQUESTED" ]
 }
 
 @test "physical-backup resolves the S3 endpoint from deploy-time config" {

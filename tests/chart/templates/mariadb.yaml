@@ -1,4 +1,7 @@
 {{- if .Values.mariadb.enabled }}
+# Operator root password. This name (and "minio" below) is repeated in
+# SECRETS_PROTECTED_NAMES_DEFAULT (helmfile inline mariadb.env) so the
+# secrets/* family refuses to touch it — rename them together.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -26,6 +29,11 @@ metadata:
   name: mariadb
   namespace: {{ .Values.mariadb.namespace }}
 spec:
+{{- if .Values.mariadb.objectStorage.enabled }}
+  envFrom:
+    - secretRef:
+        name: {{ .Values.mariadb.objectStorage.secretName }}
+{{- end }}
   rootPasswordSecretKeyRef:
     name: mariadb
     key: password
@@ -41,6 +49,12 @@ spec:
       replPasswordSecretKeyRef:
         name: mariadb
         key: password
+  # Keep the operator-native role Services explicit: the namespace-local
+  # database gateway routes writes to the primary and reads to secondaries.
+  primaryService:
+    type: ClusterIP
+  secondaryService:
+    type: ClusterIP
 {{- end }}
 {{- if eq .Values.mariadb.operatorGroup "k8s.mariadb.com" }}
   storage:
@@ -72,5 +86,22 @@ spec:
     periodSeconds: 10
     timeoutSeconds: 10
     failureThreshold: 90
+{{- end }}
+{{- if .Values.mariadb.objectStorage.enabled }}
+---
+# Test-only workload contract consumed by AQSH. Values are generic fixtures;
+# production manifests should reference independently managed Secrets.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Values.mariadb.objectStorage.secretName }}
+  namespace: {{ .Values.mariadb.namespace }}
+stringData:
+  S3_URL: {{ .Values.mariadb.objectStorage.endpoint | quote }}
+  S3_BUCKET: {{ .Values.mariadb.objectStorage.bucket | quote }}
+  S3_BACKUP_REGION: {{ .Values.mariadb.objectStorage.region | quote }}
+  S3_SUBFOLDER: {{ required "mariadb.objectStorage.prefix is required when enabled" .Values.mariadb.objectStorage.prefix | quote }}
+  S3_ACCESS_KEY: {{ .Values.mariadb.objectStorage.accessKey | quote }}
+  S3_ACCESS_SECRET: {{ .Values.mariadb.objectStorage.secretKey | quote }}
 {{- end }}
 {{- end }}

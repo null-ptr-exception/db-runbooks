@@ -108,11 +108,57 @@ _task_result_data() {
   '
 }
 
+assert_backup_result_contract() {
+  local result="$1"
+  echo "$result" | jq -e '
+    (.data | keys) ==
+    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+  ' >/dev/null
+}
+
+assert_backup_result_hides_internals() {
+  local result="$1"
+  echo "$result" | jq -e '
+    [paths(scalars) as $p | ($p[-1] | tostring)]
+    | all(.[];
+          . != "manifest" and . != "plan" and . != "storage" and
+          . != "credentialsRef" and . != "sourcePod" and . != "operatorGroup" and
+          . != "apiVersion" and . != "conditions")
+  ' >/dev/null
+  [[ "$result" != *"Secret"* ]]
+  [[ "$result" != *"k8s.mariadb.com"* ]]
+  [[ "$result" != *"mariadb.mmontes.io"* ]]
+}
+
+assert_restore_result_contract() {
+  local result="$1"
+  echo "$result" | jq -e '
+    (.data | keys) ==
+    ["contentType", "dryRun", "namespace", "provisioned", "restored", "state"]
+  ' >/dev/null
+}
+
+assert_restore_result_hides_internals() {
+  local result="$1"
+  assert_backup_result_hides_internals "$result"
+  [[ "$result" != *"backupName"* ]]
+  [[ "$result" != *"backupRef"* ]]
+  [[ "$result" != *"connection"* ]]
+  [[ "$result" != *"target"* ]]
+}
+
 _matching_resource_names() {
   local resource="$1" pattern="$2"
   kubectl --context "$CTX_A" -n "$DB_NS" get "$resource" \
     -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
     | sed -n "/${pattern}/p"
+}
+
+_mariadb_names() {
+  kubectl --context "$CTX_A" -n "$DB_NS" get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | sed '/^$/d' \
+    | sort
 }
 
 _delete_mariadb_and_wait() {
@@ -201,19 +247,21 @@ _sql() {
     mariadb -u root -p"${password}" -N -B -e "$query"
 }
 
-@test "logical-backup dry-run renders a Backup without applying it" {
+@test "logical-backup dry-run returns a sanitized summary without applying" {
   _submit "logical-backup" \
     '{"namespace":"mariadb-1","dry_run":"true"}'
 
-  local result manifest backup_name
+  local result backup_name
   result="$(_task_result_data)"
-  manifest=$(echo "$result" | jq -c '.data.manifest | fromjson')
-  backup_name=$(echo "$manifest" | jq -r '.metadata.name')
+  backup_name=$(echo "$result" | jq -r '.data.backupName')
 
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.dryRun')" "true"
   assert_equal "$(echo "$result" | jq -r '.data.created')" "false"
-  assert_equal "$(echo "$manifest" | jq -r '.kind')" "Backup"
-  assert_equal "$(echo "$manifest" | jq -r '.spec.mariaDbRef.name')" "mariadb"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "PLANNED"
+  [[ -n "$backup_name" ]]
 
   run kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup_name"
   assert_failure
@@ -229,8 +277,11 @@ _sql() {
   result="$(_task_result_data)"
   backup_name=$(echo "$result" | jq -r '.data.backupName // empty')
 
+  assert_backup_result_contract "$result"
+  assert_backup_result_hides_internals "$result"
   assert_equal "$(echo "$result" | jq -r '.data.created')" "true"
-  assert_equal "$(echo "$result" | jq -r '.data.backup.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "COMPLETED"
   [[ -n "$backup_name" ]]
 
   kubectl --context "$CTX_A" -n "$DB_NS" get backup "$backup_name"
@@ -238,42 +289,55 @@ _sql() {
     -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')" "True"
 }
 
-@test "logical-restore dry-run renders bootstrapFrom.backupRef without applying it" {
-  local backup_name payload result manifest target
-  # A dry run must preserve the requested ref but must not require the Backup to
-  # exist, so this test remains independent of the confirmed-backup test.
+@test "logical-restore dry-run returns a sanitized plan without applying it" {
+  local backup_name payload result before_targets after_targets
+  # A dry run must accept the requested public input without requiring the
+  # Backup to exist, while keeping the rendered operator manifest private.
   backup_name="logical-e2e-dry-run-source"
   payload=$(jq -nc --arg backup "$backup_name" \
     '{namespace:"mariadb-1", backup:$backup, dry_run:"true"}')
 
+  before_targets="$(_mariadb_names)"
   _submit "logical-restore" "$payload"
   result="$(_task_result_data)"
-  manifest=$(echo "$result" | jq -c '.data.manifest | fromjson')
-  target=$(echo "$manifest" | jq -r '.metadata.name')
+  after_targets="$(_mariadb_names)"
 
+  assert_restore_result_contract "$result"
+  assert_restore_result_hides_internals "$result"
+  assert_equal "$(echo "$result" | jq -r '.data.namespace')" "$DB_NS"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "PLANNED"
   assert_equal "$(echo "$result" | jq -r '.data.dryRun')" "true"
+  assert_equal "$(echo "$result" | jq -r '.data.provisioned')" "false"
   assert_equal "$(echo "$result" | jq -r '.data.restored')" "false"
-  assert_equal "$(echo "$manifest" | jq -r '.kind')" "MariaDB"
-  assert_equal "$(echo "$manifest" | jq -r '.spec.bootstrapFrom.backupRef.name')" "$backup_name"
-
-  run kubectl --context "$CTX_A" -n "$DB_NS" get mariadb "$target"
-  assert_failure
+  assert_equal "$after_targets" "$before_targets"
 }
 
 @test "logical-restore reaches Ready and the restored data is queryable" {
-  local backup_name payload result target
+  local backup_name payload result target before_targets after_targets
   _ensure_complete_logical_backup
   backup_name="$LOGICAL_BACKUP_NAME"
   payload=$(jq -nc --arg backup "$backup_name" \
     '{namespace:"mariadb-1", backup:$backup, dry_run:"false", confirm:"true", wait_timeout:"10m"}')
 
+  before_targets="$(_mariadb_names)"
   _submit "logical-restore" "$payload"
   result="$(_task_result_data)"
-  target=$(echo "$result" | jq -r '.data.target // empty')
+  after_targets="$(_mariadb_names)"
+  target=$(comm -13 \
+    <(printf '%s\n' "$before_targets") \
+    <(printf '%s\n' "$after_targets"))
 
+  assert_restore_result_contract "$result"
+  assert_restore_result_hides_internals "$result"
+  assert_equal "$(echo "$result" | jq -r '.data.namespace')" "$DB_NS"
+  assert_equal "$(echo "$result" | jq -r '.data.contentType')" "Logical"
+  assert_equal "$(echo "$result" | jq -r '.data.state')" "COMPLETED"
+  assert_equal "$(echo "$result" | jq -r '.data.dryRun')" "false"
+  assert_equal "$(echo "$result" | jq -r '.data.provisioned')" "true"
   assert_equal "$(echo "$result" | jq -r '.data.restored')" "true"
-  assert_equal "$(echo "$result" | jq -r '.data.backup.ref')" "$backup_name"
   [[ -n "$target" ]]
+  [[ "$target" != *$'\n'* ]]
 
   kubectl --context "$CTX_A" -n "$DB_NS" wait \
     --for=condition=Ready "mariadb/${target}" --timeout=300s

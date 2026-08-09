@@ -4,8 +4,13 @@ set -euo pipefail
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 source "${LIB_DIR}/logging.sh"
 source "${LIB_DIR}/response.sh"
+source "${LIB_DIR}/k8s.sh"
 source "${LIB_DIR}/mongodb.sh"
 source "${LIB_DIR}/mongodb-account.sh"
+# secrets_is_protected reuse (below): a caller-supplied password_secret_name
+# must not be able to read out the root-credential Secret this same task
+# already trusts, or other protected machinery Secrets (PBM S3 creds, etc).
+source "${LIB_DIR}/secrets.sh"
 
 DB_NAMESPACE="${DB_NAMESPACE:?DB_NAMESPACE is required}"
 [[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
@@ -28,6 +33,13 @@ REQUEST_ID="${REQUEST_ID:-}"
 REQUESTED_BY="${REQUESTED_BY:-}"
 PASSWORD_DELIVERY_MODE="${PASSWORD_DELIVERY_MODE:-one_time_plaintext}"
 RECIPIENT_PGP_PUBKEY="${RECIPIENT_PGP_PUBKEY:-}"
+# Caller-chosen, fixed password: mirrors the MariaDB create-account
+# generate_password=false path (docs/mariadb/create-account.md), but reading
+# an existing Secret rather than deriving/writing one — this task never
+# creates or owns the password Secret, only consumes it. For a system/service
+# account whose password must never rotate through this API.
+PASSWORD_SECRET_NAME="${PASSWORD_SECRET_NAME:-}"
+PASSWORD_SECRET_KEY="${PASSWORD_SECRET_KEY:-password}"
 
 if [[ -z "$ACCOUNT_ROLES_JSON" ]]; then
   ACCOUNT_ROLES_JSON=$(jq -nc --arg db "$ACCOUNT_DATABASE" '[{"role":"readWrite","db":$db}]')
@@ -43,6 +55,21 @@ fi
 
 if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" && "$PASSWORD_DELIVERY_MODE" != "encrypted_payload" ]]; then
   fail_task "INVALID_INPUT" "unsupported password_delivery_mode"
+fi
+
+if [[ -n "$PASSWORD_SECRET_NAME" ]]; then
+  if [[ ! "$PASSWORD_SECRET_NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+    fail_task "INVALID_INPUT" "password_secret_name must be a valid Kubernetes Secret name"
+  fi
+  if [[ ! "$PASSWORD_SECRET_KEY" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    fail_task "INVALID_INPUT" "password_secret_key contains unsupported characters"
+  fi
+  # The caller already knows the password (they put it in the Secret), so
+  # delivery/encryption is meaningless here — require the defaults rather
+  # than silently ignoring an explicit, contradictory combination.
+  if [[ "$PASSWORD_DELIVERY_MODE" != "one_time_plaintext" || -n "$RECIPIENT_PGP_PUBKEY" ]]; then
+    fail_task "INVALID_INPUT" "password_delivery_mode/recipient_pgp_pubkey are not applicable when password_secret_name is set"
+  fi
 fi
 
 if bool_enabled "$DRY_RUN" && ! bool_enabled "$CONFIRM"; then
@@ -85,7 +112,19 @@ if [[ "$PASSWORD_DELIVERY_MODE" == "encrypted_payload" ]] && [[ -z "$RECIPIENT_P
   fail_task "INVALID_INPUT" "recipient_pgp_pubkey is required when password_delivery_mode=encrypted_payload"
 fi
 
-password="$(generate_password)"
+effective_delivery_mode="$PASSWORD_DELIVERY_MODE"
+if [[ -n "$PASSWORD_SECRET_NAME" ]]; then
+  export K8S_NAMESPACE="$DB_NAMESPACE"
+  if secrets_is_protected "$PASSWORD_SECRET_NAME"; then
+    fail_task "PROTECTED_SECRET" "refusing to read a protected Secret (root credentials or other managed machinery) as an account password source"
+  fi
+  if ! password="$(extract_secret_value "$DB_NAMESPACE" "$PASSWORD_SECRET_NAME" "$PASSWORD_SECRET_KEY")" || [[ -z "$password" ]]; then
+    fail_task "PASSWORD_SECRET_UNAVAILABLE" "cannot read password from Secret ${PASSWORD_SECRET_NAME}/${PASSWORD_SECRET_KEY}"
+  fi
+  effective_delivery_mode="caller_provided_secret"
+else
+  password="$(generate_password)"
+fi
 esc_db=$(_escape_js_string "$ACCOUNT_AUTH_DB")
 esc_user=$(_escape_js_string "$ACCOUNT_USERNAME")
 esc_pass=$(_escape_js_string "$password")
@@ -114,7 +153,7 @@ policy_set=$(jq -nc \
   --arg expires_at "$expires_at" \
   --arg initial_cred_fingerprint "$fingerprint" \
   --arg last_cred_fingerprint "$fingerprint" \
-  --arg password_delivery_mode "$PASSWORD_DELIVERY_MODE" \
+  --arg password_delivery_mode "$effective_delivery_mode" \
   --arg request_id "$REQUEST_ID" \
   --arg requested_by "$REQUESTED_BY" \
   --arg target_namespace "$DB_NAMESPACE" \
@@ -135,9 +174,14 @@ if [[ "$account_exists" == "true" ]]; then
 fi
 
 delivery_payload_json=""
-if [[ "$PASSWORD_DELIVERY_MODE" == "one_time_plaintext" ]]; then
+if [[ "$effective_delivery_mode" == "caller_provided_secret" ]]; then
+  delivery_payload_json=$(jq -nc \
+    --arg secret_name "$PASSWORD_SECRET_NAME" \
+    --arg secret_key "$PASSWORD_SECRET_KEY" \
+    '{mode:"caller_provided_secret", secret_name:$secret_name, secret_key:$secret_key}')
+elif [[ "$effective_delivery_mode" == "one_time_plaintext" ]]; then
   delivery_payload_json=$(jq -nc --arg password "$password" '{mode:"one_time_plaintext", password:$password}')
-elif [[ "$PASSWORD_DELIVERY_MODE" == "encrypted_payload" ]]; then
+elif [[ "$effective_delivery_mode" == "encrypted_payload" ]]; then
   if ! delivery_payload_json=$(encrypt_password_payload "$password" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null); then
     fail_task "DELIVERY_ENCRYPT_FAILED" "failed to encrypt password payload with recipient public key"
   fi

@@ -73,6 +73,25 @@ pattern as optional task inputs with internal-config + hardcoded-literal
 fallback. MongoDB `recovery/*` and `sanity-check` tasks go a step further and
 don't expose these fields as task inputs *at all* — see "Auto-detect tier" below.
 
+**MariaDB object-storage policy is a scoped exception to generic live
+auto-detection.** The `S3_*` contract declared on a MariaDB workload is explicit
+deployment configuration owned by that database, not a best-effort signal that
+AQSH discovers and guesses from. The policy remains deployment configuration;
+its ownership and location move from one AQSH-wide setting to an explicit
+policy on each MariaDB workload. Resolution order is:
+
+1. Advanced explicit platform-process overrides
+2. The selected database's MariaDB workload policy
+3. Legacy AQSH-wide deploy-time configuration, retained as a migration fallback
+4. Compatibility defaults
+
+None of these fields are public task inputs. Non-credential storage fields
+(endpoint, bucket, prefix, and region) resolve independently. Credential
+references are bundle-aware: any advanced explicit credential-reference set
+supersedes the workload pair, while a workload must provide both credential
+references or neither. The two references in one valid bundle may still point
+to different Secrets. See `docs/mariadb/object-storage-resolution.md`.
+
 **Resolution order for account tasks** (3 tiers — see MongoDB account scripts
 for a worked example; MongoDB `recovery/*` and `sanity-check` use a variant
 without the task-input tier — see "Auto-detect tier" below):
@@ -102,7 +121,17 @@ and the PBM gateway tasks (`pbm/status`, `pbm/backup`, `pbm/list`,
 `pbm/restore`, `pbm/delete`, `pbm/pitr`, `pbm/logs`, `pbm/cancel-backup`,
 `pbm/schedule`, `pbm/config`; see `docs/mongodb/pbm.md` — these also keep the agent
 container name, storage location, and S3 credentials internal-config/
-auto-detect only, and never load MongoDB credentials at all) —
+auto-detect only, and never load MongoDB credentials at all) and the
+`sts/orphan-delete` task (see `docs/mongodb/sts-orphan-delete.md` — detaches
+a StatefulSet from its Pods via `kubectl delete --cascade=orphan`; step 1 of
+the standard PVC-enlarge workaround, PVC resize/STS recreate stay manual) and
+the oplog/ops/profiler gateway tasks (`oplog/status`, `oplog/resize`,
+`ops/list`, `ops/kill`, `profiler/status`, `profiler/set`; see
+`docs/mongodb/oplog.md`, `docs/mongodb/ops.md`, `docs/mongodb/profiler.md` —
+oplog size, currentOp, and the profiler level are all per-node state, not
+cluster-wide, so `ops/*`/`profiler/*` accept an optional `target_pod`
+defaulting to the elected PRIMARY, and `oplog/resize` applies to every
+current replica-set member itself rather than taking one) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as
@@ -124,7 +153,12 @@ to force-wipe a healthy pod or to override the auto-selected candidate. Resoluti
    `MONGODB_ROOT_USER/PASSWORD`, or the Bitnami file-mounted-secret
    convention — a `*_FILE`-suffixed env var holding a path into a
    Secret-backed volume mount), `recovery_configmap` from the
-   `data-recovery` init container's own volume binding, and
+   `data-recovery` init container's own volume binding, the headless
+   Service used to build pod seed FQDNs (`<sts>-0.<headless-svc>.<ns>.svc.
+   cluster.local`) from the StatefulSet's own `spec.serviceName` — never
+   assumed to equal the StatefulSet's name, since e.g. Bitnami's chart
+   commonly names it `<release>-headless`; tier-1 override is
+   `MONGO_HEADLESS_SVC_DEFAULT` — and
    `data_path`/`mount_path` by asking mongod itself for its real dbPath
    (`db.serverCmdLineOpts().parsed.storage.dbPath`, falling back to
    mongod's own compiled-in default `/data/db` when no `--dbpath`/config-file
@@ -155,6 +189,51 @@ nor the hardcoded fallback can resolve it (e.g. credentials provisioned with
 no live signal in the StatefulSet spec at all), internal config remains the
 only override — there is no per-call escape hatch for `recovery/*` tasks by
 design.
+
+**Secrets gateway (`secrets/*`)**: a separate, DB-agnostic task family —
+`secrets/pubkey`, `secrets/get`, `secrets/plan`, `secrets/apply`,
+`secrets/delete` — served by BOTH gateways from the shared
+`scripts/secrets/` + `lib/secrets.sh`; see `docs/mongodb/secrets.md` /
+`docs/mariadb/secrets.md`. None of the recovery-tier rules above apply here:
+there is no `target_pod`, no destructive-wipe semantics, and no
+StatefulSet/credential resolution chain. Its task inputs are `namespace`,
+`secret_name`, and a PGP-encrypted `payload` (plus `mode` and, for
+`secrets/apply`, `plan_hash`). The deployment PGP key path and the
+protected-secret list are internal-config/auto-detect only, and secret
+VALUES arrive PGP-encrypted against the deployment key, never as plaintext
+task inputs.
+
+**Pods gateway (`pods/*`)**: `pods/list` and `pods/delete`, served by BOTH
+gateways — API-shape-agnostic across DBs (same inputs, gating, and
+result-code contract) but, unlike `secrets/*`, **not** the same script:
+each gateway resolves its own instance and exact member-pod list with its
+own DB-specific library (`mongodb-recovery.sh`'s `recovery_resolve_sts_name`
++ `k8s.sh`'s `_k8s_sts_owned_pod_names` for MongoDB;
+`mariadb.sh`'s `mariadb_autodetect_target` + `mariadb_list_member_pods` for
+MariaDB), then share only a small generic K8s-status/identity helper
+(`lib/pods.sh`). See `docs/mongodb/pods.md` / `docs/mariadb/pods.md`. Pure
+Kubernetes-API operations — neither task connects to the database engine or
+reads a credential, so `pods/list` works even when the database itself is
+down, and both work unchanged across MongoDB's Bitnami/official image
+split. The instance name is not a task input (auto-detect tier, same as
+`ops/*`); `pods/delete`'s `target_pod` is required and is verified against
+that specific Pod's own `ownerReferences` (`pods_fetch_json` +
+`pods_owned_by_sts`, lib/pods.sh) before any delete (`POD_NOT_MEMBER`
+otherwise) — a task-level safety boundary independent of the underlying
+RBAC grant, which is an unscoped `delete` on `pods` in the namespace.
+Checking the target Pod's own object, rather than deriving membership from
+a separately-listed live member set, is what makes `POD_ALREADY_DELETED`
+reachable for an already-gone target instead of that case always
+surfacing as `POD_NOT_MEMBER` first. A confirmed delete
+(`dry_run=false`) additionally requires `pod_uid` — the target's UID as
+returned by the preceding dry-run — and rejects with `POD_REPLACED` if the
+live Pod's UID no longer matches, closing the window where the instance
+recreates a same-name replacement between a dry-run and its confirm call;
+`kubectl delete` has no native UID-precondition flag, so this is a
+script-level check immediately before the delete, not a server-enforced
+one. Whether the delete is graceful or forced (`--grace-period=0 --force`)
+is decided internally from the pod's own `Ready` condition, never a
+caller-facing field.
 
 **G1 self-heal**: `wipe`/`recover` (gate mode only — `pre-check` stays
 read-only) go one step further than detection when the `data-recovery` init

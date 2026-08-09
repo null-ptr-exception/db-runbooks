@@ -5,7 +5,7 @@
 #
 # cluster-a (server):
 #   db-ops:     kube-federated-auth, kube-auth-proxy + aqsh-mariadb, Redis
-#   mariadb-1:  MariaDB instance (operator-managed)
+#   mariadb-1 / mariadb-2: independently configured MariaDB instances
 # cluster-b (server + client):
 #   db-ops:     test-client pod, kube-auth-proxy + aqsh-mariadb, Redis
 #   mariadb-1:  MariaDB instance (operator-managed)
@@ -195,7 +195,7 @@ setup_suite() {
   # Layer 0: shared infra (idempotent)
   setup_infra
 
-  wait_ns_gone "$CTX_A" db-ops mariadb-1
+  wait_ns_gone "$CTX_A" db-ops mariadb-1 mariadb-2
   wait_ns_gone "$CTX_B" db-ops mariadb-1 minio
 
   # Install mariadb-operator CRDs and operator on both clusters
@@ -255,12 +255,21 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
+  # Throwaway deployment PGP keypair for the secrets/* task family (shared
+  # by both clusters' aqsh releases; callers fetch the public half through
+  # the secrets/pubkey task). No gpg on the host → no key; the secrets.bats
+  # file skips itself instead of failing the whole suite.
+  local PGP_PRIV
+  PGP_PRIV=$(provision_ephemeral_pgp_key)
+
   # Write runtime-discovered values to a temp file. aqsh.config.mariadb.env is
   # a scalar, so this second apply fully REPLACES the MINIO_ENDPOINT-only
   # content helmfile.yaml's first apply set for mariadb-server/mariadb-server-b
   # — it must therefore repeat MINIO_ENDPOINT alongside the runtime-discovered
   # VAULT_* values, not just add to it. Vault is single-instance on cluster-b
-  # (like MinIO), so both releases share the same values.
+  # (like MinIO), so both releases share the same values. aqsh: is a single
+  # mapping below (config + pgpKey as siblings) — a second top-level aqsh:
+  # key in the same YAML document would silently clobber the first.
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mariadb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
 federatedAuth:
@@ -288,6 +297,15 @@ aqsh:
       VAULT_ROLE_ID=${VAULT_ROLE_ID}
       VAULT_SECRET_ID=${VAULT_SECRET_ID}
 EOF
+  if [[ -n "$PGP_PRIV" ]]; then
+    # Appends as a sibling of `config:` under the same top-level `aqsh:`
+    # mapping opened above — a second top-level `aqsh:` key here would be a
+    # duplicate YAML key that silently clobbers the block above.
+    cat >> "$RUNTIME_VALUES" <<EOF
+  pgpKey: |
+$(echo "$PGP_PRIV" | sed 's/^/    /')
+EOF
+  fi
 
   # Second apply: inject real runtime values.
   helmfile apply -f "$HELMFILE" --values "$RUNTIME_VALUES"
@@ -307,6 +325,14 @@ EOF
   echo "Waiting for mariadb (cluster-a)..."
   kubectl --context "$CTX_A" -n mariadb-1 wait \
     --for=condition=Ready mariadb/mariadb --timeout=900s
+  kubectl --context "$CTX_A" -n mariadb-2 wait \
+    --for=condition=Ready mariadb/mariadb --timeout=900s
+
+  echo "Waiting for namespace-local database gateway..."
+  wait_deployment_rollout "$CTX_A" mariadb-1 database-gateway 180s
+
+  echo "Waiting for database gateway test client..."
+  wait_deployment_rollout "$CTX_A" mariadb-1 database-gateway-client 120s
 
   # Wait for deployments on cluster-b
   echo "Waiting for redis (cluster-b)..."
@@ -333,9 +359,10 @@ teardown_suite() {
   local ctx_a="kind-cluster-a"
   local ctx_b="kind-cluster-b"
 
-  # Delete mariadb-1 first — the operator in db-ops processes CR finalizers.
+  # Delete database namespaces first — the operator in db-ops processes CR finalizers.
   # Then delete db-ops — no finalizer-bearing CRs remain.
   delete_namespace_and_wait "$ctx_a" mariadb-1 300s || true
+  delete_namespace_and_wait "$ctx_a" mariadb-2 300s || true
   delete_namespace_and_wait "$ctx_b" mariadb-1 300s || true
   kubectl --context "$ctx_a" delete ns db-ops --ignore-not-found --wait=false || true
   kubectl --context "$ctx_b" delete ns db-ops minio --ignore-not-found --wait=false || true

@@ -7,7 +7,10 @@
 # or tasks.yaml inputs before sourcing this file.
 #
 # Industry-standard reference thresholds used:
-#   Replication lag  WARN ≥ 10 s  (MongoDB Atlas default)  |  CRIT ≥ 60 s
+#   Replication lag  WARN ≥ 15 s  (MongoDB Atlas default is 10 s; widened to
+#                                  ride out the ~10 s periodic no-op write
+#                                  cadence that otherwise flaps the alert on
+#                                  idle/low-traffic replica sets) | CRIT ≥ 60 s
 #   Oplog window     WARN < 3 d   (MongoDB recommendation)  |  CRIT < 1 d
 #   PVC usage        WARN ≥ 80%                              |  CRIT ≥ 90%
 #   Connections      WARN ≥ 80% capacity                    |  CRIT ≥ 90%
@@ -20,7 +23,11 @@ _MONGODB_CONSTANT_LOADED=1
 # StatefulSet name (overridden per-task via MONGO_STS_NAME)
 STS_NAME="${STS_NAME:-mongodb}"
 
-# PVC disk usage
+# PVC disk usage. The AQSH task (scripts/mongodb/sanity-check.sh) always sets
+# this itself via recovery_resolve_data_paths (live mongod dbPath detection,
+# falling back to mongodb-recovery.sh's Bitnami literal) before sourcing this
+# file, so the /data/db default below only takes effect for cli.sh, whose
+# --pvc-path flag is the caller's own explicit choice.
 PVC_MOUNT_PATH="${PVC_MOUNT_PATH:-/data/db}"
 PVC_WARN_PERCENT="${PVC_WARN_PERCENT:-80}"
 PVC_CRIT_PERCENT="${PVC_CRIT_PERCENT:-90}"
@@ -28,8 +35,10 @@ PVC_CRIT_PERCENT="${PVC_CRIT_PERCENT:-90}"
 # Pod restart count
 RESTART_WARN_COUNT="${RESTART_WARN_COUNT:-5}"
 
-# Replication lag — MongoDB Atlas default alert thresholds
-LAG_WARN_SECONDS="${LAG_WARN_SECONDS:-10}"
+# Replication lag — MongoDB Atlas default alert is 10s/60s; WARN is widened
+# to 15s so a mongod's own ~10s periodic no-op write cadence (which advances
+# oplog optime even when idle) doesn't flap the alert right at the boundary.
+LAG_WARN_SECONDS="${LAG_WARN_SECONDS:-15}"
 LAG_CRIT_SECONDS="${LAG_CRIT_SECONDS:-60}"
 
 # Oplog retention — MongoDB recommended minimum = 72 h (3 days)

@@ -19,8 +19,12 @@ if [[ ! -d "$LIB_DIR" ]]; then
   LIB_DIR="$(cd "${SCRIPT_DIR}/../../lib" && pwd)"
 fi
 
+MDB_INPUT="${MARIADB_NAME:-}"
+
 # shellcheck source=../../lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # logging, response, k8s + generic helpers
+# shellcheck source=../../lib/mariadb.sh
+source "${LIB_DIR}/mariadb.sh"
 # shellcheck source=../../lib/minio-client.sh
 source "${LIB_DIR}/minio-client.sh"         # setup_minio_client, s5 (s5cmd)
 
@@ -33,13 +37,35 @@ NAMESPACE="${DB_NAMESPACE:-}"          # the database identity — the only requ
 
 mdbt_validate_dns_label "namespace" "$NAMESPACE" "$OP"
 
+mariadb_set_target "${K8S_CONTEXT:-}" "$NAMESPACE" "$MARIADB_RESOURCE" "$MDB_INPUT"
+if [[ -z "$MDB_INPUT" ]]; then
+  resolve_rc=0
+  resolved="$(mariadb_resolve_name)" || resolve_rc=$?
+  case "$resolve_rc" in
+    0) MARIADB_NAME="$resolved" ;;
+    1) MARIADB_NAME="" ;; # retain namespace-only fallback after full loss
+    2) mdbt_fail "$OP" "database configuration is ambiguous" \
+         "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 2 "DATABASE_CONFIGURATION_AMBIGUOUS" ;;
+  esac
+else
+  MARIADB_NAME="$MDB_INPUT"
+fi
+
 # Resolve the S3 backup location for this namespace (bucket / prefix / endpoint),
 # the same convention the backup producers write and restore reads.
-mdbt_resolve_backup_location "$NAMESPACE"
+if ! mdbt_resolve_backup_location "$NAMESPACE" "$MARIADB_NAME"; then
+  mdbt_fail "$OP" "backup configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
+fi
+
+if ! mdbt_s3_prepare_direct_client >/dev/null 2>&1; then
+  mdbt_fail "$OP" "backup configuration is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace:$ns}')" 1 "BACKUP_CONFIGURATION_UNAVAILABLE"
+fi
 
 if ! setup_minio_client >/dev/null 2>&1; then
-  mdbt_fail "$OP" "failed to configure the S3 client (check MINIO_ENDPOINT / credentials / s5cmd)" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+  mdbt_fail "$OP" "backup service is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
 fi
 
 # `s5cmd --json ls` emits one JSON object per entry (key = full s3:// URL,
@@ -53,31 +79,29 @@ if ! LISTING="$(s5 --json ls "$S3_PREFIX" 2>&1)"; then
   if grep -q "no object found" <<<"$LISTING"; then
     LISTING=""
   else
-    mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}': ${LISTING}" \
-      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+    # Do not reflect client stderr: SDK/client errors can include request
+    # headers or other deployment details. The actionable category is enough.
+    mdbt_fail "$OP" "backup service request failed" \
+      "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "BACKUP_SERVICE_UNAVAILABLE"
   fi
 fi
 if ! BACKUPS="$(printf '%s' "$LISTING" | jq -sc --arg pfx "$S3_PREFIX" '
     [ .[] | select(.key != null) | {
       name: (.key | ltrimstr($pfx) | sub("/$"; "")),
-      size: (.size // 0),
+      sizeBytes: (.size // 0),
       lastModified: (.last_modified // null)
     } ]' 2>/dev/null)"; then
-  mdbt_fail "$OP" "failed to list backups for '${NAMESPACE}' (unparseable listing)" \
-    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1
+  mdbt_fail "$OP" "backup listing is unavailable" \
+    "$(jq -n --arg ns "$NAMESPACE" '{namespace: $ns}')" 1 "INTERNAL_ERROR"
 fi
 COUNT="$(jq -n --argjson b "$BACKUPS" '$b | length')"
 
 mdbt_write_result "$(response_ok "$OP" "found ${COUNT} backup(s) for ${NAMESPACE}" "$(jq -n \
   --arg namespace "$NAMESPACE" \
-  --arg bucket "$BACKUP_BUCKET" \
-  --arg prefix "$BACKUP_PREFIX" \
-  --arg endpoint "$BACKUP_ENDPOINT" \
   --argjson count "$COUNT" \
   --argjson backups "$BACKUPS" \
   '{
     namespace: $namespace,
-    location: {bucket: $bucket, prefix: $prefix, endpoint: $endpoint},
     count: $count,
     backups: $backups
   }')")"

@@ -109,6 +109,7 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `create-account` | Create a user and grant scoped database privileges | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
 | `blue-green/status`, `/create`, `/switchover`, `/delete` | Blue/green deployment lifecycle on top of mariadb-operator | [docs/mariadb/blue-green.md](docs/mariadb/blue-green.md) |
 | `backup` | Backup to MinIO | — |
+| `migration/preflight`, `/sourcedb-backup`, `/write-db-env-to-vault`, `/restore`, `/read-db-env-from-vault`, `/check-connection`, `/setup-replication` | Cross-cluster migration: backup via MinIO, credential relay via Vault, restore + replication on the target | [docs/mariadb/migration.md](docs/mariadb/migration.md) |
 
 **MongoDB** (`aqsh-mongodb.kind-a.test:30080`):
 

@@ -44,6 +44,60 @@ ensure_minio_bucket() {
       "timeout 60 mc alias set local http://minio:9000 minioadmin minioadmin-changeme-prod && timeout 60 mc mb -p local/${bucket}"
 }
 
+# ---------------------------------------------------------------------------
+# ensure_vault_approle <context>
+#
+# Provisions a dev-mode Vault (see tests/chart/templates/vault.yaml) with an
+# AppRole that migration/write-db-env-to-vault and migration/read-db-env-from-vault
+# use: enables the approle auth method, writes a policy scoped to
+# secret/data/migration/*, creates a role bound to it, and mints a secret_id.
+# Runs from a throwaway pod in the vault namespace (in-cluster DNS, no need
+# for the cross-cluster *.kind-b.test gateway hostname at provisioning time).
+#
+# Sets VAULT_ROLE_ID / VAULT_SECRET_ID in the caller's shell on success.
+# ---------------------------------------------------------------------------
+ensure_vault_approle() {
+  local ctx="$1"
+  local ns="vault"
+  local pod="vault-provision"
+  local root_token="vault-dev-root-token" # must match tests/chart/values.yaml vault.devRootToken
+
+  kubectl --context "$ctx" -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+
+  local out
+  out=$(kubectl --context "$ctx" -n "$ns" run "$pod" \
+    --image=curlimages/curl:8.10.1 \
+    --restart=Never \
+    --rm -i \
+    --pod-running-timeout=180s \
+    --env="VAULT_TOKEN=${root_token}" \
+    --command -- sh -c '
+      set -e
+      VADDR="http://vault:8200"
+      curl -sf -H "X-Vault-Token: $VAULT_TOKEN" -X POST -d "{\"type\":\"approle\"}" "$VADDR/v1/sys/auth/approle" >/dev/null 2>&1 || true
+      curl -sf -H "X-Vault-Token: $VAULT_TOKEN" -X PUT -d "{\"policy\":\"path \\\"secret/data/migration/*\\\" { capabilities = [\\\"create\\\",\\\"read\\\",\\\"update\\\"] }\"}" "$VADDR/v1/sys/policies/acl/migration-relay" >/dev/null
+      curl -sf -H "X-Vault-Token: $VAULT_TOKEN" -X POST -d "{\"token_policies\":\"migration-relay\",\"token_ttl\":\"1h\",\"token_max_ttl\":\"4h\"}" "$VADDR/v1/auth/approle/role/migration-relay" >/dev/null
+      curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VADDR/v1/auth/approle/role/migration-relay/role-id"
+      echo
+      curl -sf -H "X-Vault-Token: $VAULT_TOKEN" -X POST "$VADDR/v1/auth/approle/role/migration-relay/secret-id"
+    ')
+
+  local role_json secret_json
+  role_json=$(printf '%s\n' "$out" | sed -n '1p')
+  secret_json=$(printf '%s\n' "$out" | sed -n '2p')
+
+  VAULT_ROLE_ID=$(printf '%s' "$role_json" | jq -r '.data.role_id // empty')
+  VAULT_SECRET_ID=$(printf '%s' "$secret_json" | jq -r '.data.secret_id // empty')
+  export VAULT_ROLE_ID VAULT_SECRET_ID
+
+  if [[ -z "$VAULT_ROLE_ID" || -z "$VAULT_SECRET_ID" ]]; then
+    echo "Failed to provision Vault AppRole (role_id/secret_id empty)" >&2
+    echo "role response: ${role_json}" >&2
+    echo "secret response: ${secret_json}" >&2
+    return 1
+  fi
+}
+
 delete_namespace_and_wait() {
   local ctx="$1"
   local ns="$2"
@@ -175,6 +229,14 @@ setup_suite() {
   [[ -n "${CLUSTER_A_IP:-}" ]] || { echo "CLUSTER_A_IP not set by setup_infra" >&2; return 1; }
   [[ -n "${CLUSTER_B_IP:-}" ]] || { echo "CLUSTER_B_IP not set by setup_infra" >&2; return 1; }
 
+  # Vault must be ready and its AppRole provisioned BEFORE the second apply,
+  # since VAULT_ROLE_ID/VAULT_SECRET_ID are injected into both aqsh-mariadb
+  # releases' mariadb.env as part of that same runtime-values apply below.
+  echo "Waiting for vault..."
+  wait_deployment_rollout "$CTX_B" vault vault 120s
+  echo "Provisioning Vault AppRole for migration credential relay..."
+  ensure_vault_approle "$CTX_B" || return 1
+
   # Extract runtime credentials from live clusters
   local ISSUER_A ISSUER_B CA_A CA_B TOKEN_A TOKEN_B
 
@@ -193,7 +255,12 @@ setup_suite() {
   TOKEN_B=$(kubectl --context "$CTX_B" -n "$NS" create token kube-federated-auth-reader \
     --duration=168h --audience=https://kubernetes.default.svc.cluster.local)
 
-  # Write runtime-discovered values to a temp file
+  # Write runtime-discovered values to a temp file. aqsh.config.mariadb.env is
+  # a scalar, so this second apply fully REPLACES the MINIO_ENDPOINT-only
+  # content helmfile.yaml's first apply set for mariadb-server/mariadb-server-b
+  # — it must therefore repeat MINIO_ENDPOINT alongside the runtime-discovered
+  # VAULT_* values, not just add to it. Vault is single-instance on cluster-b
+  # (like MinIO), so both releases share the same values.
   local RUNTIME_VALUES="${ROOT_DIR}/tests/mariadb/runtime-values.yaml"
   cat > "$RUNTIME_VALUES" <<EOF
 federatedAuth:
@@ -212,6 +279,14 @@ $(echo "$CA_B" | sed 's/^/      /')
   tokens:
     cluster-a-token: "${TOKEN_A}"
     cluster-b-token: "${TOKEN_B}"
+aqsh:
+  config:
+    mariadb.env: |
+      MINIO_ENDPOINT=http://minio.kind-b.test:30080
+      VAULT_ADDR=http://vault.kind-b.test:30080
+      VAULT_MOUNT=secret
+      VAULT_ROLE_ID=${VAULT_ROLE_ID}
+      VAULT_SECRET_ID=${VAULT_SECRET_ID}
 EOF
 
   # Second apply: inject real runtime values.

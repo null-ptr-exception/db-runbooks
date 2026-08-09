@@ -659,6 +659,30 @@ k8s_get_secret() {
 }
 
 # ---------------------------------------------------------------------------
+# k8s_secret_value <secret_name> <key>
+# Read and base64-decode a single key out of a Secret. Prints the decoded
+# value to stdout (rc 0), or nothing (rc 1) if the Secret, key, or decoded
+# value doesn't resolve to something non-empty. No log_info/log_error here on
+# purpose — callers of this (credential relay tasks) must not log the fact
+# that a lookup succeeded/failed in a way that could hint at key names, and
+# some callers treat "not found" as a normal, expected branch, not an error.
+# ---------------------------------------------------------------------------
+k8s_secret_value() {
+  local secret_name="${1:?secret_name is required}"
+  local key="${2:?key is required}"
+
+  local encoded
+  encoded=$(_kubectl get secret "$secret_name" -o "jsonpath={.data.${key}}" 2>/dev/null) || true
+  [[ -n "$encoded" ]] || return 1
+
+  local value
+  value=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) || return 1
+  [[ -n "$value" ]] || return 1
+
+  printf '%s' "$value"
+}
+
+# ---------------------------------------------------------------------------
 # k8s_top_pods
 # Get CPU/memory usage of pods (requires metrics-server).
 # Returns: JSON response with raw text output.

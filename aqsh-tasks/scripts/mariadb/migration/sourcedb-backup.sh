@@ -6,10 +6,11 @@ set -euo pipefail
 # Take a physical (mariabackup) backup of a migration source MariaDB to a
 # caller-specified external MinIO endpoint.
 #
-# Unlike physical-backup.sh — which resolves S3 credentials from platform
-# deploy-time config — this task accepts MinIO credentials as explicit task
-# inputs. This is the intended path for cross-cluster migrations where the
-# backup destination is outside the platform's own MinIO.
+# Unlike physical-backup.sh — which resolves S3 credentials purely from
+# platform deploy-time config — this task's MinIO credentials are caller
+# overridable (the backup destination for a migration is often outside the
+# platform's own MinIO), falling back to this deployment's MINIO_*_DEFAULT
+# internal config when omitted, same as migration/preflight.
 #
 # Secure credential handling:
 #   The minio_secret_key arrives as the env var MINIO_SECRET_KEY. It is
@@ -39,14 +40,36 @@ source "${LIB_DIR}/mariadb-task-common.sh"
 # shellcheck source=../../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
 
+# Deploy-time config: MINIO_ENDPOINT_DEFAULT / MINIO_ACCESS_KEY_DEFAULT /
+# MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT (plus a plain MINIO_ENDPOINT
+# this script does not use — see caller-value capture below).
+#
+# That plain MINIO_ENDPOINT is the platform's own internal MinIO, used by the
+# non-migration backup/restore tasks — sourcing this file would silently
+# overwrite whatever the caller passed as THIS task's minio_endpoint, since
+# both share the identical variable name for two different purposes. The
+# four caller values are captured before sourcing and restored immediately
+# after so the config file can only ever populate the `_DEFAULT` names.
+_CALLER_MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
+_CALLER_MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
+_CALLER_MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
+_CALLER_MINIO_BUCKET="${MINIO_BUCKET:-}"
+[[ -f /etc/aqsh/config/mariadb.env ]] && source /etc/aqsh/config/mariadb.env
+MINIO_ENDPOINT="$_CALLER_MINIO_ENDPOINT"
+MINIO_ACCESS_KEY="$_CALLER_MINIO_ACCESS_KEY"
+MINIO_SECRET_KEY="$_CALLER_MINIO_SECRET_KEY"
+MINIO_BUCKET="$_CALLER_MINIO_BUCKET"
+
 OP="migration/sourcedb-backup"
 
-# --- Task inputs (all MinIO params are required for migration) ---------------
+# --- Task inputs --------------------------------------------------------------
 NAMESPACE="${DB_NAMESPACE:-}"
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
-MINIO_BUCKET="${MINIO_BUCKET:-}"
+# MinIO options resolve task input -> deploy-time internal config
+# (MINIO_*_DEFAULT) -> fail clearly if still unset.
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-${MINIO_ENDPOINT_DEFAULT:-}}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-${MINIO_ACCESS_KEY_DEFAULT:-}}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-${MINIO_SECRET_KEY_DEFAULT:-}}"
+MINIO_BUCKET="${MINIO_BUCKET:-${MINIO_BUCKET_DEFAULT:-}}"
 TARGET="${BACKUP_TARGET:-PreferReplica}"
 COMPRESSION="${BACKUP_COMPRESSION:-bzip2}"
 CONFIRM="${CONFIRM:-false}"
@@ -193,6 +216,9 @@ _cleanup_temp_secret() {
     _kubectl delete secret "$TEMP_SECRET_NAME" --ignore-not-found >/dev/null 2>&1 || true
   fi
 }
+# Covers only "never got as far as an applied CR" failures below (secret
+# create, apply) — safe to clean up immediately since the operator was never
+# given a CR that could reference this Secret.
 trap _cleanup_temp_secret EXIT
 
 if ! _kubectl create secret generic "$TEMP_SECRET_NAME" \
@@ -219,6 +245,11 @@ BACKUP_SECRET_KEY="$_CRED_SECRET_KEY_NAME"
 MANIFEST="$(mdbt_physical_backup_manifest "$BACKUP_NAME" "$NAMESPACE" "$MARIADB_NAME")"
 printf '%s\n' "$MANIFEST" | _kubectl apply -f -
 
+# The CR now exists and references the temp Secret — stop the blanket
+# EXIT-trap cleanup. Only a confirmed terminal state (Complete condition
+# reached, below) deletes it now; a wait-timeout leaves it in place.
+trap - EXIT
+
 # --- Wait for completion -----------------------------------------------------
 # wait_timeout=0 is rejected above, so this always waits: the temp credential
 # Secret must outlive the operator's read of it, and Complete is the only
@@ -227,13 +258,22 @@ if ! _kubectl wait --for=condition=Complete "physicalbackup/${BACKUP_NAME}" \
     --timeout="$WAIT_TIMEOUT" >/dev/null 2>&1; then
   status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json \
     | jq -c '.status // {}' 2>/dev/null || printf '{}')"
+  # Do NOT delete the temp Secret here — the PhysicalBackup job may still be
+  # running and the operator may not have consumed the S3 credentials yet.
+  # Deleting it now would turn a slow-but-recoverable backup into a
+  # guaranteed failure. It's named clearly enough for manual cleanup once
+  # the backup either completes or is confirmed abandoned.
   mdbt_write_result "$(response_err "$OP" \
-    "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}" \
+    "PhysicalBackup ${BACKUP_NAME} was created but did not Complete within ${WAIT_TIMEOUT}; temporary credential secret '${TEMP_SECRET_NAME}' was intentionally left in place (may still be needed) — clean it up manually once the backup is confirmed to have completed or been abandoned" \
     "$(_backup_result true false | jq \
       --argjson s "$status_json" \
       '. + {physicalBackupStatus: $s.status, physicalBackupConditions: ($s.conditions // [])}')" 1)"
   exit 1
 fi
+
+# The Complete condition was reached (success or failure) — the operator has
+# finished with the credentials either way, so it's safe to clean up now.
+_cleanup_temp_secret
 
 status_json="$(_kubectl get "physicalbackup/${BACKUP_NAME}" -o json \
   2>/dev/null | jq -c '.status // {}' 2>/dev/null || printf '{}')"

@@ -7,12 +7,14 @@
 #   - backup_file, minio_* params, image, and storage_size are task inputs
 #   - backup existence is checked via s5cmd BEFORE any K8s resource is created
 #   - confirm=true is mandatory to apply (dry_run renders without it)
-#   - an existing target is never overwritten in place
+#   - an existing target is never overwritten in place (atomic `create`, not
+#     check-then-`apply`)
 #   - minio_secret_key never appears in the result JSON
-#   - wait_timeout="0" is rejected: the temp credential Secret is deleted on
-#     exit, so the operator must be given time to read it first
+#   - wait_timeout="0" is rejected up front; on a real (non-zero) timeout the
+#     temp credential Secret is deliberately left in place rather than
+#     deleted, since the operator may still be reading it
 #   - a Ready-wait timeout still returns a partial result
-#   - the result returns the connection endpoint + credential reference
+#   - the result returns the connection endpoint + credentialsRef
 #   - the bootstrapFrom.s3.prefix is exactly the backup_file input value
 
 setup() {
@@ -23,6 +25,7 @@ setup() {
   MOCK_DIR="$(mktemp -d)"
   CAPTURE="${MOCK_DIR}/applied.yaml"
   RESULT="${MOCK_DIR}/result.json"
+  DELETES="${MOCK_DIR}/deletes.log"
 
   # --- kubectl mock -----------------------------------------------------------
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
@@ -31,10 +34,10 @@ setup() {
 #   get mariadb (jsonpath metadata.name)  → source auto-detect (MOCK_SOURCES)
 #   get mariadb (jsonpath spec.image)     → distinct-image scan (MOCK_SOURCE_IMAGES)
 #   get mariadb <name> -o json            → source spec (MOCK_SOURCE_IMAGE/_STORAGE)
-#   get mariadb <target>                  → target existence probe (MOCK_TARGET_EXISTS)
-#   create secret --dry-run -o json       → pass-through (no-op)
-#   apply -f -                            → capture stdin OR ignore (secret apply)
-#   delete secret                         → no-op (cleanup)
+#   get secret <root secret>              → root-secret pre-check (MOCK_ROOT_SECRET_MISSING)
+#   create secret generic ...             → temp credential secret (always succeeds)
+#   create -f -                           → CR creation: AlreadyExists (MOCK_TARGET_EXISTS) or capture+succeed
+#   delete secret                         → logged to MOCK_DELETE_LOG, always succeeds
 #   wait                                  → Ready wait (fails with MOCK_WAIT_FAIL=1)
 args="$*"
 verb=""
@@ -56,23 +59,28 @@ case "$verb" in
           '{spec: {image: $img, storage: {size: $sz}}}
            | if $res == null then . else .spec.resources = $res end'
         exit 0 ;;
-      *"get mariadb"*)
-        [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]] && exit 0 || exit 1 ;;
+      *"get secret"*)
+        [[ "${MOCK_ROOT_SECRET_MISSING:-0}" == "1" ]] && exit 1 || exit 0 ;;
       *) echo "mock kubectl: unhandled get: $args" >&2; exit 1 ;;
     esac ;;
   create)
-    # secret create --dry-run=client -o json: just echo an empty object so
-    # the pipe into `apply -f -` has valid JSON to consume.
-    echo '{}'; exit 0 ;;
-  apply)
-    # Only capture the MariaDB CR apply; discard the secret dry-run apply.
-    local _input
+    if [[ "$args" == *"secret"* ]]; then
+      # Temporary credential Secret creation — always succeeds.
+      exit 0
+    fi
+    # CR creation via `create -f -`: atomic AlreadyExists, or capture+succeed.
     _input=$(cat)
+    if [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]]; then
+      echo 'Error from server (AlreadyExists): error when creating "STDIN": mariadbs.k8s.mariadb.com "target" already exists' >&2
+      exit 1
+    fi
     if echo "$_input" | jq -e '.kind == "MariaDB"' >/dev/null 2>&1; then
       echo "$_input" > "${MOCK_APPLY_CAPTURE}"
     fi
     exit 0 ;;
-  delete) exit 0 ;;
+  delete)
+    [[ -n "${MOCK_DELETE_LOG:-}" ]] && printf '%s\n' "$args" >> "${MOCK_DELETE_LOG}"
+    exit 0 ;;
   wait)  [[ "${MOCK_WAIT_FAIL:-0}" == "1" ]] && exit 1 || exit 0 ;;
   *)     exit 0 ;;
 esac
@@ -123,6 +131,7 @@ run_migration_restore() {
     "LIB_DIR=${LIB_DIR_REAL}" \
     "AQSH_RESULT_FILE=${RESULT}" \
     "MOCK_APPLY_CAPTURE=${CAPTURE}" \
+    "MOCK_DELETE_LOG=${DELETES}" \
     "$@" \
     bash "${RESTORE_SH}"
 }
@@ -180,9 +189,19 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
     RESTORE_TARGET=mariadb-migrated
   [ "$status" -eq 0 ]
+  # No <name>-primary Service exists for a single-replica standalone instance
+  # (this task is always standalone) — the plain Service is the real one.
   [ "$(result_field '.data.connection.host')" \
-    = "mariadb-migrated-primary.mariadb-dest.svc.cluster.local" ]
+    = "mariadb-migrated.mariadb-dest.svc.cluster.local" ]
   [ "$(result_field '.data.connection.port')" = "3306" ]
+}
+
+@test "migration/restore dry_run returns credentialsRef alongside the connection endpoint" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
+  [ "$(result_field '.data.credentialsRef.secretKey')" = "password" ]
 }
 
 @test "migration/restore auto-generates target name when omitted" {
@@ -227,6 +246,69 @@ result_field() { jq -r "$1" "${RESULT}"; }
     MINIO_BUCKET=""
   [ "$status" -ne 0 ]
   [[ "$(result_field '.message')" == *"minio_bucket"*"required"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# MinIO — deploy-time MINIO_*_DEFAULT fallback
+# ---------------------------------------------------------------------------
+
+@test "migration/restore falls back to MINIO_ENDPOINT_DEFAULT when minio_endpoint is omitted" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated \
+    MINIO_ENDPOINT="" MINIO_ENDPOINT_DEFAULT="http://minio.example.test:9000"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" \
+    = "minio.example.test:9000" ]
+}
+
+@test "migration/restore an explicit minio_endpoint overrides MINIO_ENDPOINT_DEFAULT" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated \
+    MINIO_ENDPOINT="http://explicit.minio.test:9000" \
+    MINIO_ENDPOINT_DEFAULT="http://default.minio.test:9000"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.endpoint')" \
+    = "explicit.minio.test:9000" ]
+}
+
+@test "migration/restore falls back to MINIO_ACCESS_KEY_DEFAULT/MINIO_SECRET_KEY_DEFAULT/MINIO_BUCKET_DEFAULT" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated \
+    MINIO_ACCESS_KEY="" MINIO_SECRET_KEY="" MINIO_BUCKET="" \
+    MINIO_ACCESS_KEY_DEFAULT=minioadmin MINIO_SECRET_KEY_DEFAULT=minioadmin123 \
+    MINIO_BUCKET_DEFAULT=db-backups
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.bootstrapFrom.s3.bucket')" = "db-backups" ]
+}
+
+@test "migration/restore still fails clearly when neither minio_endpoint nor a default is set" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    MINIO_ENDPOINT=""
+  [ "$status" -ne 0 ]
+  [[ "$(result_field '.message')" == *"minio_endpoint"*"required"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Root credential secret pre-check
+# ---------------------------------------------------------------------------
+
+@test "migration/restore fails fast when the root credential secret does not exist" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 MOCK_ROOT_SECRET_MISSING=1
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"root credential secret"*"not found"* ]]
+  # Fails before creating anything.
+  [ ! -f "${CAPTURE}" ]
+}
+
+@test "migration/restore does not check the root secret in dry_run" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    MOCK_ROOT_SECRET_MISSING=1
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -374,7 +456,27 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [ -f "${CAPTURE}" ]
   [ "$(result_field '.data.restored')" = "true" ]
   [ "$(result_field '.data.connection.host')" \
-    = "mariadb-migrated-primary.mariadb-dest.svc.cluster.local" ]
+    = "mariadb-migrated.mariadb-dest.svc.cluster.local" ]
+}
+
+@test "migration/restore leaves the temp credential secret in place when the Ready wait times out" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 MOCK_WAIT_FAIL=1
+  [ "$status" -ne 0 ]
+  # The operator may still be reading it — deleting now would guarantee a
+  # failure on what might otherwise be a slow-but-recoverable restore.
+  [ ! -f "${DELETES}" ]
+  [[ "$(result_field '.message')" == *"left in place"* ]]
+}
+
+@test "migration/restore deletes the temp credential secret once Ready is confirmed" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0
+  [ "$status" -eq 0 ]
+  [ -f "${DELETES}" ]
+  grep -q "delete secret" "${DELETES}"
 }
 
 @test "migration/restore rejects wait_timeout=0" {

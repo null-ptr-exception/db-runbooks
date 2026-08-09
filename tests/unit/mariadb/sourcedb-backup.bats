@@ -150,9 +150,13 @@ result_field() { jq -r "$1" "${RESULT}"; }
   [[ "$name" =~ ^mariadb-migration-[0-9]+$ ]]
 }
 
-@test "sourcedb-backup dry_run never calls kubectl" {
+@test "sourcedb-backup dry_run skips the readiness-check kubectl call when 'mariadb' is given" {
+  # Only proves kubectl is skipped for the readiness check when MARIADB_NAME
+  # is already known — NOT a general "dry run never calls kubectl" guarantee:
+  # the auto-detect tests below show dry_run DOES call kubectl to list CRs
+  # when 'mariadb' is omitted.
   run_sourcedb_backup DRY_RUN=true MOCK_SOURCE_NOT_FOUND=1
-  # If dry run touched kubectl, the forced NotFound mock would fail the run.
+  # If the readiness check touched kubectl, the forced NotFound mock would fail the run.
   [ "$status" -eq 0 ]
   [ "$(result_field '.status')" = "success" ]
 }
@@ -189,6 +193,43 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run_sourcedb_backup DRY_RUN=true MINIO_ENDPOINT="not a url"
   [ "$status" -ne 0 ]
   [[ "$(result_field '.message')" == *"minio_endpoint"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# MinIO — deploy-time MINIO_*_DEFAULT fallback
+# ---------------------------------------------------------------------------
+
+@test "sourcedb-backup falls back to MINIO_ENDPOINT_DEFAULT when minio_endpoint is omitted" {
+  run_sourcedb_backup DRY_RUN=true \
+    MINIO_ENDPOINT="" MINIO_ENDPOINT_DEFAULT="http://minio.example.test:9000"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.status')" = "success" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.storage.s3.endpoint')" \
+    = "minio.example.test:9000" ]
+}
+
+@test "sourcedb-backup an explicit minio_endpoint overrides MINIO_ENDPOINT_DEFAULT" {
+  run_sourcedb_backup DRY_RUN=true \
+    MINIO_ENDPOINT="http://explicit.minio.test:9000" \
+    MINIO_ENDPOINT_DEFAULT="http://default.minio.test:9000"
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.storage.s3.endpoint')" \
+    = "explicit.minio.test:9000" ]
+}
+
+@test "sourcedb-backup falls back to MINIO_ACCESS_KEY_DEFAULT/MINIO_SECRET_KEY_DEFAULT/MINIO_BUCKET_DEFAULT" {
+  run_sourcedb_backup DRY_RUN=true \
+    MINIO_ACCESS_KEY="" MINIO_SECRET_KEY="" MINIO_BUCKET="" \
+    MINIO_ACCESS_KEY_DEFAULT=minioadmin MINIO_SECRET_KEY_DEFAULT=minioadmin123 \
+    MINIO_BUCKET_DEFAULT=db-backups
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.storage.s3.bucket')" = "db-backups" ]
+}
+
+@test "sourcedb-backup still fails clearly when neither minio_endpoint nor a default is set" {
+  run_sourcedb_backup DRY_RUN=true MINIO_ENDPOINT=""
+  [ "$status" -ne 0 ]
+  [[ "$(result_field '.message')" == *"minio_endpoint"*"required"* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -295,14 +336,18 @@ result_field() { jq -r "$1" "${RESULT}"; }
   grep -q "secret ${secret_ref}" "${DELETES}"
 }
 
-@test "sourcedb-backup deletes the temp secret even when the wait times out" {
+@test "sourcedb-backup leaves the temp secret in place when the Complete wait times out" {
   export MOCK_WAIT_FAIL=1
   run_sourcedb_backup DRY_RUN=false CONFIRM=true
   [ "$status" -ne 0 ]
-  [ -f "${DELETES}" ]
+  # The PhysicalBackup job may still be running and still need the S3
+  # credentials — deleting now would guarantee a failure on what might
+  # otherwise be a slow-but-recoverable backup.
+  [ ! -f "${DELETES}" ]
+  [[ "$(result_field '.message')" == *"left in place"* ]]
 }
 
-@test "sourcedb-backup deletes the temp secret even when the source is not Ready" {
+@test "sourcedb-backup does not attempt secret cleanup when the source is not Ready" {
   export MOCK_SOURCE_READY=False
   run_sourcedb_backup DRY_RUN=false CONFIRM=true
   # Fails before a secret is ever created, so nothing to clean up.

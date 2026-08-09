@@ -80,8 +80,12 @@ if [[ "$cmd" == "exec" ]]; then
 
   case "${command[*]}" in
     "true") exit 0 ;;
-    "bash -c echo -n > /dev/tcp/"*) exit "${MINIO_TCP_EXIT:-0}" ;;
-    "bash -c curl"*) exit "${MINIO_HTTP_EXIT:-0}" ;;
+    # TCP check: host/port arrive as $1/$2 positional args to a fixed bash -c
+    # script (not interpolated into the string), so the joined command is the
+    # literal template plus the host/port as trailing words.
+    *"bash -c"*"/dev/tcp/"*) exit "${MINIO_TCP_EXIT:-0}" ;;
+    # HTTP check: curl is invoked directly now (no bash -c wrapper at all).
+    "curl -sf --connect-timeout"*) exit "${MINIO_HTTP_EXIT:-0}" ;;
     *) exit 0 ;;
   esac
 fi
@@ -298,6 +302,53 @@ EOF
 
   [ "$tcp_status" = "BLOCK" ]
   [ "$tcp_reason" = "MINIO_TCP_FAILED" ]
+}
+
+# ---------------------------------------------------------------------------
+# MinIO checks — endpoint injection safety
+#
+# minio_endpoint is caller-controlled and reaches a `bash -c`/`curl` call
+# inside the MariaDB pod. These lock down that a malicious host/port is
+# rejected before ever reaching the pod, rather than being interpolated into
+# a shell string there.
+# ---------------------------------------------------------------------------
+
+@test "minio_tcp and minio_http BLOCK with MINIO_ENDPOINT_INVALID on a command-substitution host" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb \
+    '--minio-endpoint' 'http://$(id>&2)evil.test:9000' --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .reason_code')" = "MINIO_ENDPOINT_INVALID" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_http") | .reason_code')" = "MINIO_ENDPOINT_INVALID" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .status')" = "BLOCK" ]
+}
+
+@test "minio_tcp and minio_http BLOCK with MINIO_ENDPOINT_INVALID on a quote-breaking host" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb \
+    '--minio-endpoint' "http://evil.test';touch /tmp/pwned;'@9000" --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .reason_code')" = "MINIO_ENDPOINT_INVALID" ]
+}
+
+@test "minio_tcp and minio_http BLOCK with MINIO_ENDPOINT_INVALID on an out-of-range port" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb \
+    --minio-endpoint http://minio.minio.svc:999999 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .reason_code')" = "MINIO_ENDPOINT_INVALID" ]
+}
+
+@test "minio_tcp passes host/port to the pod positionally, not interpolated into the command string" {
+  export MINIO_TCP_EXIT=0
+  # A host containing shell-special characters that ARE still legal in the
+  # validation regex (none are — this just re-confirms a normal host/port
+  # still reaches minio_tcp as PASS via the new positional-arg call shape).
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb \
+    --minio-endpoint http://minio-migration.example.test:9000 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "minio_tcp") | .status')" = "PASS" ]
 }
 
 # ---------------------------------------------------------------------------

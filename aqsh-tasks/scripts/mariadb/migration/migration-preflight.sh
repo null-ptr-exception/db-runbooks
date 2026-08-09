@@ -13,12 +13,25 @@ set -euo pipefail
 #
 # MinIO options resolve task input -> deploy-time internal config
 # (MINIO_*_DEFAULT in /etc/aqsh/config/mariadb.env) -> skip with WARN if
-# still unset. The *_DEFAULT names are deliberate: sourcing the config file
-# can never silently clobber an explicit --minio-endpoint override, because
-# it writes to a different variable name.
+# still unset. The *_DEFAULT names are deliberate: they let sourcing the
+# config file layer in a fallback without a per-call override ever winning
+# over them.
+#
+# BUT that same config file also sets a PLAIN `MINIO_ENDPOINT` (the
+# platform's own internal MinIO, used by the non-migration backup/restore
+# tasks) — sourcing it would silently overwrite whatever the caller passed
+# as this task's own `--minio-endpoint`/etc, since both use the identical
+# variable name for two different purposes. The four caller values are
+# captured before sourcing and restored immediately after so the config
+# file can only ever populate the `_DEFAULT` names, never clobber an
+# explicit input.
 # =============================================================================
 
 MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
+_CALLER_MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
+_CALLER_MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
+_CALLER_MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
+_CALLER_MINIO_BUCKET="${MINIO_BUCKET:-}"
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
 if [[ ! -d "$LIB_DIR" ]]; then
@@ -34,8 +47,14 @@ source "${LIB_DIR}/response.sh"
 source "${LIB_DIR}/minio-client.sh"  # s5 (s5cmd wrapper) — credentials set inline below, not via setup_minio_client (that reads deploy-time MINIO_ROOT_USER/PASSWORD, not this task's caller-supplied minio_access_key/minio_secret_key)
 
 # Deploy-time config: MINIO_ENDPOINT_DEFAULT / MINIO_ACCESS_KEY_DEFAULT /
-# MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT.
+# MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT (plus a plain MINIO_ENDPOINT
+# this script does not use — see note above).
 [[ -f /etc/aqsh/config/mariadb.env ]] && source /etc/aqsh/config/mariadb.env
+
+MINIO_ENDPOINT="$_CALLER_MINIO_ENDPOINT"
+MINIO_ACCESS_KEY="$_CALLER_MINIO_ACCESS_KEY"
+MINIO_SECRET_KEY="$_CALLER_MINIO_SECRET_KEY"
+MINIO_BUCKET="$_CALLER_MINIO_BUCKET"
 
 usage() {
   cat >&2 <<'EOF'
@@ -234,31 +253,47 @@ else
     _minio_port="9000"
   fi
 
-  # Check 3: TCP reachability from inside the pod using bash /dev/tcp
-  if [[ -z "$TARGET_POD" ]]; then
-    emit_check minio_tcp BLOCK NO_POD_FOUND "Cannot test MinIO TCP connectivity without a reachable pod"
-  elif mariadb_exec "$TARGET_POD" bash -c \
-      "echo -n > /dev/tcp/${_minio_host}/${_minio_port}" 2>/dev/null; then
-    emit_check minio_tcp PASS MINIO_TCP_OK \
-      "TCP ${_minio_host}:${_minio_port} reachable from pod=${TARGET_POD}" "$TARGET_POD"
+  # minio_endpoint is caller-controlled; validate the parsed host/port before
+  # using them at all, and only ever pass them to the pod as separate argv
+  # elements (never interpolated into a `bash -c` string) below — so even a
+  # host that somehow slipped through validation can't break out of quoting.
+  if [[ ! "$_minio_host" =~ ^[A-Za-z0-9._-]+$ ]] || [[ ! "$_minio_port" =~ ^[0-9]{1,5}$ ]] \
+      || (( _minio_port < 1 || _minio_port > 65535 )); then
+    emit_check minio_tcp BLOCK MINIO_ENDPOINT_INVALID \
+      "minio_endpoint host/port could not be parsed safely from '${MINIO_ENDPOINT}'"
+    emit_check minio_http BLOCK MINIO_ENDPOINT_INVALID \
+      "minio_endpoint host/port could not be parsed safely from '${MINIO_ENDPOINT}'"
   else
-    emit_check minio_tcp BLOCK MINIO_TCP_FAILED \
-      "TCP ${_minio_host}:${_minio_port} unreachable from pod=${TARGET_POD}" "$TARGET_POD"
-  fi
-
-  # Check 4: HTTP health check from inside the pod using curl
-  if [[ -z "$TARGET_POD" ]]; then
-    emit_check minio_http BLOCK NO_POD_FOUND "Cannot test MinIO HTTP health without a reachable pod"
-  else
-    _minio_health_url="${MINIO_ENDPOINT%/}/minio/health/live"
-    if mariadb_exec "$TARGET_POD" bash -c \
-        "curl -sf --connect-timeout 5 --max-time 10 '${_minio_health_url}'" 2>/dev/null; then
-      emit_check minio_http PASS MINIO_HTTP_OK \
-        "MinIO health OK from pod=${TARGET_POD}: ${_minio_health_url}" "$TARGET_POD"
+    # Check 3: TCP reachability from inside the pod using bash /dev/tcp.
+    # Host/port are passed as $1/$2 to a fixed script body, not interpolated
+    # into the string, so shell metacharacters in either can't execute.
+    if [[ -z "$TARGET_POD" ]]; then
+      emit_check minio_tcp BLOCK NO_POD_FOUND "Cannot test MinIO TCP connectivity without a reachable pod"
+    elif mariadb_exec "$TARGET_POD" bash -c \
+        'echo -n > "/dev/tcp/$1/$2"' _ "$_minio_host" "$_minio_port" 2>/dev/null; then
+      emit_check minio_tcp PASS MINIO_TCP_OK \
+        "TCP ${_minio_host}:${_minio_port} reachable from pod=${TARGET_POD}" "$TARGET_POD"
     else
-      # curl may not exist in the MariaDB image; treat as WARN so TCP result drives BLOCK
-      emit_check minio_http WARN MINIO_HTTP_UNAVAILABLE \
-        "MinIO HTTP health check failed or curl not available in pod=${TARGET_POD}" "$TARGET_POD"
+      emit_check minio_tcp BLOCK MINIO_TCP_FAILED \
+        "TCP ${_minio_host}:${_minio_port} unreachable from pod=${TARGET_POD}" "$TARGET_POD"
+    fi
+
+    # Check 4: HTTP health check from inside the pod using curl. The URL is
+    # passed as curl's own argv element (via kubectl exec's argv array, no
+    # shell involved at all), not interpolated into a string.
+    if [[ -z "$TARGET_POD" ]]; then
+      emit_check minio_http BLOCK NO_POD_FOUND "Cannot test MinIO HTTP health without a reachable pod"
+    else
+      _minio_health_url="${MINIO_ENDPOINT%/}/minio/health/live"
+      if mariadb_exec "$TARGET_POD" curl -sf --connect-timeout 5 --max-time 10 \
+          -- "$_minio_health_url" 2>/dev/null; then
+        emit_check minio_http PASS MINIO_HTTP_OK \
+          "MinIO health OK from pod=${TARGET_POD}: ${_minio_health_url}" "$TARGET_POD"
+      else
+        # curl may not exist in the MariaDB image; treat as WARN so TCP result drives BLOCK
+        emit_check minio_http WARN MINIO_HTTP_UNAVAILABLE \
+          "MinIO HTTP health check failed or curl not available in pod=${TARGET_POD}" "$TARGET_POD"
+      fi
     fi
   fi
 

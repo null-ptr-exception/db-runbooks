@@ -6,12 +6,15 @@ set -Eeuo pipefail
 # Restore a MariaDB instance from a specific physical backup stored in a
 # caller-specified external MinIO endpoint.
 #
-# Unlike restore.sh — which resolves S3 credentials and location from platform
-# deploy-time config — this task accepts all MinIO parameters as explicit task
-# inputs. The backup_file input is the S3 prefix path to the exact backup
-# directory (e.g. mariadb/source-ns/mariadb-migration-20260712143022), used
-# directly as bootstrapFrom.s3.prefix so the operator restores that one
-# backup rather than the latest under a broader prefix.
+# Unlike restore.sh — which resolves S3 credentials and location purely from
+# platform deploy-time config — this task's MinIO parameters are caller
+# overridable (a migration source may point at some OTHER MinIO entirely),
+# falling back to this deployment's MINIO_*_DEFAULT internal config when
+# omitted, same as migration/preflight. The backup_file input is the S3
+# prefix path to the exact backup directory (e.g.
+# mariadb/source-ns/mariadb-migration-20260712143022), used directly as
+# bootstrapFrom.s3.prefix so the operator restores that one backup rather
+# than the latest under a broader prefix.
 #
 # The task fails with a clear error if:
 #   - the backup_file path cannot be found in MinIO (checked via s5cmd before
@@ -48,15 +51,37 @@ source "${LIB_DIR}/mariadb.sh"
 # shellcheck source=../../../lib/minio-client.sh
 source "${LIB_DIR}/minio-client.sh"  # s5 (s5cmd wrapper) — credentials set inline below, not via setup_minio_client (that reads deploy-time MINIO_ROOT_USER/PASSWORD, not this task's caller-supplied minio_access_key/minio_secret_key)
 
+# Deploy-time config: MINIO_ENDPOINT_DEFAULT / MINIO_ACCESS_KEY_DEFAULT /
+# MINIO_SECRET_KEY_DEFAULT / MINIO_BUCKET_DEFAULT (plus a plain MINIO_ENDPOINT
+# this script does not use — see caller-value capture below).
+#
+# That plain MINIO_ENDPOINT is the platform's own internal MinIO, used by the
+# non-migration backup/restore tasks — sourcing this file would silently
+# overwrite whatever the caller passed as THIS task's minio_endpoint, since
+# both share the identical variable name for two different purposes. The
+# four caller values are captured before sourcing and restored immediately
+# after so the config file can only ever populate the `_DEFAULT` names.
+_CALLER_MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
+_CALLER_MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
+_CALLER_MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
+_CALLER_MINIO_BUCKET="${MINIO_BUCKET:-}"
+[[ -f /etc/aqsh/config/mariadb.env ]] && source /etc/aqsh/config/mariadb.env
+MINIO_ENDPOINT="$_CALLER_MINIO_ENDPOINT"
+MINIO_ACCESS_KEY="$_CALLER_MINIO_ACCESS_KEY"
+MINIO_SECRET_KEY="$_CALLER_MINIO_SECRET_KEY"
+MINIO_BUCKET="$_CALLER_MINIO_BUCKET"
+
 OP="migration/restore"
 
 # --- Task inputs -------------------------------------------------------------
 NAMESPACE="${DB_NAMESPACE:-}"
 BACKUP_FILE="${BACKUP_FILE:-}"         # S3 prefix path to the exact backup directory
-MINIO_ENDPOINT="${MINIO_ENDPOINT:-}"
-MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-}"
-MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-}"
-MINIO_BUCKET="${MINIO_BUCKET:-}"
+# MinIO options resolve task input -> deploy-time internal config
+# (MINIO_*_DEFAULT) -> fail clearly if still unset.
+MINIO_ENDPOINT="${MINIO_ENDPOINT:-${MINIO_ENDPOINT_DEFAULT:-}}"
+MINIO_ACCESS_KEY="${MINIO_ACCESS_KEY:-${MINIO_ACCESS_KEY_DEFAULT:-}}"
+MINIO_SECRET_KEY="${MINIO_SECRET_KEY:-${MINIO_SECRET_KEY_DEFAULT:-}}"
+MINIO_BUCKET="${MINIO_BUCKET:-${MINIO_BUCKET_DEFAULT:-}}"
 CONFIRM="${CONFIRM:-false}"
 DRY_RUN="${DRY_RUN:-true}"
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
@@ -240,7 +265,12 @@ if ! MANIFEST="$(_build_manifest "migration-restore-creds-preview" 2>&1)"; then
        '{namespace: $ns, target: $target}')" 3
 fi
 
-CONNECTION_HOST="${TARGET}-primary.${NAMESPACE}.svc.cluster.local"
+# mariadb-operator only creates a <name>-primary Service for multi-replica
+# instances; a single-replica standalone instance (REPLICAS=1 above — this
+# task is always standalone) is reached through its own plain Service
+# instead (see docs/mariadb/sanity-check.md and tests/mariadb/check_connection.bats,
+# which rely on exactly this behavior).
+CONNECTION_HOST="${TARGET}.${NAMESPACE}.svc.cluster.local"
 
 # restore_result <restored:bool> <dryRun:bool>
 restore_result() {
@@ -312,7 +342,18 @@ if ! _LS_OUT="$(s5 ls "$_S3_BACKUP_PATH" 2>&1)"; then
   fi
 fi
 
-# Step 2: Create temp K8s Secret with credentials; unset raw secret key.
+# Step 2: Verify the root credential Secret exists in the target namespace
+# BEFORE creating anything. Without this, a fresh migration-destination
+# namespace that never had this Secret provisioned would only fail much
+# later as a Ready timeout — same fail-fast philosophy as the backup check.
+if ! _kubectl get secret "$ROOT_SECRET_NAME" >/dev/null 2>&1; then
+  mdbt_fail "$OP" \
+    "root credential secret '${ROOT_SECRET_NAME}' not found in namespace '${NAMESPACE}' — the restored instance's rootPasswordSecretKeyRef would never resolve" \
+    "$(jq -n --arg ns "$NAMESPACE" --arg secret "$ROOT_SECRET_NAME" \
+       '{namespace: $ns, secretName: $secret}')" 2
+fi
+
+# Step 3: Create temp K8s Secret with credentials; unset raw secret key.
 # Name includes a random suffix (not just a timestamp) so concurrent calls in
 # the same second can't collide; created atomically (no dry-run|apply) so a
 # collision fails loudly instead of silently overwriting another run's Secret.
@@ -323,6 +364,9 @@ _cleanup_temp_secret() {
     _kubectl delete secret "$TEMP_SECRET_NAME" --ignore-not-found >/dev/null 2>&1 || true
   fi
 }
+# Covers only "never got as far as an applied CR" failures below (secret
+# create, manifest render, CR create) — safe to clean up immediately since
+# the operator was never given a CR that could reference this Secret.
 trap _cleanup_temp_secret EXIT
 
 if ! _kubectl create secret generic "$TEMP_SECRET_NAME" \
@@ -336,7 +380,7 @@ fi
 
 unset MINIO_SECRET_KEY
 
-# Step 3: Rebuild manifest with the real temp-secret name.
+# Step 4: Rebuild manifest with the real temp-secret name.
 if ! MANIFEST="$(_build_manifest "$TEMP_SECRET_NAME" 2>&1)"; then
   trap - ERR
   mdbt_fail "$OP" "failed to render MariaDB restore manifest: ${MANIFEST}" \
@@ -344,31 +388,46 @@ if ! MANIFEST="$(_build_manifest "$TEMP_SECRET_NAME" 2>&1)"; then
        '{namespace: $ns, target: $target}')" 3
 fi
 
-# Step 4: Refuse to overwrite an existing target.
-if _kubectl get mariadb "$TARGET" >/dev/null 2>&1; then
-  mdbt_fail "$OP" \
-    "target MariaDB '${TARGET}' already exists; migration restore provisions a NEW instance and never overwrites in place" \
-    "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" \
-       '{namespace: $ns, target: $target}')" 2
-fi
-
-# Step 5: Apply and wait.
-if ! apply_out="$(printf '%s\n' "$MANIFEST" | _kubectl apply -f - 2>&1)"; then
+# Step 5: Create (never apply) — `create` atomically fails if the target
+# already exists, closing the check-then-apply race a separate `get` probe
+# would leave open (another actor could create the target between the check
+# and the apply, which `apply` would then silently patch instead of refuse).
+if ! create_out="$(printf '%s\n' "$MANIFEST" | _kubectl create -f - 2>&1)"; then
   trap - ERR
-  mdbt_fail "$OP" "failed to apply MariaDB restore manifest: ${apply_out}" \
+  if [[ "$create_out" == *AlreadyExists* || "$create_out" == *"already exists"* ]]; then
+    mdbt_fail "$OP" \
+      "target MariaDB '${TARGET}' already exists; migration restore provisions a NEW instance and never overwrites in place" \
+      "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" \
+         '{namespace: $ns, target: $target}')" 2
+  fi
+  mdbt_fail "$OP" "failed to create MariaDB restore manifest: ${create_out}" \
     "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" \
        '{namespace: $ns, target: $target}')" 3
 fi
+
+# The CR now exists and may reference the temp Secret — stop the blanket
+# EXIT-trap cleanup. Only the "reached Ready" path below deletes it now;
+# a wait-timeout leaves it in place; see the wait branch below.
+trap - EXIT
 
 # wait_timeout=0 is rejected above, so this always waits: the temp credential
 # Secret must outlive the operator's read of it, and Ready is the only signal
 # this script has that the read already happened.
 if ! mdbt_wait_mariadb_ready "$TARGET" "$WAIT_TIMEOUT"; then
+  # Do NOT delete the temp Secret here — the restore may still be in flight
+  # and the operator may not have consumed bootstrapFrom.s3's credentials
+  # yet. Deleting it now would turn a slow-but-recoverable restore into a
+  # guaranteed failure. It's named clearly enough for manual cleanup once
+  # the restore either completes or is confirmed abandoned.
   mdbt_write_result "$(response_err "$OP" \
-    "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}" \
+    "MariaDB ${TARGET} was provisioned but did not become Ready within ${WAIT_TIMEOUT}; temporary credential secret '${TEMP_SECRET_NAME}' was intentionally left in place (may still be needed) — clean it up manually once the restore is confirmed to have completed or been abandoned" \
     "$(restore_result true false)" 1)"
   exit 1
 fi
+
+# Ready confirms the operator has already consumed the Secret — safe to
+# clean up now.
+_cleanup_temp_secret
 
 mdbt_write_result "$(response_ok "$OP" \
   "MariaDB restored into new instance ${TARGET} from backup ${BACKUP_FILE}" \

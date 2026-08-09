@@ -36,6 +36,8 @@ setup() {
   export CURL_LOG
   VAULT_WRITE_CAPTURE="${TEST_TMPDIR}/vault-write.json"
   export VAULT_WRITE_CAPTURE
+  POD_LOOKUP_LOG="${TEST_TMPDIR}/pod-lookup.log"
+  export POD_LOOKUP_LOG
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
@@ -82,6 +84,18 @@ JSON
 JSON
     exit 0
   fi
+
+  if [[ "$resource" == "secret" ]]; then
+    case "$output" in
+      *'.data.'*)
+        key="${output##*data.}"
+        key="${key%\}}"
+        mock_var="MOCK_SECRET_KEY_${key}"
+        [[ -n "${!mock_var+x}" ]] && printf '%s' "${!mock_var}"
+        exit 0
+        ;;
+    esac
+  fi
 fi
 
 if [[ "$cmd" == "exec" ]]; then
@@ -96,6 +110,7 @@ if [[ "$cmd" == "exec" ]]; then
 
   if [[ "${command[0]:-}" == "printenv" && "${#command[@]}" -gt 1 ]]; then
     var_name="${command[1]}"
+    [[ -n "${POD_LOOKUP_LOG:-}" ]] && printf '%s\n' "$var_name" >> "${POD_LOOKUP_LOG}"
     mock_key="MOCK_ENV_${var_name}"
     # Exit 1 (unset) when the MOCK_ENV_<VAR> shell variable is not exported.
     if [[ -z "${!mock_key+x}" ]]; then
@@ -123,18 +138,21 @@ url="${args[$(( ${#args[@]} - 1 ))]}"
 
 case "$url" in
   */auth/approle/login)
+    # Drain the piped request body first, like real curl does (it must read
+    # the whole body to send Content-Length) — an early exit here races with
+    # the writer and can SIGPIPE it under `pipefail`.
+    cat > /dev/null
     [[ "${MOCK_VAULT_LOGIN_FAIL:-0}" == "1" ]] && exit 1
     echo '{"auth":{"client_token":"test-vault-token"}}'
     exit 0
     ;;
   */data/*)
     [[ "${MOCK_VAULT_WRITE_FAIL:-0}" == "1" ]] && exit 1
+    # Body now arrives via --data-binary @- (stdin), not a --data argv value.
     if [[ -n "${VAULT_WRITE_CAPTURE:-}" ]]; then
-      prev=""
-      for a in "${args[@]}"; do
-        [[ "$prev" == "--data" ]] && printf '%s' "$a" > "${VAULT_WRITE_CAPTURE}"
-        prev="$a"
-      done
+      cat > "${VAULT_WRITE_CAPTURE}"
+    else
+      cat > /dev/null
     fi
     echo '{}'
     exit 0
@@ -192,6 +210,10 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '.vault.keysMissing')" = '["1BAD_NAME"]' ]
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "NO_VARS_FOUND" ]
+  # Proves the pod lookup itself was skipped, not merely attempted-and-failed
+  # (the mock's printenv handler would exit 1 for any unset MOCK_ENV_<VAR>,
+  # which would look identical from the outcome alone).
+  [ ! -f "${POD_LOOKUP_LOG}" ]
 }
 
 @test "the vault write payload contains exactly the values that were found" {
@@ -240,6 +262,59 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Secret-source mode
+# ---------------------------------------------------------------------------
+
+@test "reads a key from --secret-keys without requiring --mdb" {
+  export MOCK_SECRET_KEY_password="bXktcmVwbC1wYXNz" # "my-repl-pass"
+
+  run "${SCRIPT}" --namespace db-1 --secret-name mariadb-account-repl-user \
+    --secret-keys password --vault-path migration/job-1/source --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "OK" ]
+  [ "$(printf '%s' "$output" | jq -c '.vault.keysWritten')" = '["password"]' ]
+  [[ "$output" != *"my-repl-pass"* ]]
+}
+
+@test "--secret-keys entry with =vault_key stores under the renamed key" {
+  export MOCK_SECRET_KEY_password="bXktcmVwbC1wYXNz" # "my-repl-pass"
+
+  run "${SCRIPT}" --namespace db-1 --secret-name mariadb-account-repl-user \
+    --secret-keys "password=repl_password" --vault-path migration/job-1/source --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '.vault.keysWritten')" = '["repl_password"]' ]
+}
+
+@test "a requested-but-missing secret key is reported missing, not written" {
+  run "${SCRIPT}" --namespace db-1 --secret-name mariadb-account-repl-user \
+    --secret-keys does_not_exist --vault-path migration/job-1/source --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "NO_VARS_FOUND" ]
+  [ "$(printf '%s' "$output" | jq -c '.vault.keysMissing')" = '["does_not_exist"]' ]
+}
+
+@test "combines --envs (pod) and --secret-keys (Secret) into one vault write" {
+  export MOCK_ENV_MARIADB_ROOT_PASSWORD="secret-root-pass"
+  export MOCK_SECRET_KEY_password="bXktcmVwbC1wYXNz" # "my-repl-pass"
+
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace db-1 --mdb mariadb \
+    --envs "MARIADB_ROOT_PASSWORD=root_password" \
+    --secret-name mariadb-account-repl-user --secret-keys "password=repl_password" \
+    --vault-path migration/job-1/source --json
+
+  [ "$status" -eq 0 ]
+  written="$(printf '%s' "$output" | jq -c '.vault.keysWritten | sort')"
+  [ "$written" = '["repl_password","root_password"]' ]
+  [ -f "${VAULT_WRITE_CAPTURE}" ]
+  payload="$(cat "${VAULT_WRITE_CAPTURE}")"
+  [ "$(jq -r '.data.root_password' <<<"$payload")" = "secret-root-pass" ]
+  [ "$(jq -r '.data.repl_password' <<<"$payload")" = "my-repl-pass" ]
+}
+
+# ---------------------------------------------------------------------------
 # Credential safety: the whole point of this task
 # ---------------------------------------------------------------------------
 
@@ -265,6 +340,23 @@ EOF
     --envs MARIADB_ROOT_PASSWORD --vault-path migration/job-1/source --json
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq 'has("vars")')" = "false" ]
+}
+
+@test "VAULT_SECRET_ID, the client token, and the relayed value never appear in curl argv" {
+  run "${SCRIPT}" --context kind-cluster-dbs --namespace db-1 --mdb mariadb \
+    --envs MARIADB_ROOT_PASSWORD --vault-path migration/job-1/source --json
+  [ "$status" -eq 0 ]
+  [ -f "${CURL_LOG}" ]
+  # role_id/secret_id go to jq over env vars and the login body over stdin;
+  # the token goes in a --config file, never --header on the command line.
+  run grep -F "${VAULT_SECRET_ID}" "${CURL_LOG}"
+  [ "$status" -ne 0 ]
+  run grep -F "test-vault-token" "${CURL_LOG}"
+  [ "$status" -ne 0 ]
+  run grep -F "secret-root-pass" "${CURL_LOG}"
+  [ "$status" -ne 0 ]
+  run grep -F -- "--header" "${CURL_LOG}"
+  [ "$status" -ne 0 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -355,7 +447,13 @@ EOF
   [ "$status" -eq 2 ]
 }
 
-@test "exits 2 when --envs is missing" {
+@test "exits 2 when neither --envs nor --secret-keys is given" {
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --vault-path migration/job-1/source --json
+  [ "$status" -eq 2 ]
+}
+
+@test "exits 2 when --secret-keys is given without --secret-name" {
+  run "${SCRIPT}" --namespace db-1 --secret-keys password \
+    --vault-path migration/job-1/source --json
   [ "$status" -eq 2 ]
 }

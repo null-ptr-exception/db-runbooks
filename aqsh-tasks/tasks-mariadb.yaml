@@ -672,11 +672,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       # - name: resource
       #   env: MARIADB_RESOURCE
       #   required: false
@@ -740,11 +735,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: vault_path
         env: VAULT_PATH
         required: true
@@ -776,11 +766,6 @@ tasks:
         required: true
         type: string
         pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: resource
         env: MARIADB_RESOURCE
         required: false
@@ -833,11 +818,6 @@ tasks:
         env: TARGET_IP
         required: true
         type: string
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       # - name: resource
       #   env: MARIADB_RESOURCE
       #   required: false
@@ -907,11 +887,6 @@ tasks:
         required: false
         type: string
         default: "false"
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       # - name: resource
       #   env: MARIADB_RESOURCE
       #   required: false
@@ -1015,11 +990,6 @@ tasks:
         required: false
         type: string
         default: ""
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: dry_run
         env: DRY_RUN
         required: false
@@ -1089,11 +1059,6 @@ tasks:
         required: false
         type: string
         default: bzip2
-      - name: context
-        env: K8S_CONTEXT
-        required: false
-        type: string
-        default: ""
       - name: backup_name
         env: BACKUP_NAME
         required: false

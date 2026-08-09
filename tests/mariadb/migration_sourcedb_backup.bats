@@ -249,7 +249,10 @@ _sourcedb_backup_result_data() {
 
   local task_id
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
-  wait_for_task "$MARIADB_AQSH_URL" "$task_id"
+  # Poll at least as long as the payload's own wait_timeout (10m/600s), not
+  # wait_for_task's 540s default — otherwise the bats-side poll can give up
+  # before a legitimately-slow-but-still-within-budget backup finishes.
+  wait_for_task "$MARIADB_AQSH_URL" "$task_id" 600
 
   local data created bucket
   data=$(_sourcedb_backup_result_data "$TASK_RESPONSE")

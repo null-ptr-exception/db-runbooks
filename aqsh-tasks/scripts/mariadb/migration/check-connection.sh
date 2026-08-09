@@ -5,8 +5,21 @@ set -euo pipefail
 # mariadb/migration/check-connection.sh
 # Check if a MariaDB pod can connect to a given host IP using root credentials.
 #
-# Execs into the primary pod, reads the root password from the pod env
-# (MARIADB_ROOT_PASSWORD), then attempts a MariaDB login to the target host.
+# Execs into the primary pod, then resolves the password to authenticate
+# with: by default the pod's own env (MARIADB_ROOT_PASSWORD) — which only
+# makes sense when the target IP shares that same password (e.g. testing
+# reachability within one platform). For a cross-cluster migration, source
+# and target legitimately have DIFFERENT root passwords, so --repl-password-secret
+# (mirroring migration/setup-replication's flag of the same name) lets the
+# caller point at the Secret migration/read-db-env-from-vault relayed the
+# source's password into, and authenticate to the source with ITS password
+# instead of the target pod's own.
+#
+# When the connection succeeds, a further check compares @@server_id on both
+# sides: replication identifies servers by server_id, and a collision (or
+# even just enough proximity to collide once replicas are added) between
+# source and target breaks replication in a way that's easy to miss until
+# it's already running. See the server_id check below for the exact rule.
 # =============================================================================
 
 MDB_INPUT="${MARIADB_NAME:-${MARIADB_STS_NAME:-}}"
@@ -38,6 +51,17 @@ Target options:
   --container <name>        MariaDB container name. Default: mariadb.
   --port <port>             MariaDB port on the target host. Default: 3306.
 
+Password options:
+  --repl-password-secret <name>   Secret holding the password to authenticate
+                                   the target IP with. Defaults to using the
+                                   pod's own MARIADB_ROOT_PASSWORD — only
+                                   correct when the target shares that
+                                   password. For a cross-cluster check with a
+                                   differently-credentialed source, point this
+                                   at the Secret migration/read-db-env-from-vault
+                                   relayed the source's password into.
+  --repl-password-key <key>       Key in the secret. Default: password.
+
 Output:
   --json                    Print only JSON result to stdout.
   --result-file <path>      Write JSON result to this file.
@@ -58,21 +82,25 @@ MDB="$MDB_INPUT"
 CONTAINER="${MARIADB_CONTAINER:-mariadb}"
 TARGET_IP="${TARGET_IP:-}"
 TARGET_PORT="${TARGET_PORT:-3306}"
+REPL_PASSWORD_SECRET="${REPL_PASSWORD_SECRET:-}"
+REPL_PASSWORD_KEY="${REPL_PASSWORD_KEY:-password}"
 JSON_ONLY=0
 RESULT_FILE="${AQSH_RESULT_FILE:-}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --context)      require_value "$1" "${2:-}"; CONTEXT="$2";      shift 2 ;;
-    --namespace)    require_value "$1" "${2:-}"; NAMESPACE="$2";    shift 2 ;;
-    --resource)     require_value "$1" "${2:-}"; RESOURCE="$2";     shift 2 ;;
-    --mdb | --name) require_value "$1" "${2:-}"; MDB="$2";          shift 2 ;;
-    --container)    require_value "$1" "${2:-}"; CONTAINER="$2";    shift 2 ;;
-    --ip)           require_value "$1" "${2:-}"; TARGET_IP="$2";    shift 2 ;;
-    --port)         require_value "$1" "${2:-}"; TARGET_PORT="$2";  shift 2 ;;
-    --json)         JSON_ONLY=1; shift ;;
-    --result-file)  require_value "$1" "${2:-}"; RESULT_FILE="$2";  shift 2 ;;
-    -h | --help)    usage; exit 0 ;;
+    --context)               require_value "$1" "${2:-}"; CONTEXT="$2";              shift 2 ;;
+    --namespace)             require_value "$1" "${2:-}"; NAMESPACE="$2";            shift 2 ;;
+    --resource)              require_value "$1" "${2:-}"; RESOURCE="$2";             shift 2 ;;
+    --mdb | --name)          require_value "$1" "${2:-}"; MDB="$2";                  shift 2 ;;
+    --container)             require_value "$1" "${2:-}"; CONTAINER="$2";            shift 2 ;;
+    --ip)                    require_value "$1" "${2:-}"; TARGET_IP="$2";            shift 2 ;;
+    --port)                  require_value "$1" "${2:-}"; TARGET_PORT="$2";          shift 2 ;;
+    --repl-password-secret)  require_value "$1" "${2:-}"; REPL_PASSWORD_SECRET="$2"; shift 2 ;;
+    --repl-password-key)     require_value "$1" "${2:-}"; REPL_PASSWORD_KEY="$2";    shift 2 ;;
+    --json)                  JSON_ONLY=1; shift ;;
+    --result-file)           require_value "$1" "${2:-}"; RESULT_FILE="$2";          shift 2 ;;
+    -h | --help)              usage; exit 0 ;;
     *) echo "error: unknown option: $1" >&2; usage; exit 2 ;;
   esac
 done
@@ -89,8 +117,8 @@ if [[ -z "$TARGET_IP" ]]; then
   exit 2
 fi
 
-if ! [[ "$TARGET_PORT" =~ ^[0-9]+$ ]]; then
-  echo "error: --port must be a positive integer" >&2
+if ! [[ "$TARGET_PORT" =~ ^[0-9]{1,5}$ ]] || (( TARGET_PORT < 1 || TARGET_PORT > 65535 )); then
+  echo "error: --port must be an integer from 1 through 65535" >&2
   exit 2
 fi
 
@@ -186,6 +214,12 @@ fi
 
 if [[ "$JSON_ONLY" -ne 1 ]]; then echo; fi
 
+# A source and its replicas are assumed to number at most 8 in this
+# sandbox's topology; server_id collisions are checked mod 10 (rather than
+# exactly), leaving headroom so a target that's "close" to colliding is
+# still flagged, not just an exact match.
+SERVER_ID_COLLISION_MODULUS=10
+
 # ---------------------------------------------------------------------------
 # Checks 3 & 4: root password and connection (skipped if pod exec blocked)
 # ---------------------------------------------------------------------------
@@ -193,16 +227,27 @@ if [[ "$BLOCK_COUNT" -eq 0 && "$ERROR_COUNT" -eq 0 ]]; then
   if [[ "$JSON_ONLY" -ne 1 ]]; then echo "=== Root Password ==="; fi
 
   ROOT_PASSWORD=""
-  if [[ -n "$TARGET_POD" ]]; then
-    ROOT_PASSWORD=$(mariadb_exec "$TARGET_POD" printenv MARIADB_ROOT_PASSWORD 2>/dev/null) || true
-  fi
-
-  if [[ -z "$ROOT_PASSWORD" ]]; then
-    emit_check root_password ERROR ROOT_PASSWORD_NOT_FOUND \
-      "MARIADB_ROOT_PASSWORD not set in pod=${TARGET_POD:-<none>}" "${TARGET_POD:-}"
+  if [[ -n "$REPL_PASSWORD_SECRET" ]]; then
+    ROOT_PASSWORD="$(k8s_secret_value "$REPL_PASSWORD_SECRET" "$REPL_PASSWORD_KEY")" || true
+    if [[ -z "$ROOT_PASSWORD" ]]; then
+      emit_check root_password ERROR ROOT_PASSWORD_NOT_FOUND \
+        "Cannot read password from secret ${REPL_PASSWORD_SECRET} (key: ${REPL_PASSWORD_KEY})" "${TARGET_POD:-}"
+    else
+      emit_check root_password PASS ROOT_PASSWORD_OK \
+        "Password retrieved from secret ${REPL_PASSWORD_SECRET} (key: ${REPL_PASSWORD_KEY})" "${TARGET_POD:-}"
+    fi
   else
-    emit_check root_password PASS ROOT_PASSWORD_OK \
-      "MARIADB_ROOT_PASSWORD retrieved from pod=${TARGET_POD}" "$TARGET_POD"
+    if [[ -n "$TARGET_POD" ]]; then
+      ROOT_PASSWORD=$(mariadb_exec "$TARGET_POD" printenv MARIADB_ROOT_PASSWORD 2>/dev/null) || true
+    fi
+
+    if [[ -z "$ROOT_PASSWORD" ]]; then
+      emit_check root_password ERROR ROOT_PASSWORD_NOT_FOUND \
+        "MARIADB_ROOT_PASSWORD not set in pod=${TARGET_POD:-<none>}" "${TARGET_POD:-}"
+    else
+      emit_check root_password PASS ROOT_PASSWORD_OK \
+        "MARIADB_ROOT_PASSWORD retrieved from pod=${TARGET_POD}" "$TARGET_POD"
+    fi
   fi
 
   if [[ "$JSON_ONLY" -ne 1 ]]; then echo; fi
@@ -215,6 +260,28 @@ if [[ "$BLOCK_COUNT" -eq 0 && "$ERROR_COUNT" -eq 0 ]]; then
         --connect-timeout=5 -e "SELECT 1" 2>/dev/null; then
       emit_check connection PASS CONNECTION_OK \
         "Connected to ${TARGET_IP}:${TARGET_PORT} as root from pod=${TARGET_POD}" "$TARGET_POD"
+
+      if [[ "$JSON_ONLY" -ne 1 ]]; then echo; echo "=== server_id collision check ==="; fi
+
+      # This pod's own server_id (local connection, no -h/-P) vs. the
+      # remote's, over the same connection that just passed above.
+      LOCAL_SERVER_ID=""
+      LOCAL_SERVER_ID=$(mariadb_sql "$TARGET_POD" "$ROOT_PASSWORD" "SELECT @@server_id") || true
+      REMOTE_SERVER_ID=""
+      REMOTE_SERVER_ID=$(mariadb_exec "$TARGET_POD" mariadb -u root -p"$ROOT_PASSWORD" \
+        -h "$TARGET_IP" -P "$TARGET_PORT" --connect-timeout=5 -N -B \
+        -e "SELECT @@server_id" 2>/dev/null) || true
+
+      if [[ ! "$LOCAL_SERVER_ID" =~ ^[0-9]+$ || ! "$REMOTE_SERVER_ID" =~ ^[0-9]+$ ]]; then
+        emit_check server_id ERROR SERVER_ID_UNAVAILABLE \
+          "Could not read @@server_id from this pod (got '${LOCAL_SERVER_ID}') and/or ${TARGET_IP}:${TARGET_PORT} (got '${REMOTE_SERVER_ID}')" "$TARGET_POD"
+      elif (( LOCAL_SERVER_ID % SERVER_ID_COLLISION_MODULUS == REMOTE_SERVER_ID % SERVER_ID_COLLISION_MODULUS )); then
+        emit_check server_id BLOCK SERVER_ID_COLLISION_RISK \
+          "this pod's server_id=${LOCAL_SERVER_ID} and ${TARGET_IP}:${TARGET_PORT}'s server_id=${REMOTE_SERVER_ID} collide mod ${SERVER_ID_COLLISION_MODULUS} — replicating from it risks a server_id clash with it or one of its own replicas" "$TARGET_POD"
+      else
+        emit_check server_id PASS SERVER_ID_OK \
+          "this pod's server_id=${LOCAL_SERVER_ID} and ${TARGET_IP}:${TARGET_PORT}'s server_id=${REMOTE_SERVER_ID} do not collide mod ${SERVER_ID_COLLISION_MODULUS}" "$TARGET_POD"
+      fi
     else
       emit_check connection BLOCK CONNECTION_FAILED \
         "Cannot connect to ${TARGET_IP}:${TARGET_PORT} as root from pod=${TARGET_POD}" "$TARGET_POD"

@@ -46,8 +46,12 @@ Target options:
   --container <name>                MariaDB container name. Default: mariadb.
 
 Password options:
-  --repl-password-secret <name>     Secret holding the replication (source root) password.
-                                    Defaults to using the pod's own MARIADB_ROOT_PASSWORD.
+  --repl-user <name>                 Account CHANGE MASTER authenticates as. Default: root.
+                                    Non-root requires --repl-password-secret (see below) — there
+                                    is no sensible default password for an arbitrary user.
+  --repl-password-secret <name>     Secret holding the replication password. Required unless
+                                    --repl-user is root, in which case it defaults to using the
+                                    target pod's own MARIADB_ROOT_PASSWORD.
   --repl-password-key <key>         Key in the secret. Default: password.
 
 Safety options:
@@ -61,7 +65,7 @@ Output:
 
 Environment equivalents:
   DB_NAMESPACE, REPL_HOST, REPL_CHANNEL, REPL_PORT, REPL_DELAY, REPL_ASYNC,
-  K8S_CONTEXT, MARIADB_RESOURCE, MARIADB_NAME, MARIADB_CONTAINER,
+  K8S_CONTEXT, MARIADB_RESOURCE, MARIADB_NAME, MARIADB_CONTAINER, REPL_USER,
   REPL_PASSWORD_SECRET, REPL_PASSWORD_KEY, DRY_RUN, CONFIRM, AQSH_RESULT_FILE.
 EOF
 }
@@ -99,6 +103,7 @@ REPL_CHANNEL="${REPL_CHANNEL:-}"
 REPL_PORT="${REPL_PORT:-3306}"
 REPL_DELAY="${REPL_DELAY:-}"
 REPL_ASYNC="${REPL_ASYNC:-false}"
+REPL_USER="${REPL_USER:-root}"
 REPL_PASSWORD_SECRET="${REPL_PASSWORD_SECRET:-}"
 REPL_PASSWORD_KEY="${REPL_PASSWORD_KEY:-password}"
 DRY_RUN="${DRY_RUN:-true}"
@@ -120,6 +125,7 @@ while [[ $# -gt 0 ]]; do
     --port)                  require_value "$1" "${2:-}"; REPL_PORT="$2";             shift 2 ;;
     --delay)                 require_value "$1" "${2:-}"; REPL_DELAY="$2";            shift 2 ;;
     --async)                 require_value "$1" "${2:-}"; REPL_ASYNC="$2";            shift 2 ;;
+    --repl-user)             require_value "$1" "${2:-}"; REPL_USER="$2";             shift 2 ;;
     --repl-password-secret)  require_value "$1" "${2:-}"; REPL_PASSWORD_SECRET="$2"; shift 2 ;;
     --repl-password-key)     require_value "$1" "${2:-}"; REPL_PASSWORD_KEY="$2";    shift 2 ;;
     --dry-run)               require_value "$1" "${2:-}"; DRY_RUN="$2";               shift 2 ;;
@@ -143,8 +149,8 @@ if [[ -n "$NAMESPACE" && ! "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; t
   add_error "namespace must be a valid Kubernetes namespace"
 fi
 
-if [[ -n "$REPL_PORT" && ! "$REPL_PORT" =~ ^[0-9]+$ ]]; then
-  add_error "port must be a positive integer"
+if [[ -n "$REPL_PORT" ]] && { [[ ! "$REPL_PORT" =~ ^[0-9]{1,5}$ ]] || (( REPL_PORT < 1 || REPL_PORT > 65535 )); }; then
+  add_error "port must be an integer from 1 through 65535"
 fi
 
 if [[ -n "$REPL_DELAY" && ! "$REPL_DELAY" =~ ^[0-9]+$ ]]; then
@@ -153,6 +159,17 @@ fi
 
 if [[ -n "$REPL_CHANNEL" ]] && { [[ "$REPL_CHANNEL" == *$'\n'* ]] || [[ "$REPL_CHANNEL" =~ [[:cntrl:]] ]]; }; then
   add_error "channel name contains unsupported control characters"
+fi
+
+[[ -n "$REPL_USER" ]] || add_error "repl_user must not be empty"
+
+# The no-secret fallback below reads the TARGET pod's own root password —
+# that's only a sensible MASTER_PASSWORD when authenticating as root (this
+# sandbox's source/target instances happen to share one root password). Any
+# other repl_user has no default password source, so require an explicit
+# secret rather than silently authenticating with the wrong credential.
+if [[ -n "$REPL_USER" && "$REPL_USER" != "root" && -z "$REPL_PASSWORD_SECRET" ]]; then
+  add_error "repl_password_secret is required when repl_user is not root"
 fi
 
 is_valid_bool() {
@@ -179,7 +196,7 @@ build_change_master_sql() {
   local sql="CHANGE MASTER${CHANNEL_CLAUSE} TO"
   sql="${sql} MASTER_HOST=$(sql_string_literal "$REPL_HOST"),"
   sql="${sql} MASTER_PORT=${REPL_PORT},"
-  sql="${sql} MASTER_USER='root',"
+  sql="${sql} MASTER_USER=$(sql_string_literal "$REPL_USER"),"
   sql="${sql} MASTER_PASSWORD=$(sql_string_literal "$password"),"
   sql="${sql} MASTER_USE_GTID=slave_pos"
   if [[ -n "$REPL_DELAY" ]]; then
@@ -227,7 +244,7 @@ errors_json() {
 result_json() {
   local status="$1" reason_code="$2" summary="$3"
   local pod="${4:-}" sql_plan="${5:-[]}" slave_status="${6:-}" error_json="${7:-[]}"
-  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s","pod":"%s"},"replication":{"channel":"%s","host":"%s","port":%s,"delay_sec":%s,"async":%s},"dry_run":%s,"sql_plan":%s,"slave_status":"%s","errors":%s}\n' \
+  printf '{"status":"%s","reason_code":"%s","summary":"%s","target":{"context":"%s","namespace":"%s","resource":"%s","mdb":"%s","pod":"%s"},"replication":{"user":"%s","channel":"%s","host":"%s","port":%s,"delay_sec":%s,"async":%s},"dry_run":%s,"sql_plan":%s,"slave_status":"%s","errors":%s}\n' \
     "$status" \
     "$(json_escape "$reason_code")" \
     "$(json_escape "$summary")" \
@@ -236,6 +253,7 @@ result_json() {
     "$(json_escape "$RESOURCE")" \
     "$(json_escape "$MDB")" \
     "$(json_escape "$pod")" \
+    "$(json_escape "$REPL_USER")" \
     "$(json_escape "$REPL_CHANNEL")" \
     "$(json_escape "$REPL_HOST")" \
     "$(json_number_or_null "$REPL_PORT")" \
@@ -339,10 +357,7 @@ fi
 
 REPL_PASSWORD=""
 if [[ -n "$REPL_PASSWORD_SECRET" ]]; then
-  encoded=$(_kubectl get secret "$REPL_PASSWORD_SECRET" -o "jsonpath={.data.${REPL_PASSWORD_KEY}}" 2>/dev/null) || true
-  if [[ -n "$encoded" ]]; then
-    REPL_PASSWORD="$(printf '%s' "$encoded" | base64 -d)"
-  fi
+  REPL_PASSWORD="$(k8s_secret_value "$REPL_PASSWORD_SECRET" "$REPL_PASSWORD_KEY")" || true
   if [[ -z "$REPL_PASSWORD" ]]; then
     SUMMARY="Cannot read replication password from secret ${REPL_PASSWORD_SECRET} (key: ${REPL_PASSWORD_KEY})"
     emit_result "$(result_json ERROR REPL_PASSWORD_UNAVAILABLE "$SUMMARY" "$TARGET_POD" "$SQL_PLAN_JSON" "" "[]")" ERROR "$SUMMARY"
@@ -397,6 +412,34 @@ SLAVE_STATUS_OUT=""
 SLAVE_STATUS_OUT="$(mariadb_sql_vertical "$TARGET_POD" "$ROOT_PASSWORD" "SHOW ALL SLAVES STATUS" 2>/dev/null || true)"
 if [[ "$JSON_ONLY" -ne 1 ]]; then
   printf '%s\n' "$SLAVE_STATUS_OUT"
+fi
+
+# ---------- verify the channel actually came up healthy ----------
+# START SLAVE succeeding only means the command was accepted — the IO/SQL
+# threads connect and start replicating asynchronously afterward, so a
+# check made too early would false-negative. Poll the channel-specific
+# status (not the SHOW ALL SLAVES STATUS captured above, which returns one
+# block per channel — imprecise if this instance already has other channels
+# configured) for a few seconds so a fast, real connection failure (bad
+# password, unreachable host, server_id collision) is caught and reported
+# as ERROR rather than a false DONE.
+# Env-overridable (not task inputs) so tests can run this instantly.
+_HEALTH_RETRIES="${SETUP_REPL_HEALTH_RETRIES:-5}"
+_HEALTH_DELAY="${SETUP_REPL_HEALTH_DELAY:-2}"
+IO_RUNNING="" SQL_RUNNING="" CHANNEL_STATUS_OUT=""
+for ((_attempt = 1; _attempt <= _HEALTH_RETRIES; _attempt++)); do
+  CHANNEL_STATUS_OUT="$(mariadb_sql_vertical "$TARGET_POD" "$ROOT_PASSWORD" "SHOW SLAVE${CHANNEL_CLAUSE} STATUS" 2>/dev/null || true)"
+  IO_RUNNING="$(printf '%s\n' "$CHANNEL_STATUS_OUT" | mariadb_status_field Slave_IO_Running)"
+  SQL_RUNNING="$(printf '%s\n' "$CHANNEL_STATUS_OUT" | mariadb_status_field Slave_SQL_Running)"
+  [[ "$IO_RUNNING" == "Yes" && "$SQL_RUNNING" == "Yes" ]] && break
+  (( _attempt < _HEALTH_RETRIES )) && sleep "$_HEALTH_DELAY"
+done
+
+if [[ "$IO_RUNNING" != "Yes" || "$SQL_RUNNING" != "Yes" ]]; then
+  LAST_IO_ERROR="$(printf '%s\n' "$CHANNEL_STATUS_OUT" | mariadb_status_field Last_IO_Error)"
+  LAST_SQL_ERROR="$(printf '%s\n' "$CHANNEL_STATUS_OUT" | mariadb_status_field Last_SQL_Error)"
+  SUMMARY="Replication was configured but did not come up healthy on pod=${TARGET_POD}: Slave_IO_Running=${IO_RUNNING:-Unknown} Slave_SQL_Running=${SQL_RUNNING:-Unknown}${LAST_IO_ERROR:+ io_error=\"${LAST_IO_ERROR}\"}${LAST_SQL_ERROR:+ sql_error=\"${LAST_SQL_ERROR}\"}"
+  emit_result "$(result_json ERROR REPLICATION_NOT_HEALTHY "$SUMMARY" "$TARGET_POD" "$SQL_PLAN_JSON" "$SLAVE_STATUS_OUT" "[]")" ERROR "$SUMMARY"
 fi
 
 SUMMARY="Replication channel configured and started on pod=${TARGET_POD} host=${REPL_HOST}:${REPL_PORT} channel=${REPL_CHANNEL:-<default>}"

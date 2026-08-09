@@ -7,6 +7,8 @@ setup() {
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/setup-replication.sh"
   export MARIADB_NAME=mariadb
   export _LOG_CURRENT_LEVEL=3
+  # Post-START-SLAVE health check retries instantly in tests.
+  export SETUP_REPL_HEALTH_DELAY=0
   mkdir -p "${TEST_TMPDIR}/bin"
 
   # Mock kubectl
@@ -110,6 +112,16 @@ if [[ "$cmd" == "exec" ]]; then
           printf '%s\n' "${MOCK_SLAVE_STATUS_OUT:-Slave_IO_Running: Yes}"
           exit 0
           ;;
+        "SHOW SLAVE"*)
+          # Channel-specific status query the post-START-SLAVE health check
+          # polls. Defaults to healthy so existing DONE-path tests don't need
+          # to opt in; override MOCK_CHANNEL_IO_RUNNING/_SQL_RUNNING to
+          # simulate a channel that never comes up healthy.
+          printf 'Slave_IO_Running: %s\nSlave_SQL_Running: %s\nLast_IO_Error: %s\nLast_SQL_Error: %s\n' \
+            "${MOCK_CHANNEL_IO_RUNNING:-Yes}" "${MOCK_CHANNEL_SQL_RUNNING:-Yes}" \
+            "${MOCK_CHANNEL_LAST_IO_ERROR:-}" "${MOCK_CHANNEL_LAST_SQL_ERROR:-}"
+          exit 0
+          ;;
         *) exit 0 ;;
       esac
       ;;
@@ -152,6 +164,22 @@ EOF
   [[ "$(printf '%s' "$output" | jq -r '.errors[]')" == *"port must be"* ]]
   # A non-numeric port must not corrupt the JSON response itself.
   [ "$(printf '%s' "$output" | jq -r '.replication.port')" = "null" ]
+}
+
+@test "reports INVALID_INPUT when --port is 0" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --port 0 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [[ "$(printf '%s' "$output" | jq -r '.errors[]')" == *"port must be"* ]]
+}
+
+@test "reports INVALID_INPUT when --port is above 65535" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --port 99999999 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [[ "$(printf '%s' "$output" | jq -r '.errors[]')" == *"port must be"* ]]
 }
 
 @test "reports INVALID_INPUT when --delay is negative" {
@@ -317,6 +345,52 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# repl_user
+# ---------------------------------------------------------------------------
+
+@test "MASTER_USER defaults to root in the dry-run SQL plan" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  plan=$(printf '%s' "$output" | jq -r '.sql_plan[] | select(startswith("CHANGE MASTER"))')
+  [[ "$plan" == *"MASTER_USER='root'"* ]]
+  [ "$(printf '%s' "$output" | jq -r '.replication.user')" = "root" ]
+}
+
+@test "a custom repl_user without repl_password_secret is INVALID_INPUT" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --repl-user repl_svc --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "INVALID_INPUT" ]
+  [[ "$(printf '%s' "$output" | jq -r '.errors[]')" == *"repl_password_secret is required"* ]]
+}
+
+@test "a custom repl_user with repl_password_secret renders the correct MASTER_USER" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --repl-user repl_svc \
+    --repl-password-secret repl-creds --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "READY" ]
+  plan=$(printf '%s' "$output" | jq -r '.sql_plan[] | select(startswith("CHANGE MASTER"))')
+  [[ "$plan" == *"MASTER_USER='repl_svc'"* ]]
+}
+
+@test "a custom repl_user completes a real run using the secret's password, not root's" {
+  export MOCK_SECRET_B64="bXktcmVwbC1wYXNz" # "my-repl-pass"
+  export MOCK_ROOT_PASSWORD="target-root-pw"
+
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --repl-user repl_svc \
+    --repl-password-secret repl-creds --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "DONE" ]
+  [ "$(printf '%s' "$output" | jq -r '.replication.user')" = "repl_svc" ]
+  [[ "$output" != *"my-repl-pass"* ]]
+  [[ "$output" != *"target-root-pw"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # Real run: SQL execution failures
 # ---------------------------------------------------------------------------
 
@@ -364,6 +438,99 @@ Slave_SQL_Running: Yes"
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "REPLICATION_CONFIGURED" ]
   [ "$(printf '%s' "$output" | jq -r '.target.pod')" = "mariadb-0" ]
   [[ "$(printf '%s' "$output" | jq -r '.slave_status')" == *"Slave_IO_Running: Yes"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Post-START-SLAVE health verification
+# ---------------------------------------------------------------------------
+
+@test "reports ERROR with REPLICATION_NOT_HEALTHY when Slave_IO_Running never becomes Yes" {
+  export MOCK_CHANNEL_IO_RUNNING="Connecting"
+  export MOCK_CHANNEL_LAST_IO_ERROR="Can't connect to MySQL server"
+
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "REPLICATION_NOT_HEALTHY" ]
+  [[ "$(printf '%s' "$output" | jq -r '.summary')" == *"Can't connect to MySQL server"* ]]
+}
+
+@test "reports ERROR with REPLICATION_NOT_HEALTHY when Slave_SQL_Running never becomes Yes" {
+  export MOCK_CHANNEL_SQL_RUNNING="No"
+  export MOCK_CHANNEL_LAST_SQL_ERROR="Duplicate entry"
+
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "REPLICATION_NOT_HEALTHY" ]
+  [[ "$(printf '%s' "$output" | jq -r '.summary')" == *"Duplicate entry"* ]]
+}
+
+@test "DONE when the channel comes up healthy only after a retry" {
+  cat > "${TEST_TMPDIR}/bin/kubectl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+attempt_file="${TEST_TMPDIR}/attempts"
+args=()
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --context|--namespace|--kubeconfig) shift 2 ;;
+    -n) shift 2 ;;
+    *) args+=("\$1"); shift ;;
+  esac
+done
+cmd="\${args[0]:-}"
+[[ "\$cmd" == "cluster-info" ]] && { echo ok; exit 0; }
+if [[ "\$cmd" == "get" ]]; then
+  resource="\${args[1]:-}"
+  output="\${args[*]}"
+  if [[ "\$output" == *'items[*]'* ]]; then
+    [[ "\$resource" == "mariadb" ]] && printf 'mariadb\n'
+    exit 0
+  fi
+  [[ "\$output" == *'.spec.replicas'* ]] && { printf '1'; exit 0; }
+  printf '{}'; exit 0
+fi
+if [[ "\$cmd" == "exec" ]]; then
+  shift_index=0
+  for i in "\${!args[@]}"; do [[ "\${args[\$i]}" == "--" ]] && { shift_index=\$((i+1)); break; }; done
+  command=("\${args[@]:\$shift_index}")
+  case "\${command[0]:-}" in
+    printenv) printf 'secret-root-pass'; exit 0 ;;
+    mariadb)
+      last_idx=\$(( \${#command[@]} - 1 ))
+      query="\${command[\$last_idx]}"
+      case "\$query" in
+        "SHOW ALL SLAVES STATUS") printf 'Slave_IO_Running: Yes\n'; exit 0 ;;
+        "SHOW SLAVE"*)
+          n=0
+          [[ -f "\$attempt_file" ]] && n=\$(cat "\$attempt_file")
+          n=\$((n + 1))
+          echo "\$n" > "\$attempt_file"
+          if [[ "\$n" -lt 2 ]]; then
+            printf 'Slave_IO_Running: Connecting\nSlave_SQL_Running: Yes\n'
+          else
+            printf 'Slave_IO_Running: Yes\nSlave_SQL_Running: Yes\n'
+          fi
+          exit 0 ;;
+        *) exit 0 ;;
+      esac
+      ;;
+    *) exit 0 ;;
+  esac
+fi
+exit 1
+EOF
+  chmod +x "${TEST_TMPDIR}/bin/kubectl"
+
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "DONE" ]
+  # Proves it actually retried, not just got lucky on attempt 1.
+  [ "$(cat "${TEST_TMPDIR}/attempts")" -ge 2 ]
 }
 
 @test "result never exposes the real replication password" {

@@ -58,6 +58,21 @@ if [[ "$cmd" == "get" ]]; then
     esac
     exit 0
   fi
+
+  if [[ "$resource" == "secret" ]]; then
+    case "$output" in
+      *'.data.'*)
+        key="${output##*data.}"
+        key="${key%\}}"
+        mock_var="MOCK_SECRET_KEY_${key}"
+        if [[ -n "${!mock_var+x}" ]]; then
+          printf '%s' "${!mock_var}" | base64 -w0 2>/dev/null || printf '%s' "${!mock_var}" | base64
+          exit 0
+        fi
+        exit 1
+        ;;
+    esac
+  fi
 fi
 
 if [[ "$cmd" == "exec" ]]; then
@@ -90,6 +105,19 @@ if [[ "$cmd" == "exec" ]]; then
       exit 1
       ;;
     "mariadb")
+      full="${command[*]}"
+      case "$full" in
+        *"SELECT @@server_id"*)
+          # Defaults deliberately don't collide mod 10 (101 % 10 = 1,
+          # 202 % 10 = 2) so happy-path tests get server_id PASS unless a
+          # test explicitly overrides one of these to test a collision.
+          if [[ "$full" == *" -h "* ]]; then
+            printf '%s' "${MOCK_REMOTE_SERVER_ID:-202}"
+          else
+            printf '%s' "${MOCK_LOCAL_SERVER_ID:-101}"
+          fi
+          ;;
+      esac
       exit "${MOCK_MARIADB_CONNECT_EXIT:-0}"
       ;;
     *) exit 0 ;;
@@ -206,6 +234,81 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# server_id collision check
+# ---------------------------------------------------------------------------
+
+@test "server_id PASS when local and remote server_id do not collide mod 10" {
+  export MOCK_LOCAL_SERVER_ID=101
+  export MOCK_REMOTE_SERVER_ID=202
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "PASS" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "server_id") | .status')" = "PASS" ]
+}
+
+@test "server_id BLOCK with SERVER_ID_COLLISION_RISK on an exact match" {
+  export MOCK_LOCAL_SERVER_ID=101
+  export MOCK_REMOTE_SERVER_ID=101
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "BLOCK" ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "SERVER_ID_COLLISION_RISK" ]
+}
+
+@test "server_id BLOCK with SERVER_ID_COLLISION_RISK on a mod-10 collision (not just an exact match)" {
+  export MOCK_LOCAL_SERVER_ID=11
+  export MOCK_REMOTE_SERVER_ID=101
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "server_id") | .status')" = "BLOCK" ]
+}
+
+@test "server_id check does not run when the connection itself failed" {
+  export MOCK_MARIADB_CONNECT_EXIT=1
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq 'any(.checks[]; .name == "server_id")')" = "false" ]
+}
+
+# ---------------------------------------------------------------------------
+# --repl-password-secret: authenticate to the target with a relayed
+# credential instead of the pod's own MARIADB_ROOT_PASSWORD
+# ---------------------------------------------------------------------------
+
+@test "uses the password from --repl-password-secret instead of the pod's own env" {
+  export MOCK_SECRET_KEY_root_password="relayed-source-pass"
+  # If the pod's own env were used instead, printenv's mock would supply
+  # this different value — the connection check result doesn't distinguish
+  # them directly, but ROOT_PASSWORD_OK's detail text does.
+  export MOCK_ROOT_PASSWORD="pod-own-pass"
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 \
+    --repl-password-secret migration-job-1-source-creds \
+    --repl-password-key root_password --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .status')" = "PASS" ]
+  [[ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .detail')" == *"migration-job-1-source-creds"* ]]
+}
+
+@test "ERROR with ROOT_PASSWORD_NOT_FOUND when --repl-password-secret does not resolve" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 \
+    --repl-password-secret does-not-exist --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .reason_code')" = "ROOT_PASSWORD_NOT_FOUND" ]
+}
+
+# ---------------------------------------------------------------------------
 # Auto-detection
 # ---------------------------------------------------------------------------
 
@@ -261,6 +364,16 @@ EOF
 
 @test "exits 2 when --port is not numeric" {
   run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --port abc --json
+  [ "$status" -eq 2 ]
+}
+
+@test "exits 2 when --port is 0" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --port 0 --json
+  [ "$status" -eq 2 ]
+}
+
+@test "exits 2 when --port is above 65535" {
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 --port 99999999 --json
   [ "$status" -eq 2 ]
 }
 

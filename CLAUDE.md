@@ -131,7 +131,12 @@ the oplog/ops/profiler gateway tasks (`oplog/status`, `oplog/resize`,
 oplog size, currentOp, and the profiler level are all per-node state, not
 cluster-wide, so `ops/*`/`profiler/*` accept an optional `target_pod`
 defaulting to the elected PRIMARY, and `oplog/resize` applies to every
-current replica-set member itself rather than taking one) —
+current replica-set member itself rather than taking one) and the MQL
+gateway tasks (`mql/read`, `mql/write`; see `docs/mongodb/mql.md` —
+structured-JSON CRUD against one collection, `mql/read` accepts the same
+optional `target_pod` as `ops/*`/`profiler/*` while `mql/write` always
+targets the elected PRIMARY; `admin`/`local`/`config` are always refused
+regardless of internal config) —
 do NOT declare `sts_name`,
 `recovery_configmap`, `credential_secret`, `credential_user`,
 `credential_user_key`, `credential_pass_key`, `data_path`, or `mount_path` as

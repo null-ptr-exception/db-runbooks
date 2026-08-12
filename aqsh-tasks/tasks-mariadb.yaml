@@ -663,9 +663,9 @@ tasks:
         default: "false"
   replication/attach:
     script: mariadb/replication/attach.sh
-    description: "Attach an already-deployed standby to the primary in the peer cluster. Assesses first, then does whatever that requires: resumes replication when the standby's history still matches the primary, or re-seeds it from a fresh primary backup when it does not. Re-seeding DESTROYS the standby's current data; it only runs with confirm and only when nothing is connected to the standby."
-    # Assessment is fast; the budget is dominated by waiting for the operator to
-    # reconcile the topology and the replica threads to come up.
+    description: "Attach an existing mariadb-operator 0.24 standby to its peer primary using native MariaDB replication. Resumes a valid GTID history or restores B in place from a fresh primary backup before linking."
+    # Assessment is fast; the budget is dominated by the optional physical
+    # backup + in-place restore and waiting for the SQL replica threads.
     # Budget covers the re-seed path: a full backup on the primary plus restore
     # and link on this side.
     timeout: 45m
@@ -702,22 +702,6 @@ tasks:
         required: false
         type: string
         default: ""
-      # Used only if the standby turns out to need re-seeding, which requires a
-      # fresh backup from the primary's own AQSH. The caller's bearer token
-      # authenticates there too (same TokenReview backend). Not a confirmation
-      # gate — the connection guard and confirm are what make that path safe.
-      - name: peer_token
-        env: PEER_TOKEN
-        required: false
-        type: string
-        default: ""
-      # Optional: set REPL_PEER_AQSH_URL_DEFAULT once per deployment and callers
-      # never pass an address.
-      - name: peer_aqsh_url
-        env: PEER_AQSH_URL
-        required: false
-        type: string
-        default: ""
   replication/status:
     script: mariadb/replication/status.sh
     description: "Read-only cross-cluster replication status: link state, lag, and whether the standby could still resume from the primary"
@@ -736,7 +720,7 @@ tasks:
         default: "true"
   replication/detach:
     script: mariadb/replication/detach.sh
-    description: "Remove the cross-cluster replication link (multiCluster topology and its endpoint references). Leaves the database and its data in place."
+    description: "Stop and reset the v24 cross-cluster SQL replication link. Leaves the MariaDB CR, PVCs, data, and local replication in place."
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -866,7 +850,7 @@ tasks:
         default: "false"
   restore:
     script: mariadb/restore.sh
-    description: "Restore the database identified by namespace from a physical backup, optionally to a point in time"
+    description: "Restore a physical backup into a newly provisioned MariaDB instance, optionally to a point in time"
     timeout: 20m
     allowed_groups: ["system:serviceaccounts"]
     # The namespace identifies the managed database; the engine version, storage
@@ -895,6 +879,37 @@ tasks:
         required: false
         type: string
         default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  restore-in-place:
+    script: mariadb/restore-in-place.sh
+    description: "Overwrite an existing mariadb-operator 0.24 instance from one exact physical backup while preserving its MariaDB CR and PVC identities"
+    timeout: 30m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: backup
+        env: BACKUP_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: "900"
       - name: confirm
         env: CONFIRM
         required: false

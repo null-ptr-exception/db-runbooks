@@ -33,8 +33,11 @@ setup_suite() {
 
   helm repo add mariadb-operator-legacy https://mariadb-operator.github.io/mariadb-operator >/dev/null 2>&1 || true
   helm repo update mariadb-operator-legacy
-  helm upgrade --install mariadb-operator mariadb-operator-legacy/mariadb-operator \
-    --version 0.24.0 --kube-context kind-cluster-a --namespace db-ops --create-namespace --wait --timeout 10m
+  for ctx in kind-cluster-a kind-cluster-b; do
+    helm upgrade --install mariadb-operator mariadb-operator-legacy/mariadb-operator \
+      --version 0.24.0 --kube-context "$ctx" --namespace db-ops \
+      --create-namespace --wait --timeout 10m
+  done
 
   docker build -t localhost:5005/db-runbooks:latest "$ROOT_DIR"
   docker push localhost:5005/db-runbooks:latest
@@ -65,9 +68,12 @@ setup_suite() {
   rm -f "$values_file"
 
   kubectl --context kind-cluster-a -n mariadb-1 wait --for=condition=Ready mariadb/mariadb --timeout=900s
+  kubectl --context kind-cluster-b -n mariadb-1 wait --for=condition=Ready mariadb/mariadb --timeout=900s
   wait_deployment_rollout kind-cluster-a db-ops kube-federated-auth 300s
   wait_deployment_rollout kind-cluster-a db-ops redis 180s
   wait_deployment_rollout kind-cluster-a db-ops aqsh 300s
+  wait_deployment_rollout kind-cluster-b db-ops redis 180s
+  wait_deployment_rollout kind-cluster-b db-ops aqsh 300s
   wait_deployment_rollout kind-cluster-b db-ops test-client 180s
   wait_deployment_rollout kind-cluster-b minio minio 180s
 

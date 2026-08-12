@@ -1,31 +1,35 @@
 #!/usr/bin/env bash
 # =============================================================================
 # lib/mariadb-replication-rebuild.sh
-# Re-seed a standby whose history can no longer resume replication.
+# v24 in-place restore for a standby whose history can no longer resume
+# replication.
 #
-# Called by replication/attach when its assessment says so. It is a library
-# function rather than a separate task on purpose: the assessment already knows
-# which path is needed, so making the caller read that verdict and switch to a
-# different endpoint would hand an internal decision back to them to execute.
+# Called by replication/attach after the primary has produced one exact
+# physical-backup object. The same primitive is exposed by restore-in-place.sh;
+# keeping the destructive operation here means both entry points share the same
+# fencing, volume, and failure semantics.
 #
-#   1. ask the primary's AQSH for a FRESH physical backup, and wait for it
-#   2. quiesce the standby (stop it without the operator restarting it)
-#   3. overwrite each data volume IN PLACE from that backup
-#   4. resume, and let the operator bring the instance back
+#   1. force the StatefulSet to OnDelete so the temporary template is inert
+#   2. append one-shot restore init containers to the MariaDB CR
+#   3. delete the old Pods; every replacement restores its own PVC before
+#      mysqld is allowed to start
+#   4. remove the restore hook and delete the Pods once more so they start from
+#      the restored datadir using the original Pod template
 #
 # The MariaDB CR and its PVCs are never deleted. An earlier version did delete
 # them — because `bootstrapFrom` only applies to a brand-new instance — which
 # made this irreversible: a failure after the delete left no standby at all.
-# Overwriting the datadir directly needs no CR-level restore mechanism, so a
-# failure leaves the instance in place to retry or inspect, and every failure
-# path below resumes it rather than leaving it stopped.
+# v0.0.24 supports user initContainers and defaults their volume mounts to the
+# MariaDB storage volume. This is the safe in-place hook: MariaDB's own restore
+# documentation requires the server to be stopped and the datadir to be empty.
+# A standalone Job plus StatefulSet scale-to-zero is not used because the v24
+# reconciler writes StatefulSet replicas back from MariaDB.spec.replicas.
 #
 # The backup carries its own replication coordinates (`xtrabackup_binlog_info`,
 # `xtrabackup_slave_info`), so nothing here has to derive a GTID position.
 #
-# Step 1 takes a fresh backup rather than reusing the newest object in the
-# bucket: a stale one restores the standby to a position that may again predate
-# the primary's retained binlog, failing the very check that sent us here.
+# The caller supplies the exact backup name: a stale object cannot be selected by
+# a broad "latest under prefix" lookup.
 #
 # NOTE: this cannot fix a server_id collision. `serverIdStartIndex` is immutable,
 # so only a redeploy can change it — which is correct, since that value is the
@@ -43,6 +47,8 @@ fi
 
 # shellcheck source=aqsh-tasks/lib/mariadb-replication-link.sh
 source "${LIB_DIR}/mariadb-replication-link.sh"
+# shellcheck source=aqsh-tasks/lib/minio-client.sh
+source "${LIB_DIR}/minio-client.sh"
 
 MDBR_PEER_TASK_TIMEOUT="${REPL_PEER_TASK_TIMEOUT_DEFAULT:-900}"
 # The operator's volumeClaimTemplate name, which prefixes every data PVC it
@@ -53,8 +59,11 @@ MDBR_RUN_AS_USER="${MARIADB_RUN_AS_USER:-999}"
 MDBR_S5CMD_IMAGE="${S5CMD_IMAGE:-peakcom/s5cmd:v2.3.0}"
 # Needs bunzip2/gunzip; the MariaDB image ships neither. Busybox covers both.
 MDBR_DECOMPRESS_IMAGE="${REPL_DECOMPRESS_IMAGE_DEFAULT:-alpine:3.20}"
-# How long to wait for the pods to actually go away before overwriting.
-MDBR_QUIESCE_TIMEOUT="${REPL_QUIESCE_TIMEOUT_DEFAULT:-300}"
+# v0.0.24 mounts the MariaDB storage volume at this fixed path. Keep it fixed:
+# the restore hook removes every top-level child and must never accept a
+# caller-controlled deletion target.
+MDBR_DATADIR="/var/lib/mysql"
+MDBR_RESTORE_DIR="${MDBR_DATADIR}/.aqsh-restore"
 
 # --- volume discovery --------------------------------------------------------
 
@@ -75,223 +84,329 @@ _mdbr_data_pvcs() {
   } | sed 's#^persistentvolumeclaim/##' | sed '/^$/d' | sort -u
 }
 
-# --- quiesce / resume --------------------------------------------------------
+# _mdbr_exact_backup_object <backup_name>
+# Resolve the one physical-backup object that belongs to <backup_name>. This is
+# deliberately performed before the standby is stopped. s5cmd `ls` is a prefix
+# lookup, so filter the response to the only three formats produced by the
+# backup task instead of accepting a similarly prefixed sibling.
+#
+# stdout: exact s3:// URL
+# rc: 0 found, 1 storage unavailable, 2 missing, 3 ambiguous, 4 bad credentials
+_mdbr_exact_backup_object() {
+  local backup="$1" base listing matches count
 
-# _mdbr_quiesce <op> <data_fn> <replicas_out_var>
-# Stop the database so its datadir can be rewritten. The operator reconciles the
-# StatefulSet's replica count back, so reconciliation is suspended first.
-_mdbr_quiesce() {
-  local op="$1" data_fn="$2" out_var="$3" replicas elapsed=0 running
+  mdbt_s3_prepare_direct_client >/dev/null 2>&1 || return 4
+  setup_minio_client >/dev/null 2>&1 || return 1
 
-  replicas="$(_kubectl get statefulset "$MDB" -o jsonpath='{.spec.replicas}' 2>/dev/null)"
-  if [[ -z "$replicas" || "$replicas" == "0" ]]; then
-    mdbt_fail "$op" "standby is not running" "$("$data_fn" quiesce false)" 1 DATABASE_NOT_READY
-  fi
-  printf -v "$out_var" '%s' "$replicas"
-
-  if ! _kubectl patch "$MARIADB_RESOURCE" "$MDB" --type merge \
-    -p '{"spec":{"suspend":true}}' >/dev/null 2>&1; then
-    mdbt_fail "$op" "standby could not be quiesced" \
-      "$("$data_fn" quiesce false)" 1 INTERNAL_ERROR
-  fi
-  if ! _kubectl scale statefulset "$MDB" --replicas=0 >/dev/null 2>&1; then
-    _mdbr_resume "$replicas"
-    mdbt_fail "$op" "standby could not be quiesced" \
-      "$("$data_fn" quiesce false)" 1 INTERNAL_ERROR
+  base="s3://${BACKUP_BUCKET}/${BACKUP_PREFIX}/${backup}.xb"
+  if ! listing="$(s5 --json ls "${base}*" 2>&1)"; then
+    grep -q "no object found" <<<"$listing" && return 2
+    return 1
   fi
 
-  # Overwriting a datadir while mysqld still holds it would corrupt it, so wait
-  # for the pods to be gone rather than assuming the scale took effect.
-  while (( elapsed < MDBR_QUIESCE_TIMEOUT )); do
-    running="$(_kubectl get pods -l "app.kubernetes.io/instance=${MDB}" \
-      --no-headers 2>/dev/null | wc -l | tr -d ' ')"
-    [[ "$running" == "0" ]] && return 0
-    sleep 5
-    elapsed=$(( elapsed + 5 ))
-  done
-
-  _mdbr_resume "$replicas"
-  mdbt_fail "$op" "standby did not stop in time" \
-    "$("$data_fn" quiesce false)" 1 RESTORE_TIMEOUT
+  matches="$(printf '%s' "$listing" | jq -r --arg base "$base" '
+    select(.type != "directory")
+    | .key
+    | select(. == $base or . == ($base + ".bz2") or . == ($base + ".gz"))
+  ' 2>/dev/null)" || return 1
+  count="$(printf '%s\n' "$matches" | sed '/^$/d' | wc -l | tr -d ' ')"
+  case "$count" in
+    0) return 2 ;;
+    1) printf '%s\n' "$matches" ;;
+    *) return 3 ;;
+  esac
 }
 
-# _mdbr_resume <replicas>
-# Best-effort restore of the running state. Called on every failure path after
-# quiesce, so a half-finished rebuild never leaves the database stopped.
-_mdbr_resume() {
-  local replicas="$1"
-  _kubectl scale statefulset "$MDB" --replicas="$replicas" >/dev/null 2>&1 || true
-  _kubectl patch "$MARIADB_RESOURCE" "$MDB" --type merge \
-    -p '{"spec":{"suspend":false}}' >/dev/null 2>&1 || true
-}
+# --- one-shot Pod restore hook ----------------------------------------------
 
-# --- the in-place restore job ------------------------------------------------
-
-# _mdbr_restore_job_manifest <job> <pvc> <image>
-# Download the backup, decompress it if needed, then wipe and repopulate the
-# datadir. Built as JSON so no value is interpolated into YAML.
-_mdbr_restore_job_manifest() {
-  local job="$1" pvc="$2" image="$3"
+# _mdbr_restore_init_containers <image> <backup_object> <backup_name>
+# Emit the v0.0.24 MariaDB.spec.initContainers entries appended temporarily to
+# the user's existing list. The operator supplies its storage volume mounts.
+_mdbr_restore_init_containers() {
+  local image="$1" backup_object="$2" backup_name="$3"
   jq -n \
-    --arg job "$job" --arg ns "$NAMESPACE" --arg pvc "$pvc" --arg image "$image" \
+    --arg image "$image" --arg backupObject "$backup_object" --arg backup "$backup_name" \
     --arg s5cmd "$MDBR_S5CMD_IMAGE" --arg decompress "$MDBR_DECOMPRESS_IMAGE" \
-    --arg endpoint "$BACKUP_ENDPOINT" --arg bucket "$BACKUP_BUCKET" --arg prefix "$BACKUP_PREFIX" \
+    --arg endpoint "$BACKUP_ENDPOINT" --arg datadir "$MDBR_DATADIR" \
+    --arg restoreDir "$MDBR_RESTORE_DIR" \
     --arg accessSecret "$BACKUP_ACCESS_SECRET" --arg accessKey "$BACKUP_ACCESS_KEY" \
     --arg secretSecret "$BACKUP_SECRET_ACCESS_SECRET" --arg secretKey "$BACKUP_SECRET_KEY" \
     --argjson uid "$MDBR_RUN_AS_USER" \
-    '{
-      apiVersion: "batch/v1", kind: "Job",
-      metadata: {name: $job, namespace: $ns,
-        labels: {"app.kubernetes.io/managed-by": "aqsh-mariadb-replication"}},
-      spec: {
-        backoffLimit: 0,
-        template: {spec: {
-          restartPolicy: "Never",
-          automountServiceAccountToken: false,
-          securityContext: {runAsUser: 0},
-          volumes: [
-            {name: "datadir", persistentVolumeClaim: {claimName: $pvc}},
-            {name: "work", emptyDir: {}}
-          ],
-          initContainers: [
-            {
-              name: "download", image: $s5cmd,
-              command: ["/s5cmd"],
-              # Restricted to physical-backup objects: the prefix is shared
-              # with logical backups, and a *.sql.gz would decompress into
-              # something mbstream cannot read.
-              args: ["--endpoint-url", $endpoint, "cp",
-                     ("s3://" + $bucket + "/" + $prefix + "/*.xb*"), "/work/"],
-              env: [
-                {name: "AWS_ACCESS_KEY_ID", valueFrom: {secretKeyRef: {name: $accessSecret, key: $accessKey}}},
-                {name: "AWS_SECRET_ACCESS_KEY", valueFrom: {secretKeyRef: {name: $secretSecret, key: $secretKey}}}
-              ],
-              volumeMounts: [{name: "work", mountPath: "/work"}]
-            },
-            {
-              name: "decompress", image: $decompress,
-              command: ["sh", "-c"],
-              # Newest by NAME, not mtime: every object was written by the
-              # download step moments ago, so mtime ordering is meaningless.
-              # The operator names them physicalbackup-<timestamp>.xb[.ext], so
-              # lexical order is chronological order.
-              args: ["set -eu; f=$(ls -1 /work/ | grep -E \"[.]xb([.].*)?$\" | sort | tail -1); [ -n \"$f\" ] || { echo \"no physical backup object found under the prefix\" >&2; exit 1; }; echo \"selected: $f\"; case \"$f\" in *.bz2) bunzip2 -c \"/work/$f\" > /work/backup.xb ;; *.gz) gunzip -c \"/work/$f\" > /work/backup.xb ;; *.xb) [ \"$f\" = backup.xb ] || mv \"/work/$f\" /work/backup.xb ;; *) echo \"unsupported backup object: $f\" >&2; exit 1 ;; esac; ls -l /work/backup.xb"],
-              volumeMounts: [{name: "work", mountPath: "/work"}]
-            }
-          ],
-          containers: [{
-            name: "restore", image: $image,
-            command: ["bash", "-c"],
-            # Wipe IN PLACE, then unpack: mbstream will not populate a non-empty
-            # datadir, and leaving stale files behind would mix two databases.
-            args: [("set -euo pipefail; find /datadir -mindepth 1 -delete; mbstream -x -C /datadir < /work/backup.xb; mariadb-backup --prepare --target-dir=/datadir; chown -R " + ($uid|tostring) + ":" + ($uid|tostring) + " /datadir")],
-            volumeMounts: [
-              {name: "datadir", mountPath: "/datadir"},
-              {name: "work", mountPath: "/work"}
-            ]
-          }]
-        }}
+    '[
+      {
+        image: $decompress, command: ["sh", "-ceu"],
+        args: [("mkdir -p " + ($restoreDir|@sh))],
+        securityContext: {runAsUser: 0}
+      },
+      {
+        image: $s5cmd, command: ["/s5cmd"],
+        args: ["--endpoint-url", $endpoint, "cp", $backupObject,
+               ($restoreDir + "/backup.source")],
+        env: [
+          {name:"AWS_ACCESS_KEY_ID",valueFrom:{secretKeyRef:{name:$accessSecret,key:$accessKey}}},
+          {name:"AWS_SECRET_ACCESS_KEY",valueFrom:{secretKeyRef:{name:$secretSecret,key:$secretKey}}}
+        ],
+        securityContext: {runAsUser: 0}
+      },
+      {
+        image: $decompress, command: ["sh", "-ceu"],
+        env: [{name:"BACKUP_OBJECT",value:$backupObject}],
+        args: [("case \"$BACKUP_OBJECT\" in *.bz2) bunzip2 -c " + ($restoreDir|@sh) + "/backup.source > " + ($restoreDir|@sh) + "/backup.xb ;; *.gz) gunzip -c " + ($restoreDir|@sh) + "/backup.source > " + ($restoreDir|@sh) + "/backup.xb ;; *.xb) cp " + ($restoreDir|@sh) + "/backup.source " + ($restoreDir|@sh) + "/backup.xb ;; *) echo unsupported-backup-format >&2; exit 1 ;; esac; test -s " + ($restoreDir|@sh) + "/backup.xb")],
+        securityContext: {runAsUser: 0}
+      },
+      {
+        image: $image, command: ["bash", "-ceu"],
+        env: [{name:"AQSH_RESTORE_BACKUP",value:$backup}],
+        args: [("marker=" + ($restoreDir|@sh) + "/completed; if test -f \"$marker\" && grep -Fxq \"$AQSH_RESTORE_BACKUP\" \"$marker\"; then exit 0; fi; find " + ($datadir|@sh) + " -mindepth 1 -maxdepth 1 ! -name .aqsh-restore -exec rm -rf -- {} +; mbstream -x -C " + ($datadir|@sh) + " < " + ($restoreDir|@sh) + "/backup.xb; mariabackup --prepare --target-dir=" + ($datadir|@sh) + "; chown -R " + ($uid|tostring) + ":" + ($uid|tostring) + " " + ($datadir|@sh) + "; printf \"%s\\n\" \"$AQSH_RESTORE_BACKUP\" > \"$marker\"")],
+        securityContext: {runAsUser: 0}
       }
-    }'
+    ]'
+}
+
+_mdbr_patch_init_containers() {
+  local init_json="$1"
+  _kubectl patch "$MARIADB_RESOURCE" "$MDB" --type merge \
+    -p "$(jq -nc --argjson init "$init_json" '{spec:{initContainers:$init}}')" >/dev/null 2>&1
+}
+
+_mdbr_patch_sts_strategy() {
+  local strategy_json="$1"
+  _kubectl patch statefulset "$MDB" --type merge \
+    -p "$(jq -nc --argjson strategy "$strategy_json" '{spec:{updateStrategy:$strategy}}')" >/dev/null 2>&1
+}
+
+_mdbr_wait_sts_init_count() {
+  local expected="$1" timeout="$2" elapsed=0 sts
+  while (( elapsed <= timeout )); do
+    sts="$(_kubectl get statefulset "$MDB" -o json 2>/dev/null)" || sts='{}'
+    if [[ "$(jq -r '(.spec.template.spec.initContainers // []) | length' <<<"$sts")" == "$expected" ]]; then
+      return 0
+    fi
+    (( elapsed >= timeout )) && break
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
+}
+
+# Delete every old member in one API call, then require replacement UIDs and
+# Ready containers. OnDelete prevents the template change itself from rolling
+# a Pod before all old members have been selected for deletion.
+_mdbr_restart_members() {
+  local timeout="$1" elapsed=0 pod json all_ready i
+  local -a pods=() old_uids=()
+  mapfile -t pods < <(mariadb_list_member_pods)
+  (( ${#pods[@]} > 0 )) || return 1
+  for pod in "${pods[@]}"; do
+    old_uids+=("$(_kubectl get pod "$pod" -o jsonpath='{.metadata.uid}' 2>/dev/null)")
+  done
+  _kubectl delete pod "${pods[@]}" --wait=false >/dev/null 2>&1 || return 1
+
+  while (( elapsed <= timeout )); do
+    all_ready=true
+    for i in "${!pods[@]}"; do
+      pod="${pods[$i]}"
+      json="$(_kubectl get pod "$pod" -o json 2>/dev/null)" || { all_ready=false; continue; }
+      [[ "$(jq -r '.metadata.uid // empty' <<<"$json")" != "${old_uids[$i]}" ]] || all_ready=false
+      jq -e '.status.phase == "Running" and any(.status.containerStatuses[]?; .name == "mariadb" and .ready == true)' \
+        <<<"$json" >/dev/null 2>&1 || all_ready=false
+    done
+    [[ "$all_ready" == true ]] && return 0
+    (( elapsed >= timeout )) && break
+    sleep 5
+    elapsed=$((elapsed + 5))
+  done
+  return 1
 }
 
 # --- orchestration -----------------------------------------------------------
 
 # mdbr_rebuild_standby <op> <data_fn>
 # Reads from the caller's scope: NAMESPACE, MDB, MARIADB_RESOURCE, CR_JSON,
-# PRIMARY_POD, ROOT_PASSWORD, PEER_AQSH_URL, PEER_TOKEN, WAIT_TIMEOUT, and the
-# BACKUP_* set left by mdbt_resolve_backup_location. <data_fn> is a
+# PRIMARY_POD, ROOT_PASSWORD, BACKUP_NAME, WAIT_TIMEOUT, and the BACKUP_* set
+# left by mdbt_resolve_backup_location. <data_fn> is a
 # caller-supplied function taking <stage> <changed> that builds the public
 # result payload, so the calling task keeps one consistent result shape.
 #
 # Returns 0 once the standby is back up on the restored data. Every failure path
-# calls mdbt_fail (which exits) after resuming the instance.
+# calls mdbt_fail (which exits). Failures after overwrite starts retain OnDelete
+# and the idempotent restore hook so Pod replacement retries the exact backup
+# before mysqld starts.
 mdbr_rebuild_standby() {
   local op="$1" data_fn="$2"
-  local image replicas="" recheck job pvc rc=0 job_err
-  local -a pvcs=() jobs=()
+  local image recheck rc=0 pvc_list backup_object backup_rc=0 sts_json
+  local original_strategy original_init restore_init combined_init expected_init_count pod
+  local -a pvcs=() pods=()
+
+  if [[ -z "${BACKUP_NAME:-}" ]]; then
+    mdbt_fail "$op" "an exact physical backup is required" \
+      "$("$data_fn" capture false)" 2 BACKUP_NOT_FOUND
+  fi
+  mdbt_validate_dns_label "backup" "$BACKUP_NAME" "$op"
+
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_s3_bucket "backup_bucket" "$BACKUP_BUCKET" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_s3_prefix "backup_prefix" "$BACKUP_PREFIX" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_endpoint "backup_endpoint" "$BACKUP_ENDPOINT" "$op"
 
   image="$(jq -r '.spec.image // empty' <<<"$CR_JSON")"
   if [[ -z "$image" ]]; then
     mdbt_fail "$op" "database image could not be resolved" \
       "$("$data_fn" capture false)" 1 INTERNAL_ERROR
   fi
+  mdbt_validate_internal_or_fail "$op" INTERNAL_ERROR \
+    "restore runtime configuration is unavailable" \
+    mdbt_validate_image "database_image" "$image" "$op"
+  mdbt_validate_internal_or_fail "$op" INTERNAL_ERROR \
+    "restore runtime configuration is unavailable" \
+    mdbt_validate_image "s5cmd_image" "$MDBR_S5CMD_IMAGE" "$op"
+  mdbt_validate_internal_or_fail "$op" INTERNAL_ERROR \
+    "restore runtime configuration is unavailable" \
+    mdbt_validate_image "decompress_image" "$MDBR_DECOMPRESS_IMAGE" "$op"
+  mdbt_validate_internal_or_fail "$op" INTERNAL_ERROR \
+    "restore runtime configuration is unavailable" \
+    mdbt_validate_uint "run_as_user" "$MDBR_RUN_AS_USER" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_dns_label "backup_access_secret" "$BACKUP_ACCESS_SECRET" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_secret_key "backup_access_key" "$BACKUP_ACCESS_KEY" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_dns_label "backup_secret_access_secret" "$BACKUP_SECRET_ACCESS_SECRET" "$op"
+  mdbt_validate_internal_or_fail "$op" BACKUP_CONFIGURATION_UNAVAILABLE \
+    "backup configuration is unavailable" \
+    mdbt_validate_secret_key "backup_secret_key" "$BACKUP_SECRET_KEY" "$op"
 
-  # Volumes are discovered BEFORE anything stops: a listing failure here is
-  # harmless, while the same failure after quiesce would leave the database down
-  # with nothing done.
-  mapfile -t pvcs < <(_mdbr_data_pvcs) || rc=$?
-  _mdbr_data_pvcs >/dev/null || rc=1
+  # Volumes are discovered before the Pod template changes: a listing failure
+  # here leaves the running database untouched.
+  pvc_list="$(_mdbr_data_pvcs)" || rc=$?
   if (( rc != 0 )); then
     mdbt_fail "$op" "standby data volumes could not be listed" \
       "$("$data_fn" capture false)" 1 INTERNAL_ERROR
+  fi
+  if [[ -n "$pvc_list" ]]; then
+    mapfile -t pvcs <<<"$pvc_list"
   fi
   if (( ${#pvcs[@]} == 0 )); then
     mdbt_fail "$op" "standby has no data volumes to restore" \
       "$("$data_fn" capture false)" 1 INTERNAL_ERROR
   fi
 
-  # --- step 1: fresh backup on the primary ------------------------------------
-  # Only the primary's own cluster can back its database up. Nothing has been
-  # touched yet, so a failure here is completely safe.
-  if ! mdbt_peer_call_task "$PEER_AQSH_URL" "$PEER_TOKEN" "physical-backup" \
-    "$(jq -nc --arg ns "$NAMESPACE" --arg t "$WAIT_TIMEOUT" \
-      '{namespace: $ns, dry_run: "false", confirm: "true", wait_timeout: ($t + "s")}')" \
-    "$MDBR_PEER_TASK_TIMEOUT" >/dev/null; then
-    mdbt_fail "$op" "a fresh backup could not be produced on the primary" \
-      "$("$data_fn" backup false)" 1 PEER_OPERATION_FAILED
+  # Resolve the exact object before stopping the database. The caller has
+  # already asked the primary for this backup; this proves it is visible from
+  # the standby's storage policy and rules out prefix siblings/duplicates.
+  backup_object="$(_mdbr_exact_backup_object "$BACKUP_NAME")" || backup_rc=$?
+  case "$backup_rc" in
+    0) ;;
+    2) mdbt_fail "$op" "physical backup is not available" \
+         "$("$data_fn" capture false)" 1 BACKUP_NOT_FOUND ;;
+    3) mdbt_fail "$op" "physical backup source is ambiguous" \
+         "$("$data_fn" capture false)" 1 BACKUP_AMBIGUOUS ;;
+    4) mdbt_fail "$op" "backup configuration is unavailable" \
+         "$("$data_fn" capture false)" 1 BACKUP_CONFIGURATION_UNAVAILABLE ;;
+    *) mdbt_fail "$op" "backup service is unavailable" \
+         "$("$data_fn" capture false)" 1 BACKUP_SERVICE_UNAVAILABLE ;;
+  esac
+
+  sts_json="$(_kubectl get statefulset "$MDB" -o json 2>/dev/null)" || \
+    mdbt_fail "$op" "standby workload is unavailable" \
+      "$("$data_fn" capture false)" 1 DATABASE_NOT_READY
+  original_strategy="$(jq -c '.spec.updateStrategy // {type:"RollingUpdate"}' <<<"$sts_json")"
+  original_init="$(jq -c 'if (.spec | has("initContainers")) then .spec.initContainers else null end' \
+    <<<"$CR_JSON")"
+  restore_init="$(_mdbr_restore_init_containers "$image" "$backup_object" "$BACKUP_NAME")" || \
+    mdbt_fail "$op" "restore hook could not be constructed" \
+      "$("$data_fn" capture false)" 1 INTERNAL_ERROR
+  combined_init="$(jq -nc --argjson original "${original_init:-null}" \
+    --argjson restore "$restore_init" '($original // []) + $restore')"
+  expected_init_count="$(jq -r 'length' <<<"$combined_init")"
+
+  mapfile -t pods < <(mariadb_list_member_pods)
+  if (( ${#pods[@]} == 0 || ${#pods[@]} != ${#pvcs[@]} )); then
+    mdbt_fail "$op" "standby members do not match its data volumes" \
+      "$("$data_fn" capture false)" 1 DATABASE_NOT_READY
   fi
 
-  # --- step 2: last look before the data is overwritten -----------------------
-  # The caller's connection guard ran before the backup, which takes minutes —
-  # long enough for a client to connect. This is the last moment it matters.
+  # Last look before the restore hook is armed. The following OnDelete strategy
+  # prevents the template patch from restarting a Pod before every old member
+  # has been selected for deletion.
   if ! recheck="$(mdbr_external_connections "$PRIMARY_POD" "$ROOT_PASSWORD")"; then
     mdbt_fail "$op" "connection usage could not be re-read before restoring" \
-      "$("$data_fn" quiesce false)" 1 DATABASE_NOT_READY
+      "$("$data_fn" fence false)" 1 DATABASE_NOT_READY
   fi
   if (( "$(jq -r '.total' <<<"$recheck")" > MDBR_MAX_EXTERNAL_CONNECTIONS )); then
     mdbt_fail "$op" "standby acquired external connections while the backup was running" \
-      "$("$data_fn" quiesce false)" 1 STANDBY_IN_USE
+      "$("$data_fn" fence false)" 1 STANDBY_IN_USE
   fi
 
-  _mdbr_quiesce "$op" "$data_fn" replicas
+  if ! _mdbr_patch_sts_strategy '{"type":"OnDelete"}'; then
+    mdbt_fail "$op" "standby restart policy could not be fenced" \
+      "$("$data_fn" fence false)" 1 INTERNAL_ERROR
+  fi
+  if ! _mdbr_patch_init_containers "$combined_init"; then
+    _mdbr_patch_sts_strategy "$original_strategy" || true
+    mdbt_fail "$op" "standby restore hook could not be installed" \
+      "$("$data_fn" fence false)" 1 INTERNAL_ERROR
+  fi
+  if ! _mdbr_wait_sts_init_count "$expected_init_count" "$WAIT_TIMEOUT"; then
+    _mdbr_patch_init_containers "$original_init" || true
+    _mdbr_patch_sts_strategy "$original_strategy" || true
+    mdbt_fail "$op" "standby restore hook was not reconciled" \
+      "$("$data_fn" fence false)" 1 RESTORE_TIMEOUT
+  fi
 
-  # --- step 3: overwrite each datadir in place --------------------------------
-  # One Job per volume: a PVC is ReadWriteOnce, so they cannot share a pod. They
-  # run concurrently because the pods are already gone.
-  for pvc in "${pvcs[@]}"; do
-    job="restore-${pvc}"
-    _kubectl delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
-    if ! _mdbr_restore_job_manifest "$job" "$pvc" "$image" | _kubectl apply -f - >/dev/null 2>&1; then
-      _mdbr_resume "$replicas"
-      mdbt_fail "$op" "standby restore could not be started" \
-        "$("$data_fn" restore true)" 1 RESTORE_FAILED
-    fi
-    jobs+=("$job")
-  done
-
-  for job in "${jobs[@]}"; do
-    if ! _kubectl wait --for=condition=complete "job/${job}" \
-      --timeout="${WAIT_TIMEOUT}s" >/dev/null 2>&1; then
-      # The reason lives in the Job's own logs; the public result stays generic.
-      job_err="$(_kubectl logs "job/${job}" --tail=20 2>&1 || true)"
-      log_error "$op" "restore job ${job} did not complete: ${job_err}"
-      _mdbr_resume "$replicas"
-      mdbt_fail "$op" "standby restore did not complete" \
-        "$("$data_fn" restore true)" 1 RESTORE_FAILED
-    fi
-  done
-
-  # --- step 4: resume ---------------------------------------------------------
-  _mdbr_resume "$replicas"
-  if ! mdbt_wait_mariadb_ready "$MDB" "${WAIT_TIMEOUT}s" >/dev/null 2>&1; then
-    mdbt_fail "$op" "standby did not become ready after restore" \
+  # Every replacement Pod restores its own PVC in initContainers. mysqld cannot
+  # run concurrently with the wipe because Kubernetes does not start the main
+  # container until all restore init containers have completed.
+  if ! _mdbr_restart_members "$WAIT_TIMEOUT"; then
+    mdbt_fail "$op" "standby restore did not complete" \
       "$("$data_fn" restore true)" 1 RESTORE_TIMEOUT
   fi
 
-  for job in "${jobs[@]}"; do
-    _kubectl delete job "$job" --ignore-not-found >/dev/null 2>&1 || true
+  mapfile -t pods < <(mariadb_list_member_pods)
+  for pod in "${pods[@]}"; do
+    if ! mariadb_exec "$pod" sh -ceu \
+      'test "$(cat "$1/completed")" = "$2"' sh "$MDBR_RESTORE_DIR" "$BACKUP_NAME" \
+      >/dev/null 2>&1; then
+      mdbt_fail "$op" "standby restore marker could not be verified" \
+        "$("$data_fn" restore true)" 1 RESTORE_FAILED
+    fi
   done
 
+  # Restore the user's init container list while OnDelete is still active, then
+  # explicitly restart once more. This is the internal in-place pattern: the
+  # restore finishes first, and the final delete makes MariaDB consume the new
+  # datadir without carrying the one-shot hook in its template.
+  if ! _mdbr_patch_init_containers "$original_init"; then
+    mdbt_fail "$op" "standby restore hook could not be removed" \
+      "$("$data_fn" finalize true)" 1 INTERNAL_ERROR
+  fi
+  expected_init_count="$(jq -r '(. // []) | length' <<<"$original_init")"
+  if ! _mdbr_wait_sts_init_count "$expected_init_count" "$WAIT_TIMEOUT"; then
+    mdbt_fail "$op" "standby clean template was not reconciled" \
+      "$("$data_fn" finalize true)" 1 RESTORE_TIMEOUT
+  fi
+  if ! _mdbr_restart_members "$WAIT_TIMEOUT"; then
+    mdbt_fail "$op" "standby did not restart on the restored datadir" \
+      "$("$data_fn" finalize true)" 1 RESTORE_TIMEOUT
+  fi
+  if ! _mdbr_patch_sts_strategy "$original_strategy"; then
+    mdbt_fail "$op" "standby restart policy could not be restored" \
+      "$("$data_fn" finalize true)" 1 INTERNAL_ERROR
+  fi
+
+  mapfile -t pods < <(mariadb_list_member_pods)
+  for pod in "${pods[@]}"; do
+    if ! mariadb_exec "$pod" rm -rf -- "$MDBR_RESTORE_DIR" >/dev/null 2>&1; then
+      log_warn "$op" "restored data is ready, but staging cleanup failed on ${pod}"
+    fi
+  done
   return 0
 }

@@ -49,6 +49,10 @@ task_inputs() {
   [ "$status" -eq 0 ]
   [ "$output" = $'namespace\ntarget_time\ndry_run\nwait_timeout\nconfirm' ]
 
+  run task_inputs restore-in-place
+  [ "$status" -eq 0 ]
+  [ "$output" = $'namespace\nbackup\ndry_run\nwait_timeout\nconfirm' ]
+
   run task_inputs logical-restore
   [ "$status" -eq 0 ]
   [ "$output" = $'namespace\nbackup\ndry_run\nwait_timeout\nconfirm' ]
@@ -61,12 +65,10 @@ task_inputs() {
   # authenticated call point replication at an arbitrary endpoint.
   run task_inputs "replication/attach"
   [ "$status" -eq 0 ]
-  [ "$output" = $'namespace\ndry_run\nconfirm\nwait_timeout\nexpected_action\npeer_token\npeer_aqsh_url' ]
+  [ "$output" = $'namespace\ndry_run\nconfirm\nwait_timeout\nexpected_action' ]
 
-  # Re-seeding is NOT a separate task: the assessment already decides which path
-  # is needed, so exposing it as a second endpoint would hand an internal
-  # decision back to the caller to execute. peer_token/peer_aqsh_url are the
-  # transport the re-seed path needs, not a confirmation gate.
+  # Re-seeding is not a replication/rebuild endpoint: attach owns that decision
+  # and uses the shared restore-in-place primitive internally.
   run task_inputs "replication/rebuild"
   [ "$status" -eq 0 ]
   [ -z "$output" ]

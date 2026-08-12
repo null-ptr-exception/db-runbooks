@@ -1,3 +1,10 @@
+repositories:
+  - name: istio
+    url: https://istio-release.storage.googleapis.com/charts
+
+helmDefaults:
+  skipSchemaValidation: true
+
 releases:
   - name: mariadb-rbac-a
     chart: ../chart
@@ -29,11 +36,48 @@ releases:
           enabled: true
           namespace: mariadb-1
           operatorGroup: mariadb.mmontes.io
-          replicas: 1
+          replicas: 2
+          serverIdStartIndex: 10
           objectStorage:
             enabled: true
             secretName: mariadb-storage-primary
             prefix: tenant-a/database
+        replicationMesh:
+          expose:
+            enabled: true
+          peer:
+            enabled: true
+            externalName: mariadb-primary.mariadb-1.svc.cluster.local
+
+  - name: database-gateway
+    chart: istio/gateway
+    version: 1.24.3
+    namespace: mariadb-1
+    createNamespace: true
+    kubeContext: kind-cluster-a
+    needs:
+      - kind-cluster-a/mariadb-1/mariadb-1
+    values:
+      - autoscaling:
+          enabled: false
+        service:
+          type: ClusterIP
+          ports:
+            - name: status-port
+              port: 15021
+              protocol: TCP
+              targetPort: 15021
+            - name: tcp-mariadb-rw
+              port: 3306
+              protocol: TCP
+              targetPort: 3306
+        resources:
+          requests:
+            cpu: 25m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
 
   - name: minio
     chart: ../chart
@@ -73,6 +117,8 @@ releases:
           config:
             mariadb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              REPL_PEER_PORT_DEFAULT=30091
+              REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-b.test:30080
           authProxy:
             tokenReviewURL: http://fedauth-mariadb.kind-a.test:30080
         mariadbRbac:
@@ -88,5 +134,59 @@ releases:
               backendPort: 8080
             - name: aqsh-mariadb
               host: aqsh-mariadb.kind-a.test
+              backendHost: aqsh.db-ops.svc.cluster.local
+              backendPort: 4180
+
+  - name: mariadb-1-b
+    chart: ../chart
+    namespace: mariadb-1
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    values:
+      - mariadb:
+          enabled: true
+          namespace: mariadb-1
+          operatorGroup: mariadb.mmontes.io
+          replicas: 2
+          serverIdStartIndex: 100
+          objectStorage:
+            enabled: true
+            secretName: mariadb-storage-destination
+            prefix: tenant-a/database
+        replicationMesh:
+          peer:
+            enabled: true
+            externalName: mariadb.kind-a.test
+
+  - name: mariadb-server-b
+    chart: ../chart
+    namespace: db-ops
+    createNamespace: true
+    kubeContext: kind-cluster-b
+    needs:
+      - kind-cluster-b/mariadb-1/mariadb-1-b
+    values:
+      - redis:
+          enabled: true
+        aqsh:
+          enabled: true
+          tasksConfig: /etc/aqsh/task-mariadb.yaml
+          workerQueues: mariadb
+          config:
+            mariadb.env: |
+              MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              REPL_PEER_PORT_DEFAULT=30091
+              REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-a.test:30080
+          authProxy:
+            tokenReviewURL: http://fedauth-mariadb.kind-a.test:30080
+        mariadbRbac:
+          enabled: true
+        mariadb:
+          operatorGroup: mariadb.mmontes.io
+        gateway:
+          enabled: true
+          virtualServices:
+            - name: aqsh-mariadb-b
+              host: aqsh-mariadb.kind-b.test
               backendHost: aqsh.db-ops.svc.cluster.local
               backendPort: 4180

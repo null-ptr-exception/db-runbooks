@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
-# Cross-cluster replication e2e: cluster-b's standby attached to cluster-a's
-# primary through the mesh stand-in (see tests/chart/templates/replication-mesh.yaml).
+# mariadb-operator 0.24 cross-cluster replication e2e. This suite has no
+# ExternalMariaDB or multiCluster API; the cross-cluster link is native SQL.
 #
 # The tests run in order and share state — bats executes a file top to bottom,
 # and the flow here IS the runbook:
@@ -9,8 +9,8 @@
 #   unlinked → assess (rebuild, because a fresh standby has no history)
 #            → attach re-seeds and links → attach again is a no-op → detach
 #
-# SLOW. The rebuild takes a full physical backup on cluster-a, destroys the
-# standby, and re-seeds it; budget ~15 minutes for that test alone.
+# SLOW. The rebuild takes a full physical backup on cluster-a and restores the
+# existing cluster-b PVCs in place; budget ~15 minutes for that test alone.
 
 setup_file() {
   load '../test_helper/bats-support/load'
@@ -166,7 +166,7 @@ expect_task_reason() {
 
   local data
   data="$(_task_result_data)"
-  assert_equal "$(echo "$data" | jq -r '.local.multiClusterEnabled')" "false"
+  assert_equal "$(echo "$data" | jq -r '.local.replicationConfigured')" "false"
   assert_equal "$(echo "$data" | jq -r '.local.linkRunning')" "false"
 }
 
@@ -193,13 +193,6 @@ expect_task_reason() {
   assert_equal "$(echo "$data" | jq -r '.changed')" "false"
 }
 
-@test "attach without peer_token cannot take the re-seed path" {
-  # The re-seed needs a fresh backup from the primary's own AQSH; without a
-  # token there is no way to ask for one. Rejected before anything is touched.
-  expect_task_reason "INVALID_REQUEST" "$AQSH_B_URL" "replication/attach" \
-    "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, dry_run: "false", confirm: "true"}')"
-}
-
 @test "attach honours expected_action" {
   expect_task_reason "UNEXPECTED_ACTION" "$AQSH_B_URL" "replication/attach" \
     "$(jq -nc --arg ns "$DB_NS" \
@@ -215,26 +208,26 @@ expect_task_reason() {
 
 @test "attach requires confirm before the re-seed path" {
   expect_task_reason "INVALID_REQUEST" "$AQSH_B_URL" "replication/attach" \
-    "$(jq -nc --arg ns "$DB_NS" --arg tok "$TOKEN" \
-      '{namespace: $ns, peer_token: $tok, dry_run: "false"}')"
+    "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, dry_run: "false"}')"
 }
 
 @test "attach re-seeds the standby and establishes replication" {
-  # SLOW: physical backup on cluster-a, then quiesce + in-place datadir
-  # overwrite + link on cluster-b. One call — the caller does not switch
+  # SLOW: physical backup on cluster-a, then one-shot init restore + two Pod
+  # replacements + link on cluster-b. One call — the caller does not switch
   # endpoints on the verdict.
   #
   # The identities are captured first: an in-place re-seed must not replace the
   # MariaDB CR or its PVCs, and comparing UIDs is the one check that cannot be
   # satisfied by a delete-and-recreate that merely looks similar.
-  local cr_before pvc_before
+  local cr_before pvc_before pod_before
   cr_before="$(kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb -o jsonpath='{.metadata.uid}')"
   pvc_before="$(kubectl --context "$CTX_B" -n "$DB_NS" get pvc storage-mariadb-0 -o jsonpath='{.metadata.uid}')"
-  [ -n "$cr_before" ] && [ -n "$pvc_before" ]
+  pod_before="$(kubectl --context "$CTX_B" -n "$DB_NS" get pod mariadb-0 -o jsonpath='{.metadata.uid}')"
+  [ -n "$cr_before" ] && [ -n "$pvc_before" ] && [ -n "$pod_before" ]
 
   expect_task_ok "$AQSH_B_URL" "replication/attach" \
-    "$(jq -nc --arg ns "$DB_NS" --arg tok "$TOKEN" \
-      '{namespace: $ns, peer_token: $tok, dry_run: "false", confirm: "true", wait_timeout: "900"}')" \
+    "$(jq -nc --arg ns "$DB_NS" \
+      '{namespace: $ns, dry_run: "false", confirm: "true", wait_timeout: "900"}')" \
     1800
 
   local data
@@ -246,6 +239,16 @@ expect_task_reason() {
   assert_output "$cr_before"
   run kubectl --context "$CTX_B" -n "$DB_NS" get pvc storage-mariadb-0 -o jsonpath='{.metadata.uid}'
   assert_output "$pvc_before"
+  run kubectl --context "$CTX_B" -n "$DB_NS" get pod mariadb-0 -o jsonpath='{.metadata.uid}'
+  assert_success
+  refute_output "$pod_before"
+  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb -o jsonpath='{.spec.initContainers}'
+  assert_success
+  assert_output ""
+  run kubectl --context "$CTX_B" -n "$DB_NS" get statefulset mariadb \
+    -o jsonpath='{.spec.updateStrategy.type}'
+  assert_success
+  assert_output "RollingUpdate"
 }
 
 @test "status reports a running link after the rebuild" {
@@ -253,16 +256,23 @@ expect_task_reason() {
 
   local data
   data="$(_task_result_data)"
-  assert_equal "$(echo "$data" | jq -r '.local.multiClusterEnabled')" "true"
+  assert_equal "$(echo "$data" | jq -r '.local.replicationConfigured')" "true"
   assert_equal "$(echo "$data" | jq -r '.local.linkRunning')" "true"
-  assert_equal "$(echo "$data" | jq -r '.local.desiredPrimary')" "${DB_NS}-rw"
+  assert_equal "$(echo "$data" | jq -r '.local.sourceMatchesPeer')" "true"
+  assert_equal "$(echo "$data" | jq -r '.local.sourceHost')" \
+    "${DB_NS}-rw.${DB_NS}.svc.cluster.local"
+
+  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb \
+    -o jsonpath='{.spec.multiCluster}'
+  assert_success
+  assert_output ""
 }
 
 @test "attach on an already-linked standby is a successful no-op" {
   # Re-running the step must not fail because the end state already holds, and
-  # must not re-derive an assessment: the operator's own post-restore writes
-  # carry the standby's server_id, so a healthy linked standby always looks
-  # "written to" and would be condemned to a rebuild.
+  # must not re-derive an assessment: local maintenance writes can carry the
+  # standby's server_id, so a healthy linked standby may otherwise look
+  # divergent and be condemned to a rebuild.
   expect_task_ok "$AQSH_B_URL" "replication/attach" "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns}')"
 
   local data
@@ -277,30 +287,29 @@ expect_task_reason() {
   expect_task_ok "$AQSH_B_URL" "replication/detach" "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns}')"
   assert_equal "$(_task_result_data | jq -r '.changed')" "false"
 
-  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb -o jsonpath='{.spec.multiCluster.enabled}'
-  assert_output "true"
+  expect_task_ok "$AQSH_B_URL" "replication/status" \
+    "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, include_peer: "false"}')"
+  assert_equal "$(_task_result_data | jq -r '.local.linkRunning')" "true"
 }
 
-@test "detach removes the link and its endpoint references" {
+@test "detach removes only the SQL link" {
   expect_task_ok "$AQSH_B_URL" "replication/detach" \
     "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, dry_run: "false", confirm: "true"}')"
   assert_equal "$(_task_result_data | jq -r '.changed')" "true"
 
-  # The whole multiCluster block is removed, not just flipped to enabled:false —
-  # leaving `members` behind would point the CR at ExternalMariaDB objects that
-  # no longer exist. So `.enabled` reads as empty, not "false".
-  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb -o jsonpath='{.spec.multiCluster.enabled}'
-  assert_output ""
+  # SQL status is authoritative on v24; no operator topology object is touched.
+  expect_task_ok "$AQSH_B_URL" "replication/status" \
+    "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns, include_peer: "false"}')"
+  assert_equal "$(_task_result_data | jq -r '.local.replicationConfigured')" "false"
+  assert_equal "$(_task_result_data | jq -r '.local.linkRunning')" "false"
 
-  # The ExternalMariaDB objects the attach created are gone too.
-  run kubectl --context "$CTX_B" -n "$DB_NS" get externalmariadb "${DB_NS}-rw"
-  assert_failure
+  # The managed instance and its storage remain present.
+  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb
+  assert_success
 
-  # And the multiCluster block itself is gone — leaving `members` behind would
-  # point the CR at ExternalMariaDB objects that no longer exist, and would make
-  # the next detach look like fresh work instead of a no-op.
-  run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb -o jsonpath='{.spec.multiCluster.members}'
-  assert_output ""
+  # PVC identity also survives the detach.
+  run kubectl --context "$CTX_B" -n "$DB_NS" get pvc storage-mariadb-0
+  assert_success
 }
 
 @test "detach on an already-detached standby succeeds" {

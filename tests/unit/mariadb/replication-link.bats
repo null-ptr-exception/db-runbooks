@@ -47,10 +47,58 @@ _assess() {
   mdbr_assess pod-0 secret peer-host
 }
 
-# Same scenario, but for a standby already wired into the multiCluster topology.
+# Same scenario, but for a standby already carrying the expected v24 SQL link.
 _assess_linked() {
   _install_mocks
   mdbr_assess pod-0 secret peer-host true
+}
+
+# --- v24 capability gate ----------------------------------------------------
+
+@test "v24 capability gate accepts a confidently detected legacy operator" {
+  mdb_operator_group_is_confident() { return 0; }
+  mdb_is_legacy_operator() { return 0; }
+
+  run mdbr_require_v24 replication/attach
+  [ "$status" -eq 0 ]
+}
+
+@test "v24 capability gate rejects a current-generation operator" {
+  MDBT_RESULT_FILE="$BATS_TEST_TMPDIR/result.json"
+  mdb_operator_group_is_confident() { return 0; }
+  mdb_is_legacy_operator() { return 1; }
+
+  run mdbr_require_v24 replication/attach
+  [ "$status" -eq 2 ]
+  [ "$(jq -r '.reason' "$MDBT_RESULT_FILE")" = "OPERATION_UNAVAILABLE" ]
+}
+
+@test "v24 capability gate fails closed when discovery is unavailable" {
+  MDBT_RESULT_FILE="$BATS_TEST_TMPDIR/result.json"
+  mdb_operator_group_is_confident() { return 2; }
+
+  run mdbr_require_v24 replication/attach
+  [ "$status" -eq 1 ]
+  [ "$(jq -r '.reason' "$MDBT_RESULT_FILE")" = "INTERNAL_ERROR" ]
+}
+
+@test "peer token is read from a non-empty projected service-account file" {
+  local token_file="$BATS_TEST_TMPDIR/token"
+  printf 'federated-service-account-token' > "$token_file"
+
+  run mdbr_read_peer_token "$token_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "federated-service-account-token" ]
+}
+
+@test "peer token fails closed when its projection is missing or empty" {
+  local token_file="$BATS_TEST_TMPDIR/token"
+  : > "$token_file"
+
+  run mdbr_read_peer_token "$token_file"
+  [ "$status" -ne 0 ]
+  run mdbr_read_peer_token "$BATS_TEST_TMPDIR/missing-token"
+  [ "$status" -ne 0 ]
 }
 
 # --- peer address ------------------------------------------------------------
@@ -251,6 +299,77 @@ _assess_linked() {
   mariadb_sql() { return 1; }
   mdbr_assess pod-0 secret peer-host || true
   [ "$MDBR_ASSESS_ERROR" = "DATABASE_NOT_READY" ]
+}
+
+# --- v24 SQL link ------------------------------------------------------------
+
+@test "replica status reports an unconfigured v24 primary" {
+  mariadb_sql_vertical() { printf ''; }
+
+  run mdbr_replica_status pod-0 secret
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.configured' <<<"$output")" = "false" ]
+  [ "$(jq -r '.running' <<<"$output")" = "false" ]
+  [ "$(jq -r '.sourceHost' <<<"$output")" = "null" ]
+}
+
+@test "replica status parses one running SQL connection" {
+  mariadb_sql_vertical() {
+    printf '%s\n' \
+      '*************************** 1. row ***************************' \
+      '              Connection_name:' \
+      '                  Master_Host: mariadb-1-rw.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 3306' \
+      '             Slave_IO_Running: Yes' \
+      '            Slave_SQL_Running: Yes' \
+      '        Seconds_Behind_Master: 4' \
+      '                    Using_Gtid: Slave_Pos' \
+      '                 Last_IO_Error:' \
+      '                Last_SQL_Error:'
+  }
+
+  run mdbr_replica_status pod-0 secret
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.configured' <<<"$output")" = "true" ]
+  [ "$(jq -r '.running' <<<"$output")" = "true" ]
+  [ "$(jq -r '.sourceHost' <<<"$output")" = "mariadb-1-rw.mariadb-1.svc.cluster.local" ]
+  [ "$(jq -r '.sourcePort' <<<"$output")" = "3306" ]
+  [ "$(jq -r '.secondsBehind' <<<"$output")" = "4" ]
+}
+
+@test "replica status refuses to choose between multiple SQL connections" {
+  mariadb_sql_vertical() {
+    printf '%s\n' \
+      'Slave_IO_Running: Yes' \
+      'Slave_IO_Running: No'
+  }
+
+  run mdbr_replica_status pod-0 secret
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.configured' <<<"$output")" = "true" ]
+  [ "$(jq -r '.running' <<<"$output")" = "false" ]
+  [ "$(jq -r '.error' <<<"$output")" = "MULTIPLE_REPLICATION_CONNECTIONS" ]
+  [ "$(jq -r '.rows' <<<"$output")" = "2" ]
+}
+
+@test "replica configure emits native MariaDB SQL without plaintext password" {
+  local captured="$BATS_TEST_TMPDIR/change-master.sql"
+  mariadb_sql() { printf '%s' "$3" > "$captured"; }
+
+  mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 current_pos
+
+  grep -q 'RESET SLAVE ALL' "$captured"
+  grep -q "MASTER_HOST='peer.example'" "$captured"
+  grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
+  grep -q 'MASTER_USE_GTID=current_pos' "$captured"
+  grep -q 'START SLAVE' "$captured"
+  ! grep -q 's3cr!t' "$captured"
+}
+
+@test "replica configure rejects an unsafe source host before SQL" {
+  mariadb_sql() { return 99; }
+  run mdbr_replica_configure pod-0 secret "peer';DROP TABLE x" 3306 slave_pos
+  [ "$status" -eq 2 ]
 }
 
 # --- deploy-time config ------------------------------------------------------

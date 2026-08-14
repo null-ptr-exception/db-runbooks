@@ -152,6 +152,26 @@ if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
 fi
 
 mdbt_require_confirm "$OP" "$CONFIRM"
+
+# mariadb-operator 0.0.24 does not expose a server-id range in the MariaDB
+# CRD. If this standby declares the v24 deployment policy, apply it to every
+# live member before the assessment. Keep dry-run read-only; the confirmed
+# call re-assesses after the runtime-only setting so a collision is not carried
+# into CHANGE MASTER.
+if [[ -n "$MDBR_SERVER_ID_START_INDEX" ]]; then
+  if ! mdbr_configure_server_ids "$ROOT_PASSWORD" "${PODS[@]}"; then
+    mdbt_fail "$OP" "standby server ids could not be configured" \
+      "$(_assessment_data assess false)" 1 SERVER_ID_CONFIGURATION_UNAVAILABLE
+  fi
+  if ! ASSESSMENT="$(mdbr_assess "$PRIMARY_POD" "$ROOT_PASSWORD" \
+    "$PEER_HOST" "$ALREADY_LINKED")"; then
+    mdbt_fail "$OP" "replication state could not be reassessed" \
+      "$(_assessment_data assess false)" 1 "$(mdbr_assess_reason "$ASSESSMENT")"
+  fi
+  ACTION="$(jq -r '.action' <<<"$ASSESSMENT")"
+  ASSESS_REASON="$(jq -r '.reason' <<<"$ASSESSMENT")"
+fi
+
 if [[ -n "$EXPECTED_ACTION" && "$EXPECTED_ACTION" != "$ACTION" ]]; then
   mdbt_fail "$OP" "assessment does not match expected_action" \
     "$(_assessment_data assess false)" 1 UNEXPECTED_ACTION
@@ -185,8 +205,8 @@ if [[ "$ACTION" == "rebuild" ]]; then
       "$(_assessment_data backup false)" 1 PEER_OPERATION_FAILED
   fi
   BACKUP_NAME="$(jq -r '.backupName // empty' <<<"$PEER_BACKUP")"
-  if ! (MDBT_RESULT_FILE=/dev/null; mdbt_validate_dns_label \
-    "backup" "$BACKUP_NAME" "$OP") >/dev/null 2>&1; then
+  if ! mdbt_validate_silently mdbt_validate_dns_label \
+    "backup" "$BACKUP_NAME" "$OP"; then
     mdbt_fail "$OP" "the primary returned an invalid physical backup" \
       "$(_assessment_data backup false)" 1 PEER_OPERATION_FAILED
   fi
@@ -211,6 +231,11 @@ if [[ "$ACTION" == "rebuild" ]]; then
   ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
     mdbt_fail "$OP" "database credentials are unavailable after restore" \
       "$(_assessment_data wire true)" 1 INTERNAL_ERROR
+  if [[ -n "$MDBR_SERVER_ID_START_INDEX" ]] \
+    && ! mdbr_configure_server_ids "$ROOT_PASSWORD" "${PODS[@]}"; then
+    mdbt_fail "$OP" "restored standby server ids could not be configured" \
+      "$(_assessment_data wire true)" 1 SERVER_ID_CONFIGURATION_UNAVAILABLE
+  fi
 fi
 
 GTID_MODE=slave_pos

@@ -183,13 +183,15 @@ expect_task_reason() {
 }
 
 @test "attach dry run assesses a fresh standby as needing a rebuild" {
-  # A standby that has never replicated has no GTID position to resume from.
+  # v0.0.24 assigns 10+ordinal on every cluster. Dry-run is read-only, so it
+  # reports the collision before a confirmed attach applies B's runtime range.
   expect_task_ok "$AQSH_B_URL" "replication/attach" "$(jq -nc --arg ns "$DB_NS" '{namespace: $ns}')"
 
   local data
   data="$(_task_result_data)"
   assert_equal "$(echo "$data" | jq -r '.action')" "rebuild"
-  assert_equal "$(echo "$data" | jq -r '.actionReason')" "NO_REPLICATION_HISTORY"
+  assert_equal "$(echo "$data" | jq -r '.actionReason')" "SERVER_ID_CONFLICT"
+  assert_equal "$(echo "$data" | jq -r '.checks.server_ids_distinct')" "false"
   assert_equal "$(echo "$data" | jq -r '.changed')" "false"
 }
 

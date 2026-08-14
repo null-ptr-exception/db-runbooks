@@ -107,6 +107,13 @@ mdbt_validate_internal_or_fail() {
   fi
 }
 
+# Run a validator in an isolated shell without exposing its normal error
+# response. The validator functions call exit through mdbt_fail, so the
+# subshell is required even when the caller only needs the status.
+mdbt_validate_silently() {
+  (MDBT_RESULT_FILE=/dev/null; "$@") >/dev/null 2>&1
+}
+
 # mdbt_require_confirm <op> <confirm_value>
 # Gate a mutating task behind confirm=true.
 mdbt_require_confirm() {

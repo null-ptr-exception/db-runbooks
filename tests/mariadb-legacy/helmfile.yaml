@@ -37,7 +37,6 @@ releases:
           namespace: mariadb-1
           operatorGroup: mariadb.mmontes.io
           replicas: 2
-          serverIdStartIndex: 10
           objectStorage:
             enabled: true
             secretName: mariadb-storage-primary
@@ -148,7 +147,6 @@ releases:
           namespace: mariadb-1
           operatorGroup: mariadb.mmontes.io
           replicas: 2
-          serverIdStartIndex: 100
           objectStorage:
             enabled: true
             secretName: mariadb-storage-destination
@@ -177,6 +175,7 @@ releases:
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
               REPL_PEER_PORT_DEFAULT=30091
               REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-a.test:30080
+              REPL_SERVER_ID_START_INDEX_DEFAULT=100
           authProxy:
             tokenReviewURL: http://fedauth-mariadb.kind-a.test:30080
         mariadbRbac:

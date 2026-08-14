@@ -385,15 +385,16 @@ _assess_linked() {
 REPL_PEER_PORT_DEFAULT=30091
 REPL_PEER_SERVICE_SUFFIX_DEFAULT=-write
 REPL_MAX_EXTERNAL_CONNECTIONS_DEFAULT=5
+REPL_SERVER_ID_START_INDEX_DEFAULT=100
 EOF
 
   run bash -c "
     export MDBT_CONFIG_FILE='$cfg' LIB_DIR='$LIB_DIR'
     source '$LIB_DIR/mariadb-replication-link.sh'
-    printf '%s|%s|%s\n' \"\$MDBR_PEER_PORT\" \"\$MDBR_MAX_EXTERNAL_CONNECTIONS\" \"\$(mdbr_peer_host db-ops)\"
+    printf '%s|%s|%s|%s\n' \"\$MDBR_PEER_PORT\" \"\$MDBR_MAX_EXTERNAL_CONNECTIONS\" \"\$(mdbr_peer_host db-ops)\" \"\$MDBR_SERVER_ID_START_INDEX\"
   "
   [ "$status" -eq 0 ]
-  [ "$output" = "30091|5|db-ops-write.db-ops.svc.cluster.local" ]
+  [ "$output" = "30091|5|db-ops-write.db-ops.svc.cluster.local|100" ]
 }
 
 @test "an explicit environment override still beats the config file" {
@@ -407,6 +408,38 @@ EOF
   "
   [ "$status" -eq 0 ]
   [ "$output" = "13306" ]
+}
+
+@test "v24 server-id policy maps each local ordinal to the configured range" {
+  MDBR_SERVER_ID_START_INDEX=100
+  local captured="$BATS_TEST_TMPDIR/server-id.sql"
+  local current_server_id=""
+
+  mariadb_sql() {
+    case "$3" in
+      "SET GLOBAL server_id = "*)
+        printf '%s\n' "$3" >> "$captured"
+        current_server_id="$(printf '%s' "$3" | sed 's/.*= //')"
+        ;;
+      'SELECT @@GLOBAL.server_id')
+        printf '%s\n' "$current_server_id"
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  mdbr_configure_server_ids secret mariadb-0 mariadb-1
+  [ "$(cat "$captured")" = $'SET GLOBAL server_id = 100\nSET GLOBAL server_id = 101' ]
+}
+
+@test "v24 server-id policy rejects an invalid range or pod name" {
+  MDBR_SERVER_ID_START_INDEX=0
+  run mdbr_configure_server_ids secret mariadb-0
+  [ "$status" -eq 2 ]
+
+  MDBR_SERVER_ID_START_INDEX=100
+  run mdbr_configure_server_ids secret mariadb
+  [ "$status" -eq 2 ]
 }
 
 @test "an already-linked standby is not condemned by its own post-restore writes" {

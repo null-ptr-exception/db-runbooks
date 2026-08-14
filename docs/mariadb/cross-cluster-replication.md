@@ -69,7 +69,7 @@ The assessment checks:
 
 | Check | Result when it fails |
 |---|---|
-| A and B have distinct `server_id` values | `SERVER_ID_CONFLICT`; redeploy with disjoint ranges. |
+| A and B have distinct `server_id` values | `SERVER_ID_CONFLICT`; confirmed attach applies B's configured v24 range and reassesses. |
 | B has a saved `gtid_slave_pos` | `NO_REPLICATION_HISTORY`; rebuild. |
 | B is not ahead of A | `GTID_DIVERGED`; rebuild. |
 | A still retains B's starting binlog | `PRIMARY_BINLOG_PURGED`; rebuild. |
@@ -171,8 +171,11 @@ in place. Repeating detach after the link is gone is a successful no-op.
 
 - Both clusters run mariadb-operator 0.24 (`mariadb.*.mmontes.io`). Tasks fail
   closed when operator discovery is unknown or a different generation is found.
-- `serverIdStartIndex` ranges are disjoint across clusters and set before
-  deployment; the field is immutable.
+- mariadb-operator 0.0.24 has no `serverIdStartIndex` field. It initially
+  assigns `10 + ordinal` on every cluster. Standby B must set
+  `REPL_SERVER_ID_START_INDEX_DEFAULT` to a range disjoint from A (for example,
+  `100`); confirmed attach applies the live values before assessment and again
+  after an in-place restore.
 - The mesh publishes the derived peer Service and A accepts the shared
   credential from B.
 - Both workloads resolve the same S3 endpoint, bucket, prefix, and credentials.
@@ -191,6 +194,7 @@ Relevant deployment configuration:
 | `REPL_PEER_AQSH_URL_DEFAULT` | unset | Primary AQSH URL used to request a backup. |
 | `REPL_PEER_TOKEN_FILE_DEFAULT` | projected service-account token | Internal token used for the peer AQSH call. |
 | `REPL_PEER_TASK_TIMEOUT_DEFAULT` | `900` | Maximum peer backup task wait. |
+| `REPL_SERVER_ID_START_INDEX_DEFAULT` | unset | v24 standby server-id base; use a range disjoint from the peer. |
 
 ## Testing
 

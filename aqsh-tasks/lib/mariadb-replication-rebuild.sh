@@ -31,9 +31,9 @@
 # The caller supplies the exact backup name: a stale object cannot be selected by
 # a broad "latest under prefix" lookup.
 #
-# NOTE: this cannot fix a server_id collision. `serverIdStartIndex` is immutable,
-# so only a redeploy can change it — which is correct, since that value is the
-# deployment's declaration, not something a task should quietly rewrite.
+# v0.0.24 has no `serverIdStartIndex` field. The attach task applies the
+# standby's disjoint runtime server-id policy before assessment and again after
+# this restore, because the physical backup can carry the primary's old value.
 # =============================================================================
 
 [[ -n "${_MARIADB_REPLICATION_REBUILD_LOADED:-}" ]] && return 0
@@ -50,7 +50,7 @@ source "${LIB_DIR}/mariadb-replication-link.sh"
 # shellcheck source=aqsh-tasks/lib/minio-client.sh
 source "${LIB_DIR}/minio-client.sh"
 
-MDBR_PEER_TASK_TIMEOUT="${REPL_PEER_TASK_TIMEOUT_DEFAULT:-900}"
+export MDBR_PEER_TASK_TIMEOUT="${REPL_PEER_TASK_TIMEOUT_DEFAULT:-900}"
 # The operator's volumeClaimTemplate name, which prefixes every data PVC it
 # creates (<template>-<mdb>-<ordinal>). Same knob the hand-rolled restore uses.
 MDBR_PVC_TEMPLATE="${MARIADB_PVC_TEMPLATE:-storage}"

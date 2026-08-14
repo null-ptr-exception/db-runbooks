@@ -63,6 +63,14 @@ MDBR_IGNORED_ACCOUNTS="${REPL_IGNORED_ACCOUNTS_DEFAULT:-root,mariadb.sys,healthc
 # until the aqsh task timeout.
 MDBR_PEER_CONNECT_TIMEOUT="${REPL_PEER_CONNECT_TIMEOUT_DEFAULT:-10}"
 
+# mariadb-operator 0.0.24 hard-codes 10+ordinal when it first configures
+# local replication; it does not have the newer serverIdStartIndex field. A
+# standby deployment therefore supplies its disjoint range as deploy-time
+# policy, and attach applies it to the live members before using native SQL.
+# Empty means that the deployment has not opted into this v24 remapping; the
+# normal SERVER_ID_CONFLICT guard remains in force.
+MDBR_SERVER_ID_START_INDEX="${REPL_SERVER_ID_START_INDEX_DEFAULT:-}"
+
 # mdbr_require_v24 <operation>
 # PR #99 intentionally targets mariadb-operator 0.24 only. That generation has
 # no ExternalMariaDB or multiCluster API, so the runbook owns the SQL link. Fail
@@ -117,6 +125,35 @@ mdbr_remote_sql() {
     -h "$host" -P "$MDBR_PEER_PORT" \
     --connect-timeout="$MDBR_PEER_CONNECT_TIMEOUT" \
     -u root -p"$password" -N -B -e "$query" 2>/dev/null
+}
+
+# mdbr_configure_server_ids <password> <pod>...
+# v0.0.24 has no CR field for a cross-cluster server-id range. Set every local
+# member to the deployment's disjoint range so both the current primary and a
+# future local failover member are valid MariaDB replication participants.
+# The setting is dynamic; callers invoke this before assessment and again after
+# an in-place restore, whose physical data may carry the peer's old value.
+#
+# rc: 0 configured and verified, 1 SQL failure, 2 missing/invalid policy.
+mdbr_configure_server_ids() {
+  local password="$1"
+  shift
+  local pod ordinal server_id observed
+
+  [[ "$MDBR_SERVER_ID_START_INDEX" =~ ^[1-9][0-9]*$ ]] || return 2
+  (( $# > 0 )) || return 2
+
+  for pod in "$@"; do
+    [[ "$pod" =~ -([0-9]+)$ ]] || return 2
+    ordinal="${BASH_REMATCH[1]}"
+    server_id=$((MDBR_SERVER_ID_START_INDEX + ordinal))
+    (( server_id > 0 && server_id <= 4294967295 )) || return 2
+    mariadb_sql "$pod" "$password" "SET GLOBAL server_id = ${server_id}" \
+      >/dev/null || return 1
+    observed="$(mariadb_sql "$pod" "$password" \
+      'SELECT @@GLOBAL.server_id')" || return 1
+    [[ "$observed" == "$server_id" ]] || return 1
+  done
 }
 
 # --- cross-cluster replica control ------------------------------------------

@@ -250,6 +250,21 @@ if [[ "$BLOCK_COUNT" -eq 0 && "$ERROR_COUNT" -eq 0 ]]; then
     fi
   fi
 
+  # The target pod's own local password — resolved separately from
+  # ROOT_PASSWORD above, which holds the relayed SOURCE-side credential when
+  # --repl-password-secret is set. The remote connection check below
+  # correctly authenticates AS the source with ROOT_PASSWORD, but the local
+  # server_id query further down authenticates locally on TARGET_POD and
+  # needs the target's own credential regardless of what ROOT_PASSWORD holds.
+  LOCAL_ROOT_PASSWORD=""
+  if [[ -n "$REPL_PASSWORD_SECRET" ]]; then
+    if [[ -n "$TARGET_POD" ]]; then
+      LOCAL_ROOT_PASSWORD=$(mariadb_exec "$TARGET_POD" printenv MARIADB_ROOT_PASSWORD 2>/dev/null) || true
+    fi
+  else
+    LOCAL_ROOT_PASSWORD="$ROOT_PASSWORD"
+  fi
+
   if [[ "$JSON_ONLY" -ne 1 ]]; then echo; fi
 
   if [[ "$JSON_ONLY" -ne 1 ]]; then echo "=== Connection to ${TARGET_IP}:${TARGET_PORT} ==="; fi
@@ -266,7 +281,7 @@ if [[ "$BLOCK_COUNT" -eq 0 && "$ERROR_COUNT" -eq 0 ]]; then
       # This pod's own server_id (local connection, no -h/-P) vs. the
       # remote's, over the same connection that just passed above.
       LOCAL_SERVER_ID=""
-      LOCAL_SERVER_ID=$(mariadb_sql "$TARGET_POD" "$ROOT_PASSWORD" "SELECT @@server_id") || true
+      LOCAL_SERVER_ID=$(mariadb_sql "$TARGET_POD" "$LOCAL_ROOT_PASSWORD" "SELECT @@server_id") || true
       REMOTE_SERVER_ID=""
       REMOTE_SERVER_ID=$(mariadb_exec "$TARGET_POD" mariadb -u root -p"$ROOT_PASSWORD" \
         -h "$TARGET_IP" -P "$TARGET_PORT" --connect-timeout=5 -N -B \

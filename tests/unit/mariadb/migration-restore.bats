@@ -26,6 +26,7 @@ setup() {
   CAPTURE="${MOCK_DIR}/applied.yaml"
   RESULT="${MOCK_DIR}/result.json"
   DELETES="${MOCK_DIR}/deletes.log"
+  KUBECTL_LOG="${MOCK_DIR}/kubectl.log"
 
   # --- kubectl mock -----------------------------------------------------------
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
@@ -35,11 +36,12 @@ setup() {
 #   get mariadb (jsonpath spec.image)     → distinct-image scan (MOCK_SOURCE_IMAGES)
 #   get mariadb <name> -o json            → source spec (MOCK_SOURCE_IMAGE/_STORAGE)
 #   get secret <root secret>              → root-secret pre-check (MOCK_ROOT_SECRET_MISSING)
-#   create secret generic ...             → temp credential secret (always succeeds)
-#   create -f -                           → CR creation: AlreadyExists (MOCK_TARGET_EXISTS) or capture+succeed
+#   create -f - (kind: Secret)            → temp credential secret (always succeeds)
+#   create -f - (kind: MariaDB)           → CR creation: AlreadyExists (MOCK_TARGET_EXISTS) or capture+succeed
 #   delete secret                         → logged to MOCK_DELETE_LOG, always succeeds
 #   wait                                  → Ready wait (fails with MOCK_WAIT_FAIL=1)
 args="$*"
+[[ -n "${KUBECTL_LOG:-}" ]] && printf '%s\n' "$args" >> "${KUBECTL_LOG}"
 verb=""
 for a in "$@"; do
   case "$a" in get|apply|wait|create|delete) verb="$a"; break ;; esac
@@ -64,18 +66,19 @@ case "$verb" in
       *) echo "mock kubectl: unhandled get: $args" >&2; exit 1 ;;
     esac ;;
   create)
-    if [[ "$args" == *"secret"* ]]; then
-      # Temporary credential Secret creation — always succeeds.
+    # Both the temp credential Secret and the MariaDB CR now go through
+    # `create -f -`; distinguish by the piped manifest's kind.
+    _input=$(cat)
+    _kind=$(printf '%s' "$_input" | jq -r '.kind // empty' 2>/dev/null)
+    if [[ "$_kind" == "Secret" ]]; then
       exit 0
     fi
-    # CR creation via `create -f -`: atomic AlreadyExists, or capture+succeed.
-    _input=$(cat)
     if [[ "${MOCK_TARGET_EXISTS:-0}" == "1" ]]; then
       echo 'Error from server (AlreadyExists): error when creating "STDIN": mariadbs.k8s.mariadb.com "target" already exists' >&2
       exit 1
     fi
-    if echo "$_input" | jq -e '.kind == "MariaDB"' >/dev/null 2>&1; then
-      echo "$_input" > "${MOCK_APPLY_CAPTURE}"
+    if [[ "$_kind" == "MariaDB" ]]; then
+      printf '%s' "$_input" > "${MOCK_APPLY_CAPTURE}"
     fi
     exit 0 ;;
   delete)
@@ -132,6 +135,7 @@ run_migration_restore() {
     "AQSH_RESULT_FILE=${RESULT}" \
     "MOCK_APPLY_CAPTURE=${CAPTURE}" \
     "MOCK_DELETE_LOG=${DELETES}" \
+    "KUBECTL_LOG=${KUBECTL_LOG}" \
     "$@" \
     bash "${RESTORE_SH}"
 }
@@ -331,6 +335,17 @@ result_field() { jq -r "$1" "${RESULT}"; }
     MINIO_SECRET_KEY="supersecret-do-not-expose"
   [ "$status" -eq 0 ]
   run grep "supersecret-do-not-expose" "${RESULT}"
+  [ "$status" -ne 0 ]
+}
+
+@test "migration/restore never puts minio_secret_key in a kubectl argv element" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 \
+    MINIO_SECRET_KEY="supersecret-do-not-expose"
+  [ "$status" -eq 0 ]
+  [ -f "${KUBECTL_LOG}" ]
+  run grep -F "supersecret-do-not-expose" "${KUBECTL_LOG}"
   [ "$status" -ne 0 ]
 }
 

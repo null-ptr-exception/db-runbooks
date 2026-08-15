@@ -268,11 +268,28 @@ EOF
 # ---------------------------------------------------------------------------
 
 @test "reports BLOCKED when dry_run=false without confirm" {
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "BLOCKED" ]
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "CONFIRM_REQUIRED" ]
+}
+
+@test "a real run (dry_run=false) without repl_password_secret is INVALID_INPUT, even for repl_user=root" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
+  [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "INVALID_INPUT" ]
+  [[ "$(printf '%s' "$output" | jq -r '.errors[]')" == *"repl_password_secret is required when dry_run is false"* ]]
+}
+
+@test "dry_run=true (SQL plan preview) still works without repl_password_secret" {
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.status')" = "READY" ]
 }
 
 # ---------------------------------------------------------------------------
@@ -283,7 +300,8 @@ EOF
   export KUBECTL_CR_NAMES="alpha beta"
   unset MARIADB_NAME
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
@@ -295,7 +313,8 @@ EOF
   export KUBECTL_STS_NAMES=""
   unset MARIADB_NAME
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "MARIADB_NOT_FOUND" ]
@@ -304,7 +323,8 @@ EOF
 @test "reports NO_POD_FOUND when the target has zero replicas" {
   export KUBECTL_CR_REPLICAS=0
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "NO_POD_FOUND" ]
@@ -313,7 +333,8 @@ EOF
 @test "reports ROOT_PASSWORD_UNAVAILABLE when the pod has no root password" {
   export MOCK_NO_ROOT_PASSWORD=true
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.reason_code')" = "ROOT_PASSWORD_UNAVAILABLE" ]
@@ -397,7 +418,8 @@ EOF
 @test "reports CHANGE_MASTER_FAILED when CHANGE MASTER TO fails" {
   export MOCK_CHANGE_MASTER_EXIT=1
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
@@ -407,7 +429,8 @@ EOF
 @test "reports START_SLAVE_FAILED when START SLAVE fails" {
   export MOCK_START_SLAVE_EXIT=1
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
@@ -417,7 +440,8 @@ EOF
 @test "STOP SLAVE failure is tolerated (slave may not be configured yet)" {
   export MOCK_STOP_SLAVE_EXIT=1
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "DONE" ]
@@ -431,7 +455,8 @@ EOF
   export MOCK_SLAVE_STATUS_OUT="Slave_IO_Running: Yes
 Slave_SQL_Running: Yes"
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "DONE" ]
@@ -448,7 +473,8 @@ Slave_SQL_Running: Yes"
   export MOCK_CHANNEL_IO_RUNNING="Connecting"
   export MOCK_CHANNEL_LAST_IO_ERROR="Can't connect to MySQL server"
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
@@ -460,7 +486,8 @@ Slave_SQL_Running: Yes"
   export MOCK_CHANNEL_SQL_RUNNING="No"
   export MOCK_CHANNEL_LAST_SQL_ERROR="Duplicate entry"
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
@@ -486,6 +513,9 @@ cmd="\${args[0]:-}"
 if [[ "\$cmd" == "get" ]]; then
   resource="\${args[1]:-}"
   output="\${args[*]}"
+  if [[ "\$resource" == "secret" ]]; then
+    printf 'cmVwbC1zZWNyZXQtcGFzcw=='; exit 0
+  fi
   if [[ "\$output" == *'items[*]'* ]]; then
     [[ "\$resource" == "mariadb" ]] && printf 'mariadb\n'
     exit 0
@@ -525,7 +555,8 @@ exit 1
 EOF
   chmod +x "${TEST_TMPDIR}/bin/kubectl"
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "DONE" ]
@@ -536,7 +567,8 @@ EOF
 @test "result never exposes the real replication password" {
   export MOCK_ROOT_PASSWORD="super-secret-root-pw"
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true \
+    --repl-password-secret repl-creds --json
 
   [ "$status" -eq 0 ]
   [[ "$output" != *"super-secret-root-pw"* ]]
@@ -550,17 +582,20 @@ EOF
 @test "strict-exit exits 2 on ERROR" {
   export MOCK_NO_ROOT_PASSWORD=true
 
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --strict-exit --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --strict-exit \
+    --repl-password-secret repl-creds --json
   [ "$status" -eq 2 ]
 }
 
 @test "strict-exit exits 1 on BLOCKED" {
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --strict-exit --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --strict-exit \
+    --repl-password-secret repl-creds --json
   [ "$status" -eq 1 ]
 }
 
 @test "strict-exit exits 0 on DONE" {
-  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --strict-exit --json
+  run "${SCRIPT}" --namespace db-1 --host 10.0.0.1 --dry-run false --confirm true --strict-exit \
+    --repl-password-secret repl-creds --json
   [ "$status" -eq 0 ]
 }
 

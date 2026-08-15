@@ -163,13 +163,18 @@ fi
 
 [[ -n "$REPL_USER" ]] || add_error "repl_user must not be empty"
 
-# The no-secret fallback below reads the TARGET pod's own root password —
-# that's only a sensible MASTER_PASSWORD when authenticating as root (this
-# sandbox's source/target instances happen to share one root password). Any
-# other repl_user has no default password source, so require an explicit
-# secret rather than silently authenticating with the wrong credential.
+# The no-secret fallback reads the TARGET pod's own root password — only a
+# sensible MASTER_PASSWORD when authenticating as root, and even then only
+# when source and target happen to share one root password, which does not
+# hold for a real cross-cluster migration. So: any non-root repl_user always
+# needs an explicit secret (no sensible default password exists for it,
+# dry-run or not); any real (dry_run=false) run needs one regardless of
+# repl_user. The fallback remains available only for a root, dry_run=true
+# SQL-plan preview, which needs no live credential at all.
 if [[ -n "$REPL_USER" && "$REPL_USER" != "root" && -z "$REPL_PASSWORD_SECRET" ]]; then
   add_error "repl_password_secret is required when repl_user is not root"
+elif [[ -z "$REPL_PASSWORD_SECRET" ]] && ! bool_enabled "$DRY_RUN"; then
+  add_error "repl_password_secret is required when dry_run is false"
 fi
 
 is_valid_bool() {

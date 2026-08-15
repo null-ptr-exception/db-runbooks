@@ -22,6 +22,7 @@ setup() {
   CAPTURE="${MOCK_DIR}/applied.yaml"
   DELETES="${MOCK_DIR}/deletes.log"
   RESULT="${MOCK_DIR}/result.json"
+  KUBECTL_LOG="${MOCK_DIR}/kubectl.log"
 
   # --- kubectl mock -----------------------------------------------------------
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
@@ -30,11 +31,12 @@ setup() {
 #   get mariadb (jsonpath items[*])       → auto-detect (MOCK_CR_NAMES)
 #   get mariadb <name> -o json            → Ready check (MOCK_SOURCE_READY / MOCK_SOURCE_NOT_FOUND)
 #   get physicalbackup/<name> -o json     → status probe (MOCK_PB_STATUS / MOCK_PB_CONDITIONS)
-#   create secret ...                     → success (or fail with MOCK_CREATE_SECRET_FAIL=1)
+#   create -f - (kind: Secret)            → success (or fail with MOCK_CREATE_SECRET_FAIL=1)
 #   apply -f -                            → capture stdin (PhysicalBackup only)
 #   delete secret                         → logged to DELETES, always succeeds
 #   wait                                  → Complete wait (fails with MOCK_WAIT_FAIL=1)
 args="$*"
+[[ -n "${KUBECTL_LOG:-}" ]] && printf '%s\n' "$args" >> "${KUBECTL_LOG}"
 verb=""
 for a in "$@"; do
   case "$a" in get|apply|wait|create|delete) verb="$a"; break ;; esac
@@ -64,6 +66,10 @@ case "$verb" in
       *) echo "mock kubectl: unhandled get: $args" >&2; exit 1 ;;
     esac ;;
   create)
+    # Temp credential Secret is now created via `create -f -` (jq-built
+    # manifest piped on stdin, not --from-literal) — drain it like real
+    # kubectl always does before responding.
+    cat >/dev/null
     [[ "${MOCK_CREATE_SECRET_FAIL:-0}" == "1" ]] && exit 1
     exit 0 ;;
   apply)
@@ -102,6 +108,7 @@ run_sourcedb_backup() {
     "AQSH_RESULT_FILE=${RESULT}" \
     "MOCK_APPLY_CAPTURE=${CAPTURE}" \
     "MOCK_DELETE_LOG=${DELETES}" \
+    "KUBECTL_LOG=${KUBECTL_LOG}" \
     "$@" \
     bash "${BACKUP_SH}"
 }
@@ -423,5 +430,13 @@ result_field() { jq -r "$1" "${RESULT}"; }
   run grep "supersecret-do-not-expose" "${RESULT}"
   [ "$status" -ne 0 ]
   run grep "supersecret-do-not-expose" "${CAPTURE}"
+  [ "$status" -ne 0 ]
+}
+
+@test "sourcedb-backup never puts minio_secret_key in a kubectl argv element" {
+  run_sourcedb_backup DRY_RUN=false CONFIRM=true MINIO_SECRET_KEY="supersecret-do-not-expose"
+  [ "$status" -eq 0 ]
+  [ -f "${KUBECTL_LOG}" ]
+  run grep -F "supersecret-do-not-expose" "${KUBECTL_LOG}"
   [ "$status" -ne 0 ]
 }

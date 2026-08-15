@@ -27,10 +27,12 @@ own.
   sides, replicas cloned byte-for-byte. Logical (`mariadb-dump`) migration is
   out of scope here.
 - **Root or a dedicated replication account.** `setup-replication`'s
-  `repl_user` defaults to `root` (using the target pod's own
-  `MARIADB_ROOT_PASSWORD` when `repl_password_secret` is omitted); any other
-  account requires `repl_password_secret` explicitly, since there is no
-  sensible default password for an arbitrary user.
+  `repl_user` defaults to `root`. `repl_password_secret` is required for
+  every real (`dry_run=false`) run regardless of `repl_user` — source and
+  target legitimately have different root passwords in a real migration, so
+  there is no safe default credential to fall back to. The target pod's own
+  `MARIADB_ROOT_PASSWORD` is used as `MASTER_PASSWORD` only as a `repl_user:
+  root`, `dry_run=true` SQL-plan-preview convenience, never on a real run.
 
 ## The chain
 

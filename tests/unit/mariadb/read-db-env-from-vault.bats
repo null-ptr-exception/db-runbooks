@@ -9,8 +9,10 @@
 #   - Vault AppRole config is deploy-time only — there is no task-input override
 #   - --keys entries may rename the destination Secret key: VAULT_KEY=secret_key
 #   - omitting --keys imports every key at the vault path
-#   - the Secret write is idempotent (create --dry-run=client -o yaml | apply)
+#   - the Secret write is idempotent (jq-built manifest | apply)
 #   - vault_path / secret_name are validated
+#   - decrypted Vault values never appear as a kubectl argv element (only in
+#     the base64 `data:` payload of the manifest piped via stdin)
 
 setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
@@ -33,10 +35,14 @@ setup() {
   export CURL_LOG
   SECRET_APPLY_CAPTURE="${TEST_TMPDIR}/secret-apply.yaml"
   export SECRET_APPLY_CAPTURE
+  KUBECTL_LOG="${TEST_TMPDIR}/kubectl.log"
+  export KUBECTL_LOG
 
   cat > "${TEST_TMPDIR}/bin/kubectl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+[[ -n "${KUBECTL_LOG:-}" ]] && printf '%s\n' "$*" >> "${KUBECTL_LOG}"
 
 args=()
 while [[ $# -gt 0 ]]; do
@@ -58,26 +64,6 @@ cmd="${args[0]:-}"
 
 if [[ "$cmd" == "cluster-info" ]]; then
   echo "Kubernetes control plane is running"
-  exit 0
-fi
-
-if [[ "$cmd" == "create" && "${args[1]:-}" == "secret" ]]; then
-  [[ "${MOCK_SECRET_CREATE_FAIL:-0}" == "1" ]] && { echo "create failed" >&2; exit 1; }
-  name="${args[2]:-}"
-  echo "apiVersion: v1"
-  echo "kind: Secret"
-  echo "metadata:"
-  echo "  name: ${name}"
-  echo "type: Opaque"
-  echo "stringData:"
-  for a in "${args[@]}"; do
-    if [[ "$a" == --from-literal=* ]]; then
-      kv="${a#--from-literal=}"
-      k="${kv%%=*}"
-      v="${kv#*=}"
-      echo "  ${k}: \"${v}\""
-    fi
-  done
   exit 0
 fi
 
@@ -149,8 +135,8 @@ EOF
   [ "$written" = '["other_key","root_password"]' ]
 
   [ -f "${SECRET_APPLY_CAPTURE}" ]
-  grep -q 'root_password: "secret-root-pass"' "${SECRET_APPLY_CAPTURE}"
-  grep -q 'other_key: "other-val"' "${SECRET_APPLY_CAPTURE}"
+  [ "$(jq -r '.data.root_password' "${SECRET_APPLY_CAPTURE}" | base64 -d)" = "secret-root-pass" ]
+  [ "$(jq -r '.data.other_key' "${SECRET_APPLY_CAPTURE}" | base64 -d)" = "other-val" ]
 }
 
 @test "--keys selects a subset of vault keys" {
@@ -160,8 +146,8 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '.secret.keysWritten')" = '["root_password"]' ]
   [ -f "${SECRET_APPLY_CAPTURE}" ]
-  grep -q 'root_password:' "${SECRET_APPLY_CAPTURE}"
-  ! grep -q 'other_key:' "${SECRET_APPLY_CAPTURE}"
+  [ "$(jq '.data | has("root_password")' "${SECRET_APPLY_CAPTURE}")" = "true" ]
+  [ "$(jq '.data | has("other_key")' "${SECRET_APPLY_CAPTURE}")" = "false" ]
 }
 
 @test "--keys entry with =secret_key stores under the renamed Secret key" {
@@ -172,8 +158,8 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '.secret.keysWritten')" = '["repl_password"]' ]
   [ -f "${SECRET_APPLY_CAPTURE}" ]
-  grep -q 'repl_password: "secret-root-pass"' "${SECRET_APPLY_CAPTURE}"
-  ! grep -q 'root_password:' "${SECRET_APPLY_CAPTURE}"
+  [ "$(jq -r '.data.repl_password' "${SECRET_APPLY_CAPTURE}" | base64 -d)" = "secret-root-pass" ]
+  [ "$(jq '.data | has("root_password")' "${SECRET_APPLY_CAPTURE}")" = "false" ]
 }
 
 @test "a requested-but-missing key is reported missing, not written" {
@@ -225,6 +211,15 @@ EOF
     --secret-name migration-job-1-source-creds --result-file "$result_file"
   [ "$status" -eq 0 ]
   run grep "secret-root-pass" "$result_file"
+  [ "$status" -ne 0 ]
+}
+
+@test "the raw vault value never appears as a kubectl argv element" {
+  run "${SCRIPT}" --namespace db-1 --vault-path migration/job-1/source \
+    --secret-name migration-job-1-source-creds --json
+  [ "$status" -eq 0 ]
+  [ -f "${KUBECTL_LOG}" ]
+  run grep -F "secret-root-pass" "${KUBECTL_LOG}"
   [ "$status" -ne 0 ]
 }
 

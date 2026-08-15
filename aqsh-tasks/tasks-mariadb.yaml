@@ -854,7 +854,7 @@ tasks:
         default: password
   migration/setup-replication:
     script: mariadb/migration/setup-replication.sh
-    description: "Configure a MariaDB GTID replication channel. Authenticates as repl_user (default root); a non-root repl_user requires repl_password_secret, since there is no default password for an arbitrary account. After START SLAVE, polls the channel's Slave_IO_Running/Slave_SQL_Running for a few seconds and reports ERROR/REPLICATION_NOT_HEALTHY rather than a false DONE if the channel never comes up."
+    description: "Configure a MariaDB GTID replication channel. Authenticates as repl_user (default root); repl_password_secret is required for every real (dry_run=false) run regardless of repl_user — the target pod's own root password is only used as a repl_user=root, dry_run=true SQL-plan-preview convenience, never on a real run. After START SLAVE, polls the channel's Slave_IO_Running/Slave_SQL_Running for a few seconds and reports ERROR/REPLICATION_NOT_HEALTHY rather than a false DONE if the channel never comes up."
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:

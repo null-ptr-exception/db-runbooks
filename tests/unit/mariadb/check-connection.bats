@@ -106,12 +106,28 @@ if [[ "$cmd" == "exec" ]]; then
       ;;
     "mariadb")
       full="${command[*]}"
+      is_remote=0
+      [[ "$full" == *" -h "* ]] && is_remote=1
+      pw=""
+      for c in "${command[@]}"; do
+        case "$c" in -p*) pw="${c#-p}" ;; esac
+      done
+      # Optional password-identity enforcement (both unset by default, so
+      # existing tests that don't care about which credential was used are
+      # unaffected): proves the LOCAL (no -h) query authenticates with the
+      # target pod's own password, never the relayed REMOTE (-h) one.
+      if [[ "$is_remote" -eq 1 && -n "${MOCK_EXPECTED_REMOTE_PASSWORD:-}" && "$pw" != "${MOCK_EXPECTED_REMOTE_PASSWORD}" ]]; then
+        exit 1
+      fi
+      if [[ "$is_remote" -eq 0 && -n "${MOCK_EXPECTED_LOCAL_PASSWORD:-}" && "$pw" != "${MOCK_EXPECTED_LOCAL_PASSWORD}" ]]; then
+        exit 1
+      fi
       case "$full" in
         *"SELECT @@server_id"*)
           # Defaults deliberately don't collide mod 10 (101 % 10 = 1,
           # 202 % 10 = 2) so happy-path tests get server_id PASS unless a
           # test explicitly overrides one of these to test a collision.
-          if [[ "$full" == *" -h "* ]]; then
+          if [[ "$is_remote" -eq 1 ]]; then
             printf '%s' "${MOCK_REMOTE_SERVER_ID:-202}"
           else
             printf '%s' "${MOCK_LOCAL_SERVER_ID:-101}"
@@ -306,6 +322,28 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.status')" = "ERROR" ]
   [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .reason_code')" = "ROOT_PASSWORD_NOT_FOUND" ]
+}
+
+@test "the local server_id query authenticates with the target pod's own password, not the relayed secret" {
+  # Distinct pod-env vs. relayed-secret passwords: with --repl-password-secret
+  # set, the remote connection check must use the relayed password, but the
+  # LOCAL server_id query (no -h, runs on TARGET_POD itself) must still use
+  # the pod's own MARIADB_ROOT_PASSWORD. Reusing the relayed password for the
+  # local query would fail local auth and false-negative as SERVER_ID_UNAVAILABLE.
+  export MOCK_ROOT_PASSWORD="target-own-pass"
+  export MOCK_SECRET_KEY_root_password="relayed-source-pass"
+  export MOCK_EXPECTED_LOCAL_PASSWORD="target-own-pass"
+  export MOCK_EXPECTED_REMOTE_PASSWORD="relayed-source-pass"
+  export MOCK_LOCAL_SERVER_ID=101
+  export MOCK_REMOTE_SERVER_ID=202
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 \
+    --repl-password-secret migration-job-1-source-creds \
+    --repl-password-key root_password --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "connection") | .status')" = "PASS" ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "server_id") | .status')" = "PASS" ]
 }
 
 # ---------------------------------------------------------------------------

@@ -369,14 +369,24 @@ _cleanup_temp_secret() {
 # the operator was never given a CR that could reference this Secret.
 trap _cleanup_temp_secret EXIT
 
-if ! _kubectl create secret generic "$TEMP_SECRET_NAME" \
-    --from-literal="${_CRED_ACCESS_KEY_NAME}=${MINIO_ACCESS_KEY}" \
-    --from-literal="${_CRED_SECRET_KEY_NAME}=${MINIO_SECRET_KEY}" >/dev/null; then
+# Built via jq and piped through stdin rather than --from-literal, which
+# would put the raw MinIO secret key into kubectl's own argv (readable by
+# any same-UID process via ps/procfs).
+_TEMP_SECRET_MANIFEST="$(jq -n \
+  --arg name "$TEMP_SECRET_NAME" \
+  --arg accessKeyName "$_CRED_ACCESS_KEY_NAME" \
+  --arg accessKeyValue "$MINIO_ACCESS_KEY" \
+  --arg secretKeyName "$_CRED_SECRET_KEY_NAME" \
+  --arg secretKeyValue "$MINIO_SECRET_KEY" \
+  '{apiVersion:"v1", kind:"Secret", metadata:{name:$name}, type:"Opaque",
+    data:{($accessKeyName):($accessKeyValue|@base64), ($secretKeyName):($secretKeyValue|@base64)}}')"
+if ! printf '%s\n' "$_TEMP_SECRET_MANIFEST" | _kubectl create -f - >/dev/null; then
   trap - ERR
   mdbt_fail "$OP" "failed to create temporary credential secret '${TEMP_SECRET_NAME}'" \
     "$(jq -n --arg ns "$NAMESPACE" --arg target "$TARGET" \
        '{namespace: $ns, target: $target}')" 1
 fi
+unset _TEMP_SECRET_MANIFEST
 
 unset MINIO_SECRET_KEY
 

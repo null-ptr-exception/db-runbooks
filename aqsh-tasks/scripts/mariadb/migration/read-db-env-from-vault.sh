@@ -252,15 +252,20 @@ if [[ "$WRITTEN_COUNT" -eq 0 ]]; then
   exit 0
 fi
 
-# Build --from-literal args and apply idempotently.
-FROM_LITERAL_ARGS=()
-while IFS='=' read -r k v; do
-  [[ -z "$k" ]] && continue
-  FROM_LITERAL_ARGS+=(--from-literal="${k}=${v}")
-done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<<"$SELECTED_JSON")
-
-if ! MANIFEST="$(_kubectl create secret generic "$SECRET_NAME" \
-    "${FROM_LITERAL_ARGS[@]}" --dry-run=client -o yaml 2>&1)"; then
+# Build the Secret manifest directly with jq (base64-encoding values
+# in-process) instead of `kubectl create secret --from-literal=...`, which
+# would put each decrypted Vault value into kubectl's own argv — readable by
+# any same-UID process via ps/procfs. Same fix already applied to vault.sh's
+# curl calls; piped to `apply` via stdin, mirroring restore.sh's manifest
+# pattern, so the value never appears as a process argument anywhere.
+if ! MANIFEST="$(jq -n \
+    --arg name "$SECRET_NAME" \
+    --arg namespace "$NAMESPACE" \
+    --argjson data "$SELECTED_JSON" \
+    '{apiVersion:"v1", kind:"Secret",
+      metadata:{name:$name, namespace:$namespace},
+      type:"Opaque",
+      data:($data | map_values(@base64))}' 2>&1)"; then
   _fail_result "SECRET_RENDER_FAILED" "Failed to render Secret manifest for '${SECRET_NAME}': ${MANIFEST}"
 fi
 

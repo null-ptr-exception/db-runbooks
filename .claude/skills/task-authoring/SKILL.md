@@ -72,6 +72,21 @@ above look contradictory until you ask *whose* identity is at stake:
 So the test is not "does it look like a secret" but **"could a caller use this
 to act as someone they aren't?"**
 
+The carve-out is small and enumerable — check yourself against it before
+claiming a new one. Credential-shaped inputs across both gateways fall into
+three shapes:
+
+| Shape | Inputs | Why it's safe |
+|-------|--------|---------------|
+| **By reference** (default) | `credential_secret`, `credential_user_key`, `credential_pass_key`, `repl_password_secret`, `repl_password_key`, `password_secret_name`, `password_secret_key`, `secret_name`, `secret_keys` | The value never crosses the API at all — only the name of a Secret the deployment can already read |
+| **By value, encrypted** | `secrets/*` `payload` | PGP-encrypted against the deployment key; plaintext never crosses the API |
+| **By value, plaintext — the caller's own** | `minio_access_key` / `minio_secret_key` (the caller's migration source), `peer_token` (the caller's own bearer token, forwarded so this gateway can call a peer gateway *as the caller*) | Grants nothing the caller doesn't already hold; no deploy-time value could substitute |
+
+Two entries in that last row, and `peer_token` is the clearest reading of the
+rule: it is literally the caller's own identity being forwarded, never the
+deployment's. If you think you need a third, you are probably reaching for the
+deployment's identity — go back to Rule 1.
+
 A caller-supplied credential still owes three things, all of which the migration
 tasks do today — copy them:
 

@@ -61,15 +61,21 @@ if [[ "$cmd" == "get" ]]; then
 
   if [[ "$resource" == "secret" ]]; then
     case "$output" in
-      *'.data.'*)
-        key="${output##*data.}"
-        key="${key%\}}"
-        mock_var="MOCK_SECRET_KEY_${key}"
-        if [[ -n "${!mock_var+x}" ]]; then
-          printf '%s' "${!mock_var}" | base64 -w0 2>/dev/null || printf '%s' "${!mock_var}" | base64
-          exit 0
+      *'-o json'*)
+        # k8s_secret_value reads the full Secret via -o json then does its
+        # own jq map-key lookup — the mock just returns the whole data map.
+        if [[ -n "${MOCK_SECRET_DATA_JSON:-}" ]]; then
+          printf '{"data":%s}' "$MOCK_SECRET_DATA_JSON"
+        else
+          json='{}'
+          for var in $(compgen -v MOCK_SECRET_KEY_ 2>/dev/null || true); do
+            key="${var#MOCK_SECRET_KEY_}"
+            b64=$(printf '%s' "${!var}" | base64 -w0 2>/dev/null || printf '%s' "${!var}" | base64)
+            json=$(printf '%s' "$json" | jq --arg k "$key" --arg v "$b64" '. + {($k): $v}')
+          done
+          printf '{"data":%s}' "$json"
         fi
-        exit 1
+        exit 0
         ;;
     esac
   fi
@@ -313,6 +319,23 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .status')" = "PASS" ]
   [[ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .detail')" == *"migration-job-1-source-creds"* ]]
+}
+
+@test "resolves a --repl-password-key that contains a literal dot" {
+  # jsonpath's {.data.<key>} would misread "root.password" as nested field
+  # traversal instead of one flat Secret data key; k8s_secret_value must use
+  # a map-key lookup instead. MOCK_SECRET_KEY_<key> can't express a dotted
+  # key (bash variable names can't contain "."), so use the raw-JSON escape
+  # hatch instead.
+  export MOCK_SECRET_DATA_JSON='{"root.password":"ZG90dGVkLWtleS1wYXNz"}'
+
+  run "${SCRIPT}" --namespace db-1 --mdb mariadb --ip 10.0.0.1 \
+    --repl-password-secret migration-job-1-source-creds \
+    --repl-password-key root.password --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.checks[] | select(.name == "root_password") | .status')" = "PASS" ]
+  [[ "$output" != *"dotted-key-pass"* ]]
 }
 
 @test "ERROR with ROOT_PASSWORD_NOT_FOUND when --repl-password-secret does not resolve" {

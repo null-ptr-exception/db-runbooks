@@ -671,8 +671,16 @@ k8s_secret_value() {
   local secret_name="${1:?secret_name is required}"
   local key="${2:?key is required}"
 
+  # -o json + jq map-key lookup, not jsonpath: jsonpath's {.data.<key>}
+  # treats "." as a field separator, so a key containing a literal "."
+  # (e.g. "tls.crt") would be misread as nested traversal instead of one
+  # flat Secret data key.
+  local secret_json
+  secret_json=$(_kubectl get secret "$secret_name" -o json 2>/dev/null) || return 1
+  [[ -n "$secret_json" ]] || return 1
+
   local encoded
-  encoded=$(_kubectl get secret "$secret_name" -o "jsonpath={.data.${key}}" 2>/dev/null) || true
+  encoded=$(printf '%s' "$secret_json" | jq -r --arg k "$key" '.data[$k] // empty' 2>/dev/null) || return 1
   [[ -n "$encoded" ]] || return 1
 
   local value

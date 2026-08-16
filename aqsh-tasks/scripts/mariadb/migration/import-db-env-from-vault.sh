@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # =============================================================================
-# mariadb/migration/read-db-env-from-vault.sh
+# mariadb/migration/import-db-env-from-vault.sh
 # Read a HashiCorp Vault KV-v2 path and materialize its values as a
-# Kubernetes Secret — the read-side counterpart to write-db-env-to-vault.
+# Kubernetes Secret — the read-side counterpart to export-db-env-to-vault.
 #
 # This exists for cross-cluster migration: a value pushed to Vault by
-# write-db-env-to-vault on the source cluster (root password, a dedicated
+# export-db-env-to-vault on the source cluster (root password, a dedicated
 # replication user's password, ...) needs to land somewhere usable on the
 # target cluster — e.g. as the --repl-password-secret migration/setup-replication
 # expects. This task is reachable by any service account in
@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # Vault auth is AppRole (VAULT_ROLE_ID/VAULT_SECRET_ID), sourced only from
 # deploy-time internal config (/etc/aqsh/config/mariadb.env) — never a task
-# input, for the same reason write-db-env-to-vault keeps it deploy-time-only.
+# input, for the same reason export-db-env-to-vault keeps it deploy-time-only.
 #
 # The Secret write is idempotent (create --dry-run=client -o yaml | apply),
 # not a randomly-suffixed temp Secret: unlike restore.sh's short-lived
@@ -65,7 +65,7 @@ JSON_ONLY=0
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  read-db-env-from-vault.sh --namespace <namespace> --vault-path <path> \
+  import-db-env-from-vault.sh --namespace <namespace> --vault-path <path> \
                              --secret-name <name> [options]
 
 Options:
@@ -143,7 +143,7 @@ fi
 K8S_CONTEXT="$CONTEXT"
 K8S_NAMESPACE="$NAMESPACE"
 
-[[ "$JSON_ONLY" -ne 1 ]] && log_info "read-db-env-from-vault" \
+[[ "$JSON_ONLY" -ne 1 ]] && log_info "import-db-env-from-vault" \
   "namespace=${NAMESPACE} vault_path=${VAULT_PATH} secret_name=${SECRET_NAME}"
 
 _emit_result() {
@@ -225,8 +225,11 @@ if [[ -n "$KEYS_STR" ]]; then
       continue
     fi
 
-    value=$(jq -r --arg k "$vault_key" '.[$k] // empty' <<<"$VAULT_DATA")
-    if [[ -n "$value" ]]; then
+    # has($k) first, then read separately: `.[$k] // empty` alone can't tell
+    # "key absent" from "key present with an empty string" — both would land
+    # in MISSING_JSON, silently dropping a genuinely-stored empty value.
+    if jq -e --arg k "$vault_key" 'has($k)' <<<"$VAULT_DATA" >/dev/null; then
+      value=$(jq -r --arg k "$vault_key" '.[$k]' <<<"$VAULT_DATA")
       SELECTED_JSON=$(printf '%s' "$SELECTED_JSON" | jq --arg k "$secret_key" --arg v "$value" '. + {($k): $v}')
     else
       MISSING_JSON=$(printf '%s' "$MISSING_JSON" | jq --arg k "$vault_key" '. + [$k]')

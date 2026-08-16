@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =============================================================================
-# mariadb/migration/write-db-env-to-vault.sh
+# mariadb/migration/export-db-env-to-vault.sh
 # Read values from a MariaDB pod's environment and/or an existing Kubernetes
 # Secret, and write them to a HashiCorp Vault KV-v2 path — never returned in
 # the task result or logged.
@@ -81,7 +81,7 @@ JSON_ONLY=0
 usage() {
   cat >&2 <<'EOF'
 Usage:
-  write-db-env-to-vault.sh --namespace <namespace> --vault-path <path> \
+  export-db-env-to-vault.sh --namespace <namespace> --vault-path <path> \
       [--mdb <name> --envs <VAR1[=vault_key1],VAR2,...>] \
       [--secret-name <name> --secret-keys <KEY1[=vault_key1],KEY2,...>] \
       [options]
@@ -172,7 +172,7 @@ fi
 
 mariadb_set_target "$CONTEXT" "$NAMESPACE" "$RESOURCE" "$MDB" "$CONTAINER"
 
-[[ "$JSON_ONLY" -ne 1 ]] && log_info "write-db-env-to-vault" \
+[[ "$JSON_ONLY" -ne 1 ]] && log_info "export-db-env-to-vault" \
   "namespace=${NAMESPACE} mdb=${MDB} envs=${ENVS_STR} secret_name=${SECRET_NAME} secret_keys=${SECRET_KEYS_STR} vault_path=${VAULT_PATH}"
 
 _emit_result() {
@@ -237,7 +237,7 @@ if [[ -n "$ENVS_STR" ]]; then
   fi
 
   POD="${PODS[0]}"
-  [[ "$JSON_ONLY" -ne 1 ]] && log_info "write-db-env-to-vault" "reading env vars from pod=${POD}"
+  [[ "$JSON_ONLY" -ne 1 ]] && log_info "export-db-env-to-vault" "reading env vars from pod=${POD}"
 
   # Fetch each requested env var via kubectl exec printenv. Branch on the
   # command's exit status, not on whether the captured value is non-empty — a
@@ -269,7 +269,7 @@ if [[ -n "$ENVS_STR" ]]; then
 fi
 
 if [[ -n "$SECRET_KEYS_STR" ]]; then
-  [[ "$JSON_ONLY" -ne 1 ]] && log_info "write-db-env-to-vault" "reading keys from secret=${SECRET_NAME}"
+  [[ "$JSON_ONLY" -ne 1 ]] && log_info "export-db-env-to-vault" "reading keys from secret=${SECRET_NAME}"
 
   # Each entry is KEY or KEY=vault_key; Secret data keys use a wider charset
   # than shell identifiers (dots/hyphens are common, e.g. "root-password"),

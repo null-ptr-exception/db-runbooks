@@ -316,6 +316,53 @@ result_field() { jq -r "$1" "${RESULT}"; }
 }
 
 # ---------------------------------------------------------------------------
+# root_secret_name / root_secret_key — migration-relayed credential override
+# ---------------------------------------------------------------------------
+
+@test "migration/restore defaults root_secret_name/root_secret_key to mariadb/password" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.credentialsRef.secretName')" = "mariadb" ]
+  [ "$(result_field '.data.credentialsRef.secretKey')" = "password" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.rootPasswordSecretKeyRef.name')" = "mariadb" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.rootPasswordSecretKeyRef.key')" = "password" ]
+}
+
+@test "migration/restore an explicit root_secret_name/root_secret_key overrides the default" {
+  run_migration_restore DRY_RUN=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi \
+    RESTORE_TARGET=mariadb-migrated \
+    ROOT_SECRET_NAME=migration-job-1-source-creds ROOT_SECRET_KEY=root_password
+  [ "$status" -eq 0 ]
+  [ "$(result_field '.data.credentialsRef.secretName')" = "migration-job-1-source-creds" ]
+  [ "$(result_field '.data.credentialsRef.secretKey')" = "root_password" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.rootPasswordSecretKeyRef.name')" = "migration-job-1-source-creds" ]
+  [ "$(result_field '.data.manifest | fromjson | .spec.rootPasswordSecretKeyRef.key')" = "root_password" ]
+}
+
+@test "migration/restore root-secret pre-check queries the overridden root_secret_name, not the default" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 \
+    ROOT_SECRET_NAME=migration-job-1-source-creds
+  [ "$status" -eq 0 ]
+  [ -f "${KUBECTL_LOG}" ]
+  grep -q "get secret migration-job-1-source-creds" "${KUBECTL_LOG}"
+  ! grep -q "get secret mariadb$" "${KUBECTL_LOG}"
+}
+
+@test "migration/restore fails fast when the overridden root_secret_name does not exist" {
+  run_migration_restore DRY_RUN=false CONFIRM=true \
+    RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi RESTORE_TARGET=mariadb-migrated \
+    MOCK_BACKUP_EXISTS=1 MOCK_TARGET_EXISTS=0 \
+    ROOT_SECRET_NAME=migration-job-1-source-creds MOCK_ROOT_SECRET_MISSING=1
+  [ "$status" -ne 0 ]
+  [ "$(result_field '.status')" = "error" ]
+  [[ "$(result_field '.message')" == *"migration-job-1-source-creds"*"not found"* ]]
+  [ ! -f "${CAPTURE}" ]
+}
+
+# ---------------------------------------------------------------------------
 # minio_secret_key security — must never appear in result JSON
 # ---------------------------------------------------------------------------
 

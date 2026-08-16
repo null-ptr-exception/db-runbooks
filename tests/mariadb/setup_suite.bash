@@ -34,7 +34,10 @@ ensure_minio_bucket() {
   local bucket="$2"
   local pod="minio-mc-${bucket}"
 
-  kubectl --context "$ctx" -n minio delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # No --wait=false: the immediately-following `run` recreates a pod with
+  # this exact name, and Kubernetes won't accept that until the old one has
+  # actually finished terminating — a fire-and-forget delete can race it.
+  kubectl --context "$ctx" -n minio delete pod "$pod" --ignore-not-found >/dev/null 2>&1 || true
   kubectl --context "$ctx" -n minio run "$pod" \
     --image=minio/mc \
     --restart=Never \
@@ -48,7 +51,7 @@ ensure_minio_bucket() {
 # ensure_vault_approle <context>
 #
 # Provisions a dev-mode Vault (see tests/chart/templates/vault.yaml) with an
-# AppRole that migration/write-db-env-to-vault and migration/read-db-env-from-vault
+# AppRole that migration/export-db-env-to-vault and migration/import-db-env-from-vault
 # use: enables the approle auth method, writes a policy scoped to
 # secret/data/migration/*, creates a role bound to it, and mints a secret_id.
 # Runs from a throwaway pod in the vault namespace (in-cluster DNS, no need
@@ -62,7 +65,10 @@ ensure_vault_approle() {
   local pod="vault-provision"
   local root_token="vault-dev-root-token" # must match tests/chart/values.yaml vault.devRootToken
 
-  kubectl --context "$ctx" -n "$ns" delete pod "$pod" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  # No --wait=false: the immediately-following `run` recreates a pod with
+  # this exact name, and Kubernetes won't accept that until the old one has
+  # actually finished terminating — a fire-and-forget delete can race it.
+  kubectl --context "$ctx" -n "$ns" delete pod "$pod" --ignore-not-found >/dev/null 2>&1 || true
 
   local out
   out=$(kubectl --context "$ctx" -n "$ns" run "$pod" \

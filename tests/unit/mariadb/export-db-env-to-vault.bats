@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# Contract tests for mariadb/migration/write-db-env-to-vault.sh.
+# Contract tests for mariadb/migration/export-db-env-to-vault.sh.
 #
 # Locked-down behaviours:
 #   - fetched values are written to Vault (KV-v2, AppRole auth) and NEVER
@@ -17,7 +17,7 @@ setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/write-db-env-to-vault.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/export-db-env-to-vault.sh"
   export _LOG_CURRENT_LEVEL=3
   unset MARIADB_NAME MARIADB_STS_NAME || true
   mkdir -p "${TEST_TMPDIR}/bin"
@@ -87,11 +87,17 @@ JSON
 
   if [[ "$resource" == "secret" ]]; then
     case "$output" in
-      *'.data.'*)
-        key="${output##*data.}"
-        key="${key%\}}"
-        mock_var="MOCK_SECRET_KEY_${key}"
-        [[ -n "${!mock_var+x}" ]] && printf '%s' "${!mock_var}"
+      *'-o json'*)
+        # k8s_secret_value reads the full Secret via -o json then does its
+        # own jq map-key lookup — the mock just returns the whole data map.
+        # MOCK_SECRET_KEY_<key> values here are already base64 (see the
+        # test bodies below), unlike other mocks that encode on the fly.
+        json='{}'
+        for var in $(compgen -v MOCK_SECRET_KEY_ 2>/dev/null || true); do
+          key="${var#MOCK_SECRET_KEY_}"
+          json=$(printf '%s' "$json" | jq --arg k "$key" --arg v "${!var}" '. + {($k): $v}')
+        done
+        printf '{"data":%s}' "$json"
         exit 0
         ;;
     esac

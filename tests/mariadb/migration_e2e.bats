@@ -1,9 +1,17 @@
 #!/usr/bin/env bats
 #
 # End-to-end coverage for the full cross-cluster migration chain:
-#   migration/preflight -> migration/sourcedb-backup -> migration/write-db-env-to-vault
-#   (source, cluster-a) -> migration/restore -> migration/read-db-env-from-vault
-#   -> migration/setup-replication (target, cluster-b)
+#   migration/preflight -> migration/sourcedb-backup -> migration/export-db-env-to-vault
+#   (source, cluster-a) -> migration/import-db-env-from-vault -> migration/check-connection
+#   -> migration/restore -> migration/setup-replication (target, cluster-b)
+#
+# import-db-env-from-vault, check-connection, and restore run in this order
+# (not backup-then-restore-then-vault) per docs/mariadb/migration.md's chain:
+# the relayed secret needs to exist before restore so restore can point
+# root_secret_name/root_secret_key at it (the operator's Ready-probe
+# authenticates the physically-restored DB using that Secret), and
+# check-connection gates the restore rather than being an afterthought right
+# before setup-replication.
 #
 # Unlike migration_restore.bats / migration_sourcedb_backup.bats (which exercise
 # backup+restore within a single cluster), this file proves the two genuinely
@@ -106,7 +114,7 @@ _result_data() {
     '(.result.data as $d | (($d | try fromjson catch null) // (if ($d | type) == "object" then $d else null end)))'
 }
 
-@test "full cross-cluster migration chain: preflight -> backup -> vault relay -> restore -> read-vault -> setup-replication(dry-run)" {
+@test "full cross-cluster migration chain: preflight -> backup -> vault relay -> import-vault -> check-connection -> restore -> setup-replication(dry-run)" {
   if [[ "${DB_MODE:-single}" != "dual" ]]; then
     skip "DB_MODE is not dual"
   fi
@@ -120,6 +128,7 @@ _result_data() {
   local minio_secret_key="minioadmin-changeme-prod"
   local vault_path="migration/e2e-${BATS_TEST_NUMBER}-$$/source"
   local secret_name="migration-e2e-source-creds"
+  local source_host="mariadb.mariadb-e2e-src.svc.cluster.local"
 
   # --- Step 1: preflight the source (cluster-a) ---------------------------
   http_post "${MARIADB_AQSH_URL}/tasks/migration%2Fpreflight" \
@@ -145,7 +154,7 @@ _result_data() {
   [[ -n "$backup_file" && "$backup_file" != "null/null" ]]
 
   # --- Step 3: relay the source root password through Vault (cluster-a) --
-  http_post "${MARIADB_AQSH_URL}/tasks/migration%2Fwrite-db-env-to-vault" \
+  http_post "${MARIADB_AQSH_URL}/tasks/migration%2Fexport-db-env-to-vault" \
     "$(jq -nc --arg ns "$SRC_NS" --arg vp "$vault_path" '{
       namespace: $ns, mdb: "mariadb",
       envs: "MARIADB_ROOT_PASSWORD=root_password",
@@ -161,13 +170,64 @@ _result_data() {
   run echo "$TASK_RESPONSE"
   refute_output --partial "mariadb-test-pass"
 
-  # --- Step 4: restore into the target namespace (cluster-b) --------------
+  # --- Step 4: pull the relayed password out of Vault, into a target-side
+  #     Secret (cluster-b) — before restore, per docs/mariadb/migration.md,
+  #     so restore can point root_secret_name/root_secret_key at it. Renamed
+  #     to the Secret key "password" here so the same secret+key directly
+  #     serves check-connection, restore, and setup-replication below. ------
+  http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fimport-db-env-from-vault" \
+    "$(jq -nc --arg ns "$DST_NS" --arg vp "$vault_path" --arg sn "$secret_name" '{
+      namespace: $ns, vault_path: $vp, secret_name: $sn,
+      keys: "root_password=password"
+    }')"
+  assert_equal "$HTTP_CODE" "202"
+  wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')"
+
+  local read_data
+  read_data="$(_result_data)"
+  echo "import-db-env-from-vault result: ${read_data}" >&2
+  assert_equal "$(echo "$read_data" | jq -r '.secret.name // empty')" "$secret_name"
+  # The relayed value must never appear in the task response here either.
+  run echo "$TASK_RESPONSE"
+  refute_output --partial "mariadb-test-pass"
+
+  # The Secret materialized on cluster-b must carry the SAME password the
+  # source pod actually has (deploy_throwaway_mariadb's fixed root password) —
+  # proving the write (cluster-a) -> read (cluster-b) round trip through Vault
+  # delivered the correct value, not just A value.
+  local relayed_password
+  relayed_password=$(kubectl --context "$CTX_B" -n "$DST_NS" \
+    get secret "$secret_name" -o jsonpath='{.data.password}' | base64 -d)
+  assert_equal "$relayed_password" "mariadb-test-pass"
+
+  # --- Step 5: confirm the target (the placeholder instance
+  #     deploy_throwaway_mariadb set up in DST_NS) can reach and
+  #     authenticate to the source, using the relayed secret — gates the
+  #     restore below, same as docs/mariadb/migration.md step 5. -----------
+  http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fcheck-connection" \
+    "$(jq -nc --arg ns "$DST_NS" --arg ip "$source_host" --arg sn "$secret_name" '{
+      namespace: $ns, ip: $ip,
+      repl_password_secret: $sn, repl_password_key: "password"
+    }')"
+  assert_equal "$HTTP_CODE" "202"
+  wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')"
+
+  local check_data
+  check_data="$(_result_data)"
+  echo "check-connection result: ${check_data}" >&2
+  assert_equal "$(echo "$check_data" | jq -r '.status // empty')" "PASS"
+
+  # --- Step 6: restore into the target namespace (cluster-b), pointing
+  #     rootPasswordSecretKeyRef at the relayed secret so the restored CR's
+  #     root-password Secret matches the physically-restored data. ---------
   http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Frestore" \
     "$(jq -nc \
       --arg ns "$DST_NS" --arg bf "$backup_file" --arg ep "$minio_endpoint" \
       --arg ak "$minio_access_key" --arg sk "$minio_secret_key" \
+      --arg sn "$secret_name" \
       '{namespace: $ns, backup_file: $bf, minio_endpoint: $ep,
         minio_access_key: $ak, minio_secret_key: $sk, minio_bucket: "db-backups",
+        root_secret_name: $sn, root_secret_key: "password",
         dry_run: "false", confirm: "true", wait_timeout: "10m"}')"
   assert_equal "$HTTP_CODE" "202"
   wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')" 960
@@ -181,32 +241,7 @@ _result_data() {
   [[ -n "$restore_target" && "$restore_target" != "null" ]]
   export RESTORE_TARGET="$restore_target"
 
-  # --- Step 5: pull the relayed password back out of Vault (cluster-b) ----
-  http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fread-db-env-from-vault" \
-    "$(jq -nc --arg ns "$DST_NS" --arg vp "$vault_path" --arg sn "$secret_name" '{
-      namespace: $ns, vault_path: $vp, secret_name: $sn
-    }')"
-  assert_equal "$HTTP_CODE" "202"
-  wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')"
-
-  local read_data
-  read_data="$(_result_data)"
-  echo "read-db-env-from-vault result: ${read_data}" >&2
-  assert_equal "$(echo "$read_data" | jq -r '.secret.name // empty')" "$secret_name"
-  # The relayed value must never appear in the task response here either.
-  run echo "$TASK_RESPONSE"
-  refute_output --partial "mariadb-test-pass"
-
-  # The Secret materialized on cluster-b must carry the SAME password the
-  # source pod actually has (deploy_throwaway_mariadb's fixed root password) —
-  # proving the write (cluster-a) -> read (cluster-b) round trip through Vault
-  # delivered the correct value, not just A value.
-  local relayed_password
-  relayed_password=$(kubectl --context "$CTX_B" -n "$DST_NS" \
-    get secret "$secret_name" -o jsonpath='{.data.root_password}' | base64 -d)
-  assert_equal "$relayed_password" "mariadb-test-pass"
-
-  # --- Step 6: plan replication against the source, using the relayed
+  # --- Step 7: plan replication against the source, using the relayed
   #     secret and a non-root repl_user (dry-run only — see file header) ----
   http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fsetup-replication" \
     "$(jq -nc --arg ns "$DST_NS" --arg mdb "$restore_target" --arg sn "$secret_name" '{
@@ -214,7 +249,7 @@ _result_data() {
       host: "mariadb.mariadb-e2e-src.svc.cluster.local",
       repl_user: "repl",
       repl_password_secret: $sn,
-      repl_password_key: "root_password",
+      repl_password_key: "password",
       dry_run: "true"
     }')"
   assert_equal "$HTTP_CODE" "202"

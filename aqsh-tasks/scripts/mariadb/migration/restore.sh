@@ -6,12 +6,13 @@ set -Eeuo pipefail
 # Restore a MariaDB instance from a specific physical backup stored in a
 # caller-specified external MinIO endpoint.
 #
-# Unlike restore.sh — which resolves S3 credentials and location purely from
-# platform deploy-time config — this task's MinIO parameters are caller
-# overridable (a migration source may point at some OTHER MinIO entirely),
-# falling back to this deployment's MINIO_*_DEFAULT internal config when
-# omitted, same as migration/preflight. The backup_file input is the S3
-# prefix path to the exact backup directory (e.g.
+# Unlike the platform's own `restore` task (mariadb/restore.sh) — which
+# resolves S3 credentials and location purely from platform deploy-time
+# config — this task's MinIO parameters are caller overridable (a migration
+# source may point at some OTHER MinIO entirely), falling back to this
+# deployment's MINIO_*_DEFAULT internal config when omitted, same as
+# migration/preflight. The backup_file input is the S3 prefix path to the
+# exact backup directory (e.g.
 # mariadb/source-ns/mariadb-migration-20260712143022), used directly as
 # bootstrapFrom.s3.prefix so the operator restores that one backup rather
 # than the latest under a broader prefix.
@@ -32,10 +33,18 @@ set -Eeuo pipefail
 #   exist when it reads it, and this script has no way to know that has
 #   happened other than waiting for the restore to reach Ready.
 #
+# root_secret_name/root_secret_key (optional, default "mariadb"/"password",
+# matching the platform's own convention) let a migration caller point the
+# restored CR's rootPasswordSecretKeyRef at the Secret
+# migration/import-db-env-from-vault relayed the source's real root password
+# into — a physical restore carries over the source's actual DB password, so
+# the operator's own Ready-probe (which authenticates using this Secret)
+# needs it to match, not whatever a fresh/default secret happens to hold.
+#
 # image and storage_size are auto-detected from any existing MariaDB instance
 # in the target namespace. For a fresh (migration-destination) namespace they
 # must be provided as task inputs; the script fails clearly if neither source
-# is available, consistent with restore.sh.
+# is available, consistent with the platform's own restore task.
 # =============================================================================
 
 LIB_DIR="${LIB_DIR:-/tasks/lib}"
@@ -95,9 +104,17 @@ STORAGE_SIZE="${STORAGE_SIZE:-}"
 # Target instance name — auto-generated below when empty.
 TARGET="${RESTORE_TARGET:-}"
 
-# Platform internals (env-overridable for advanced operators, not task inputs).
-ROOT_SECRET_NAME="${RESTORE_ROOT_SECRET_NAME:-mariadb}"
-ROOT_SECRET_KEY="${RESTORE_ROOT_SECRET_KEY:-password}"
+# Root credential Secret the restored CR's rootPasswordSecretKeyRef points
+# at. Resolution: task input -> deploy-time internal config (RESTORE_ROOT_
+# SECRET_*) -> hardcoded fallback. Defaults preserve today's behavior
+# (platform-managed "mariadb"/"password"); a migration caller sets these
+# explicitly to point at the Secret migration/import-db-env-from-vault
+# relayed the source's actual root password into — since a physical restore
+# carries over the source's real DB password, the operator's own Ready-probe
+# (which authenticates using this Secret) needs it to match, not whatever a
+# fresh/default secret in the destination namespace happens to hold.
+ROOT_SECRET_NAME="${ROOT_SECRET_NAME:-${RESTORE_ROOT_SECRET_NAME:-mariadb}}"
+ROOT_SECRET_KEY="${ROOT_SECRET_KEY:-${RESTORE_ROOT_SECRET_KEY:-password}}"
 BACKUP_REGION="${BACKUP_REGION:-us-east-1}"
 REPLICAS="1"    # restore is standalone by design
 SOURCE_NAME=""

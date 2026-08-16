@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# Contract tests for mariadb/migration/read-db-env-from-vault.sh.
+# Contract tests for mariadb/migration/import-db-env-from-vault.sh.
 #
 # Locked-down behaviours:
 #   - values read from Vault (KV-v2, AppRole auth) are materialized into a
@@ -18,7 +18,7 @@ setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
-  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/read-db-env-from-vault.sh"
+  export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/migration/import-db-env-from-vault.sh"
   export _LOG_CURRENT_LEVEL=3
   mkdir -p "${TEST_TMPDIR}/bin"
 
@@ -170,6 +170,20 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -c '.secret.keysWritten')" = '["root_password"]' ]
   [ "$(printf '%s' "$output" | jq -c '.secret.keysMissing')" = '["does_not_exist"]' ]
+}
+
+@test "an existing key with an empty string value is written, not reported missing" {
+  export MOCK_VAULT_KV_RESPONSE='{"data":{"data":{"root_password":""}}}'
+
+  run "${SCRIPT}" --namespace db-1 --vault-path migration/job-1/source \
+    --secret-name migration-job-1-source-creds \
+    --keys root_password --json
+
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -c '.secret.keysWritten')" = '["root_password"]' ]
+  [ "$(printf '%s' "$output" | jq -c '.secret.keysMissing')" = '[]' ]
+  [ -f "${SECRET_APPLY_CAPTURE}" ]
+  [ "$(jq -r '.data.root_password' "${SECRET_APPLY_CAPTURE}" | base64 -d)" = "" ]
 }
 
 @test "reports NO_KEYS_FOUND and writes no secret when all requested keys are missing" {

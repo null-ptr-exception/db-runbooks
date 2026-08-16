@@ -11,7 +11,7 @@ set -euo pipefail
 # reachability within one platform). For a cross-cluster migration, source
 # and target legitimately have DIFFERENT root passwords, so --repl-password-secret
 # (mirroring migration/setup-replication's flag of the same name) lets the
-# caller point at the Secret migration/read-db-env-from-vault relayed the
+# caller point at the Secret migration/import-db-env-from-vault relayed the
 # source's password into, and authenticate to the source with ITS password
 # instead of the target pod's own.
 #
@@ -58,7 +58,7 @@ Password options:
                                    correct when the target shares that
                                    password. For a cross-cluster check with a
                                    differently-credentialed source, point this
-                                   at the Secret migration/read-db-env-from-vault
+                                   at the Secret migration/import-db-env-from-vault
                                    relayed the source's password into.
   --repl-password-key <key>       Key in the secret. Default: password.
 

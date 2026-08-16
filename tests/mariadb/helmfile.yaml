@@ -125,8 +125,8 @@ releases:
               backendHost: minio.minio.svc.cluster.local
               backendPort: 9000
 
-  # cluster-b: dev-mode Vault for migration credential relay (write-db-env-to-vault
-  # / read-db-env-from-vault). setup_suite.bash provisions an AppRole against it
+  # cluster-b: dev-mode Vault for migration credential relay (export-db-env-to-vault
+  # / import-db-env-from-vault). setup_suite.bash provisions an AppRole against it
   # after this first apply, then injects VAULT_* into both aqsh-mariadb releases.
   - name: vault
     chart: ../chart

@@ -42,7 +42,11 @@ if [[ "$cmd" == "get" ]]; then
       echo "Error: secrets \"${name}\" not found" >&2
       exit 1
     fi
-    printf '%s' "${MOCK_SECRET_B64:-cmVwbC1zZWNyZXQtcGFzcw==}"
+    # k8s_secret_value reads the full Secret via -o json then does its own
+    # jq map-key lookup — every test here uses the default "password" key
+    # (no test overrides --repl-password-key), so wrap the single mock
+    # value under that one key.
+    printf '{"data":{"password":"%s"}}' "${MOCK_SECRET_B64:-cmVwbC1zZWNyZXQtcGFzcw==}"
     exit 0
   fi
 
@@ -514,7 +518,7 @@ if [[ "\$cmd" == "get" ]]; then
   resource="\${args[1]:-}"
   output="\${args[*]}"
   if [[ "\$resource" == "secret" ]]; then
-    printf 'cmVwbC1zZWNyZXQtcGFzcw=='; exit 0
+    printf '{"data":{"password":"cmVwbC1zZWNyZXQtcGFzcw=="}}'; exit 0
   fi
   if [[ "\$output" == *'items[*]'* ]]; then
     [[ "\$resource" == "mariadb" ]] && printf 'mariadb\n'

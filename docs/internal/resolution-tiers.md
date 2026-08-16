@@ -5,9 +5,9 @@ Reference for the resolution machinery summarised in `CLAUDE.md` →
 belong to). Read this when you need to know **how a specific tier actually
 works**, or **which tier combination a given task family uses**.
 
-For the decision procedure when authoring or changing a task, use the
-`task-authoring` skill in `.claude/skills/` instead — it is the trigger-point
-version and links back here.
+For the decision procedure when authoring or changing a task, read
+[`task-authoring.md`](../agent/task-authoring.md) instead — it is the
+trigger-point version and links back here.
 
 ---
 

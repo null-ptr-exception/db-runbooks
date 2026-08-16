@@ -203,9 +203,14 @@ scripts/
 └── preflight.sh              # Installs/checks all required tooling (kind, mise-managed kubectl/helm/helmfile/ctlptl, bats, helm-diff)
 
 docs/
+├── agent/                    # Vendor-neutral guidance for coding agents
+├── internal/                 # Quality gates, resolution tiers
 ├── lib/                      # aqsh-tasks/lib/*.sh API reference
 ├── mariadb/                  # Per-task runbooks
 └── mongodb/                  # Per-task runbooks
+
+AGENTS.md                     # Entry point for coding agents (points at the above)
+CLAUDE.md                     # Project guide: contexts, architecture, rules
 ```
 
 ### Writing a New Task Script
@@ -239,9 +244,11 @@ jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
          env: DB_NAMESPACE
          required: true
    ```
-3. Keep the task's input surface small — see CLAUDE.md "Configuration Layers"
-   for when a value belongs in `input:` vs. `aqsh-tasks/config/*.env` vs. a
-   hardcoded library fallback.
+3. Keep the task's input surface small — a task input is a public API promise.
+   See [docs/agent/task-authoring.md](docs/agent/task-authoring.md) for the
+   decision procedure: when a value belongs in `input:` vs.
+   `aqsh-tasks/config/*.env` vs. live auto-detection vs. a hardcoded library
+   fallback, and CLAUDE.md "Configuration Layers" for the short rule.
 4. See [docs/lib/](docs/lib/) for the full `aqsh-tasks/lib/*.sh` API reference.
 
 ### Iterating

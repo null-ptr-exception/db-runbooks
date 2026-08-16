@@ -141,8 +141,12 @@ per-call operational decisions. MariaDB object storage has its own 4-tier order
 and likewise exposes none of it
 ([object-storage-resolution](docs/mariadb/object-storage-resolution.md)).
 
-→ **Adding or changing a task?** Use the `task-authoring` skill
-(`.claude/skills/`) — decision procedure, worked examples, and a checklist.
+→ **Adding or changing a task?** Read
+[`docs/agent/task-authoring.md`](docs/agent/task-authoring.md) — decision
+procedure, worked examples, and a checklist. It is vendor-neutral;
+`.claude/skills/task-authoring/` is a thin adapter that points at it, so Claude
+loads it on demand and other agents reach the same copy via
+[`AGENTS.md`](AGENTS.md).
 → **Need the mechanics or the per-family registry?**
 [`docs/internal/resolution-tiers.md`](docs/internal/resolution-tiers.md).
 

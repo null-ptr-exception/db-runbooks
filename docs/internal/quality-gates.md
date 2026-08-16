@@ -52,7 +52,8 @@ correctness signal in the repo. It includes the task input-surface snapshots
 - `mariadb_namespace_patterns.bats` covers the `pattern:` constraints
 
 ⛔ A red snapshot is a question, not a chore. Re-justify the field against the
-layer decision (`task-authoring` skill) **before** updating the snapshot.
+layer decision ([`task-authoring.md`](../agent/task-authoring.md)) **before**
+updating the snapshot.
 
 It also carries the registry drift check —
 `resolution_registry_drift.bats` asserts the namespaced task families in
@@ -62,6 +63,12 @@ with no row, and a row for a family that no longer exists). Exact set equality
 with no exemption list, because an allowlist is itself a registry and would
 drift the same way. It runs in `lint`, not a shard, so it cannot fall through
 the `mongodb` shard-list gap below.
+
+And `task_authoring_triggers.bats` pins the trigger metadata that the agent
+adapters must each carry in their own format — the glob list in
+[`task-authoring.md`](../agent/task-authoring.md) and `AGENTS.md`, and the
+`description:` in the Claude skill. The guidance body itself is a single file
+that adapters point at, so only the triggers can drift; this catches that.
 
 ## ⚙️ CI-only — expensive, don't discover failures here
 
@@ -108,6 +115,6 @@ pattern.
 
 | Convention | Where |
 |------------|-------|
-| Which layer a value belongs to | `CLAUDE.md` → *Configuration Layers*; decision procedure in the `task-authoring` skill |
+| Which layer a value belongs to | `CLAUDE.md` → *Configuration Layers*; decision procedure in [`task-authoring.md`](../agent/task-authoring.md) |
 | How a tier resolves, per family | [`resolution-tiers.md`](resolution-tiers.md) |
 | `--context` on every `kubectl` | `CLAUDE.md` → *kubectl Contexts* |

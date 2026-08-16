@@ -28,7 +28,7 @@ bats --recursive tests/unit
 docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL4006 - < Dockerfile
 ```
 
-⚠️ Everything else needs real Kind clusters: **30 min** (mariadb, infra, aqsh),
+⚠️ The integration suites need real Kind clusters: **30 min** (mariadb, infra, aqsh),
 **60 min** (mariadb-legacy), **75 min** (mongodb). One wrong push costs a full
 cycle. And the `mongodb` job is sharded by filename in `ci.yaml` with no
 auto-discovery — a new `tests/mongodb/*.bats` that isn't added to a shard list

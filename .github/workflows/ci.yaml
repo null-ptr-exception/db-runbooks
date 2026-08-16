@@ -6,6 +6,30 @@ name: CI
   pull_request:
   workflow_dispatch:
 
+# Every push to a PR branch starts a fresh run of all ten jobs, and without a
+# concurrency group the superseded runs keep their place in the queue. On this
+# repo's self-hosted pool — which the `mongodb` job below assumes runs one job
+# at a time per runner — a handful of quick follow-up pushes puts dozens of
+# obsolete jobs ahead of the one that matters. Observed: five pushes to one PR
+# left its newest run queued behind three runs testing commits that were no
+# longer at the branch head, and nothing had started 55 minutes later.
+#
+# The event distinction lives in `group`, not in `cancel-in-progress`:
+#   - pull_request → `github.ref` is `refs/pull/<n>/merge`, so each PR gets its
+#     own group. A new push supersedes that PR's own run and no other.
+#   - push to main / workflow_dispatch → `github.run_id` is unique per run, so
+#     each lands in a group of one and is never cancelled. A push to main is not
+#     superseded work: it gates `publish-image`, and aborting it midway could
+#     interrupt a GHCR push.
+#
+# Written this way so `cancel-in-progress` stays a plain literal. It is the
+# value whose behaviour matters most here, and a conditional there would be the
+# one construct in this block that could not be checked against an existing,
+# working example before merging.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

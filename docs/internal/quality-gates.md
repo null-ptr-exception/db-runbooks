@@ -54,6 +54,15 @@ correctness signal in the repo. It includes the task input-surface snapshots
 ⛔ A red snapshot is a question, not a chore. Re-justify the field against the
 layer decision (`task-authoring` skill) **before** updating the snapshot.
 
+It also carries the registry drift check —
+`resolution_registry_drift.bats` asserts the namespaced task families in
+`tasks-*.yaml` are exactly the families listed in
+[`resolution-tiers.md`](resolution-tiers.md), in both directions (a new family
+with no row, and a row for a family that no longer exists). Exact set equality
+with no exemption list, because an allowlist is itself a registry and would
+drift the same way. It runs in `lint`, not a shard, so it cannot fall through
+the `mongodb` shard-list gap below.
+
 ## ⚙️ CI-only — expensive, don't discover failures here
 
 These integration suites need real Kind clusters and cannot be meaningfully
@@ -89,7 +98,6 @@ for the next run to silently reuse.
 | `--context` on every `kubectl` | Convention, zero enforcement. Two Kind clusters are live at once; the wrong context is real damage, not a lint nit |
 | Task ↔ script existence | Nothing checks that a `script:` in `tasks-*.yaml` points at a file that exists |
 | Task ↔ docs drift | Nothing checks that a new task got a `docs/<db>/*.md` page or a README table row |
-| Task-family registry | The table in [`resolution-tiers.md`](resolution-tiers.md) is maintained by hand against `tasks-*.yaml` |
 | Stable reason codes | Documented as stable, but no test pins the strings. Renaming one is a silent breaking change for callers |
 
 The first four are the obvious candidates for the first hooks this repo adds:

@@ -59,10 +59,14 @@ there is no per-call escape hatch for these families, by design.
 
 ## Registry — which family uses which combination
 
-> ⚠️ **Nothing checks this table.** It must be updated by hand when a task
-> family is added, and a stale registry is worse than none because it reads as
-> authoritative. Candidate for a `tests/unit/aqsh/` drift check against the
-> actual family list in `tasks-*.yaml`.
+> ✅ **This table is checked.** `tests/unit/aqsh/resolution_registry_drift.bats`
+> asserts the set of namespaced task families in `tasks-mariadb.yaml` +
+> `tasks-mongodb.yaml` is exactly the set named in the first column below. Add a
+> family without a row here, or leave a row for a family that no longer exists,
+> and `bats --recursive tests/unit` goes red in seconds.
+>
+> The check is set equality with **no exemption list** — that is deliberate. An
+> allowlist is itself a registry, and it would drift the same way.
 
 | Task family | Tiers | Family-specific notes | Docs |
 |-------------|-------|-----------------------|------|
@@ -71,13 +75,15 @@ there is no per-call escape hatch for these families, by design.
 | `reconfig/*` | config → auto-detect → fallback | `plan`, `apply`, `force-dr`, `freeze`. Policy knobs `RECONFIG_*` are internal-config only | [reconfig](../mongodb/reconfig.md) |
 | `fcv/*` | config → auto-detect → fallback | `status`, `set` | [fcv](../mongodb/fcv.md) |
 | `pbm/*` | config → auto-detect → fallback | Agent container name, storage location, and S3 credentials are internal-config/auto-detect only. **Never loads MongoDB credentials at all** | [pbm](../mongodb/pbm.md) |
-| `sts/orphan-delete` | config → auto-detect → fallback | `kubectl delete --cascade=orphan`; step 1 of the PVC-enlarge workaround. PVC resize / STS recreate stay manual | [sts-orphan-delete](../mongodb/sts-orphan-delete.md) |
+| `sts/*` | config → auto-detect → fallback | `sts/orphan-delete` only. `kubectl delete --cascade=orphan`; step 1 of the PVC-enlarge workaround. PVC resize / STS recreate stay manual | [sts-orphan-delete](../mongodb/sts-orphan-delete.md) |
 | `oplog/*` | config → auto-detect → fallback | Oplog size is per-node state. `oplog/resize` applies to **every current member** rather than taking one | [oplog](../mongodb/oplog.md) |
 | `ops/*` | config → auto-detect → fallback | `currentOp` is per-node → optional `target_pod`, defaulting to the elected PRIMARY | [ops](../mongodb/ops.md) |
 | `profiler/*` | config → auto-detect → fallback | Profiler level is per-node → same optional `target_pod` | [profiler](../mongodb/profiler.md) |
 | `mql/*` | config → auto-detect → fallback | `mql/read` takes the same optional `target_pod`; `mql/write` always targets the elected PRIMARY. `admin`/`local`/`config` are always refused regardless of internal config | [mql](../mongodb/mql.md) |
 | `secrets/*` | **own contract** | DB-agnostic, served by BOTH gateways from one script. See below | [mongodb](../mongodb/secrets.md) · [mariadb](../mariadb/secrets.md) |
 | `pods/*` | auto-detect (instance name) | Same API shape on both gateways, **different scripts**. See below | [mongodb](../mongodb/pods.md) · [mariadb](../mariadb/pods.md) |
+| `blue-green/*` | **input-forward — the exception** | The only family that exposes its resolution fields (`mdb`, `blue_name`, `green_name`, `green_namespace`) as task inputs. It orchestrates two instances across two AQSH gateways, so the caller genuinely names both sides per call, and it carries `peer_aqsh_url` + `peer_token` — the caller's own bearer token, forwarded so the peer gateway acts *as the caller* | [blue-green](../mariadb/blue-green.md) |
+| `common/*` | **none** | `common/hello` — smoke test, takes `name` and resolves nothing. Listed so the drift check needs no exemption list | — |
 | MariaDB object storage | **own 4-tier order** | Scoped exception to generic live auto-detection | [object-storage-resolution](../mariadb/object-storage-resolution.md) |
 
 ---

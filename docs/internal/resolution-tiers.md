@@ -155,7 +155,7 @@ failing G1 with a manual-setup suggestion, they patch it in live.
   pod — including ones already `Running` — restarts. Only a later, separate wipe
   lowers the partition for the one targeted pod.
 - **Missing ConfigMap is created too** (`kubectl create --dry-run=client -o yaml
-  | apply -f -`, so a concurrent create is a no-op, not a race). A fully fresh
+  | kubectl apply -f -`, so a concurrent create is a no-op, not a race). A fresh
   StatefulSet self-heals end-to-end in one `wipe`/`recover` call.
 
 **RBAC** — two verbs beyond the StatefulSet `patch` that

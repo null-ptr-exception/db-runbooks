@@ -14,3 +14,16 @@ spec:
       hosts:
         - "*.kind-a.test"
         - "*.kind-b.test"
+    # TCP passthrough for the MariaDB nodePort (30091, see
+    # infra/helmfile-infra.yaml) — raw MySQL wire protocol has no SNI/Host
+    # equivalent, so this can only ever route to one destination at a time;
+    # a VirtualService with a tcp: block binds it (see e.g.
+    # tests/mariadb/migration_e2e.bats, which scopes its VirtualService's
+    # lifecycle to the test itself for exactly this reason). Inert without
+    # one — Envoy drops traffic on this port until a VirtualService routes it.
+    - port:
+        number: 3306
+        name: mysql
+        protocol: TCP
+      hosts:
+        - "*"

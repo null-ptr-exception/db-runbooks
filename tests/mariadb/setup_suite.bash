@@ -70,11 +70,16 @@ ensure_vault_approle() {
   # actually finished terminating — a fire-and-forget delete can race it.
   kubectl --context "$ctx" -n "$ns" delete pod "$pod" --ignore-not-found >/dev/null 2>&1 || true
 
-  local out
-  out=$(kubectl --context "$ctx" -n "$ns" run "$pod" \
+  # Deliberately NOT `run --rm -i`: that combination attaches to the pod's
+  # stdout as it starts, and on this stack (kind + a non-dockerd container
+  # runtime) the attach can race the container actually starting, silently
+  # truncating captured output — confirmed by reproducing the exact same
+  # curl sequence manually and seeing every request succeed once output was
+  # instead read back via a separate `kubectl logs` call. Run to completion,
+  # fetch logs after the fact, then clean up explicitly.
+  kubectl --context "$ctx" -n "$ns" run "$pod" \
     --image=curlimages/curl:8.10.1 \
     --restart=Never \
-    --rm -i \
     --pod-running-timeout=180s \
     --env="VAULT_TOKEN=${root_token}" \
     --command -- sh -c '
@@ -86,11 +91,39 @@ ensure_vault_approle() {
       curl -sf -H "X-Vault-Token: $VAULT_TOKEN" "$VADDR/v1/auth/approle/role/migration-relay/role-id"
       echo
       curl -sf -H "X-Vault-Token: $VAULT_TOKEN" -X POST "$VADDR/v1/auth/approle/role/migration-relay/secret-id"
-    ')
+    ' >/dev/null 2>&1 || true
 
+  # Poll for a terminal phase rather than `kubectl wait --for=condition=
+  # Ready=false`: a freshly-created pod is ALSO not-Ready before it's even
+  # started, so that condition would match immediately instead of waiting
+  # for the container to actually finish.
+  local phase elapsed=0
+  while true; do
+    phase=$(kubectl --context "$ctx" -n "$ns" get pod "$pod" -o jsonpath='{.status.phase}' 2>/dev/null)
+    [[ "$phase" == "Succeeded" || "$phase" == "Failed" ]] && break
+    if (( elapsed >= 60 )); then
+      echo "vault-provision pod did not reach a terminal phase within 60s (phase=${phase:-<none>})" >&2
+      break
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+
+  local out
+  out=$(kubectl --context "$ctx" -n "$ns" logs "$pod" 2>/dev/null)
+  kubectl --context "$ctx" -n "$ns" delete pod "$pod" --ignore-not-found >/dev/null 2>&1 || true
+
+  # Blank lines filtered before positional extraction: Vault's own JSON
+  # response bodies apparently end with their own trailing newline, so the
+  # role-id curl's output plus the script's separating `echo` produces TWO
+  # newlines (not one) before the secret-id response — line 2 is blank, the
+  # secret JSON is actually line 3. Confirmed via `set -x` tracing showing
+  # `...role_id...}\n\n{...secret_id...}` in the captured output. Filtering
+  # blanks first makes this robust regardless of whether curl's responses
+  # carry a trailing newline.
   local role_json secret_json
-  role_json=$(printf '%s\n' "$out" | sed -n '1p')
-  secret_json=$(printf '%s\n' "$out" | sed -n '2p')
+  role_json=$(printf '%s\n' "$out" | grep -v '^$' | sed -n '1p')
+  secret_json=$(printf '%s\n' "$out" | grep -v '^$' | sed -n '2p')
 
   VAULT_ROLE_ID=$(printf '%s' "$role_json" | jq -r '.data.role_id // empty')
   VAULT_SECRET_ID=$(printf '%s' "$secret_json" | jq -r '.data.secret_id // empty')
@@ -120,16 +153,28 @@ delete_namespace_and_wait() {
 }
 
 # ---------------------------------------------------------------------------
-# deploy_throwaway_mariadb <namespace> [context]
+# deploy_throwaway_mariadb <namespace> [context] [server_id]
 #
 # Creates a namespace, RBAC RoleBinding (against the aqsh-mariadb-manager
 # ClusterRole installed by the mariadbRbac release), and a non-replicated
 # MariaDB CR. Used by individual .bats files (get-db-env, check_connection,
 # migration_*) for a disposable per-file instance isolated from mariadb-1.
+#
+# server_id is optional (omitted: mariadb-operator's own default, which is
+# the same value — e.g. 1 — for any single-replica instance regardless of
+# namespace/cluster). Callers that deploy TWO throwaway instances expected
+# to interact directly, e.g. migration_e2e.bats's source and destination,
+# need distinct values or migration/check-connection's server_id collision
+# check correctly BLOCKs on the resulting clash. Applied via spec.myCnf (raw
+# my.cnf passthrough — see set-runtime-param.sh's own reference to this
+# field) since mariadb-operator's spec.replication.serverIdStartIndex only
+# takes effect under its own multi-replica replication.enabled=true feature,
+# not for an otherwise-standalone CR like this one.
 # ---------------------------------------------------------------------------
 deploy_throwaway_mariadb() {
   local namespace="$1"
   local ctx="${2:-kind-cluster-a}"
+  local server_id="${3:-}"
 
   kubectl --context "$ctx" create ns "$namespace" --dry-run=client -o yaml \
     | kubectl --context "$ctx" apply -f -
@@ -148,6 +193,14 @@ subjects:
     name: kube-auth-proxy
     namespace: db-ops
 EOF
+
+  local my_cnf_block=""
+  if [[ -n "$server_id" ]]; then
+    my_cnf_block="  myCnf: |
+    [mariadb]
+    server_id=${server_id}
+"
+  fi
 
   kubectl --context "$ctx" apply -f - <<EOF
 apiVersion: v1
@@ -169,7 +222,7 @@ spec:
     key: password
   port: 3306
   image: mariadb:10.6
-  storage:
+${my_cnf_block}  storage:
     size: 1Gi
   resources:
     requests:

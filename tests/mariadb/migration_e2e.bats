@@ -19,12 +19,24 @@
 # deployments: the Vault credential relay (write on cluster-a's aqsh, read back
 # on cluster-b's aqsh) and setup-replication consuming the relayed secret.
 #
-# setup-replication is only exercised with dry_run=true: dry-run renders the
-# CHANGE MASTER plan without connecting anywhere, so it needs no real network
-# path from cluster-b to cluster-a's MariaDB. Nothing in this chart currently
-# wires a working TCP passthrough VirtualService for MariaDB (the 30091
-# nodePort exists at the infra layer but has no routing target), so an actual
-# live replication connection is out of scope here.
+# check-connection and setup-replication both exercise a REAL cross-cluster
+# connection to the source, via a TCP passthrough this file wires up itself:
+# infra/shared/templates/gateway.yaml opens port 3306 on the shared Istio
+# ingressgateway (mapped to nodePort 30091 on both clusters, per
+# infra/helmfile-infra.yaml), and setup_file() below applies a VirtualService
+# routing that port, on cluster-a, to this run's throwaway source instance.
+# Raw MySQL wire protocol has no SNI/Host equivalent, so that port can only
+# ever route to ONE destination at a time — the VirtualService's lifecycle is
+# scoped to this test (created in setup_file, deleted in teardown_file)
+# rather than being permanent shared infra, to keep that constraint from
+# becoming a footgun between runs. The external address is
+# mariadb.kind-a.test:30091 (CoreDNS already resolves *.kind-a.test to
+# cluster-a's node), NOT the internal mariadb.<ns>.svc.cluster.local:3306,
+# which cluster-b can't resolve or route to at all.
+#
+# setup-replication runs for real (dry_run=false), replicating as a
+# dedicated 'repl' account this file provisions directly via kubectl exec
+# (create-account.sh can't grant REPLICATION SLAVE — see setup_file below).
 #
 # Gated behind DB_MODE=dual (needs MARIADB_AQSH_B_URL exported — cluster-b's
 # own aqsh, separate from cluster-a's) and ENABLE_MINIO=true (needs a real
@@ -55,12 +67,63 @@ setup_file() {
   export CTX_A CTX_B NS MARIADB_AQSH_URL SRC_NS DST_NS TEST_POD TOKEN
 
   if [[ "${DB_MODE:-single}" == "dual" && "${ENABLE_MINIO:-false}" == "true" ]]; then
+    # Distinct server_ids (non-colliding mod 10, matching check-connection.sh's
+    # own SERVER_ID_COLLISION_MODULUS) — mariadb-operator otherwise assigns
+    # the same default (e.g. 1) to any single-replica instance regardless of
+    # namespace/cluster, which migration/check-connection correctly BLOCKs on.
     # Source instance on cluster-a: this is what gets backed up and read from.
-    deploy_throwaway_mariadb "$SRC_NS" "$CTX_A" || return 1
+    deploy_throwaway_mariadb "$SRC_NS" "$CTX_A" "101" || return 1
     # Destination namespace on cluster-b, with its own throwaway "mariadb" CR
     # so migration/restore can auto-detect image/storage_size the same way it
     # would for any migration into a namespace that isn't brand new.
-    deploy_throwaway_mariadb "$DST_NS" "$CTX_B" || return 1
+    deploy_throwaway_mariadb "$DST_NS" "$CTX_B" "202" || return 1
+
+    # Test-scoped TCP passthrough: routes the shared gateway's port 3306
+    # (nodePort 30091, see infra/shared/templates/gateway.yaml) to this
+    # run's source instance. Namespace-scoped, so deleting SRC_NS in
+    # teardown_file also removes it; deleted explicitly first below for
+    # faster feedback if namespace teardown is slow.
+    kubectl --context "$CTX_A" -n "$SRC_NS" apply -f - <<EOF
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: migration-e2e-source-mariadb
+  namespace: ${SRC_NS}
+spec:
+  hosts:
+    - "*"
+  gateways:
+    - istio-ingress/shared-gateway
+  tcp:
+    - match:
+        - port: 3306
+      route:
+        - destination:
+            host: mariadb.${SRC_NS}.svc.cluster.local
+            port:
+              number: 3306
+EOF
+
+    # Dedicated replication account on the source. create-account.sh can't
+    # grant this (its allowed-privilege list is schema-scoped DML/DDL plus a
+    # handful of admin ones — REPLICATION SLAVE isn't in it, and replication
+    # needs a global ON *.* grant that task doesn't support anyway), so this
+    # is direct kubectl exec test-fixture setup, same as
+    # deploy_throwaway_mariadb's own raw-kubectl-apply approach.
+    kubectl --context "$CTX_A" -n "$SRC_NS" exec mariadb-0 -- \
+      mariadb -u root -pmariadb-test-pass -e \
+      "CREATE USER IF NOT EXISTS 'repl'@'%' IDENTIFIED BY 'repl-test-pass'; GRANT REPLICATION SLAVE ON *.* TO 'repl'@'%'; FLUSH PRIVILEGES;" \
+      || return 1
+
+    kubectl --context "$CTX_A" -n "$SRC_NS" apply -f - <<EOF
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mariadb-account-repl
+  namespace: ${SRC_NS}
+stringData:
+  password: repl-test-pass
+EOF
   fi
 }
 
@@ -72,6 +135,8 @@ setup() {
 teardown_file() {
   load 'setup_suite'
   if [[ "${DB_MODE:-single}" == "dual" && "${ENABLE_MINIO:-false}" == "true" ]]; then
+    kubectl --context "kind-cluster-a" -n "mariadb-e2e-src" \
+      delete virtualservice migration-e2e-source-mariadb --ignore-not-found >/dev/null 2>&1 || true
     delete_namespace_and_wait "kind-cluster-a" "mariadb-e2e-src" || true
     delete_namespace_and_wait "kind-cluster-b" "mariadb-e2e-dst" || true
   fi
@@ -114,7 +179,7 @@ _result_data() {
     '(.result.data as $d | (($d | try fromjson catch null) // (if ($d | type) == "object" then $d else null end)))'
 }
 
-@test "full cross-cluster migration chain: preflight -> backup -> vault relay -> import-vault -> check-connection -> restore -> setup-replication(dry-run)" {
+@test "full cross-cluster migration chain: preflight -> backup -> vault relay -> import-vault -> check-connection -> restore -> setup-replication" {
   if [[ "${DB_MODE:-single}" != "dual" ]]; then
     skip "DB_MODE is not dual"
   fi
@@ -128,7 +193,11 @@ _result_data() {
   local minio_secret_key="minioadmin-changeme-prod"
   local vault_path="migration/e2e-${BATS_TEST_NUMBER}-$$/source"
   local secret_name="migration-e2e-source-creds"
-  local source_host="mariadb.mariadb-e2e-src.svc.cluster.local"
+  # External, cross-cluster-reachable address (see file header) — NOT the
+  # internal mariadb.<ns>.svc.cluster.local:3306, which cluster-b can't
+  # resolve or route to.
+  local source_host="mariadb.kind-a.test"
+  local source_port="30091"
 
   # --- Step 1: preflight the source (cluster-a) ---------------------------
   http_post "${MARIADB_AQSH_URL}/tasks/migration%2Fpreflight" \
@@ -153,11 +222,14 @@ _result_data() {
   echo "backup_file: ${backup_file}" >&2
   [[ -n "$backup_file" && "$backup_file" != "null/null" ]]
 
-  # --- Step 3: relay the source root password through Vault (cluster-a) --
+  # --- Step 3: relay the source root password AND the repl account's
+  #     password through Vault, in one call (cluster-a) ---------------------
   http_post "${MARIADB_AQSH_URL}/tasks/migration%2Fexport-db-env-to-vault" \
     "$(jq -nc --arg ns "$SRC_NS" --arg vp "$vault_path" '{
       namespace: $ns, mdb: "mariadb",
       envs: "MARIADB_ROOT_PASSWORD=root_password",
+      secret_name: "mariadb-account-repl",
+      secret_keys: "password=repl_password",
       vault_path: $vp
     }')"
   assert_equal "$HTTP_CODE" "202"
@@ -170,15 +242,16 @@ _result_data() {
   run echo "$TASK_RESPONSE"
   refute_output --partial "mariadb-test-pass"
 
-  # --- Step 4: pull the relayed password out of Vault, into a target-side
+  # --- Step 4: pull both relayed passwords out of Vault, into a target-side
   #     Secret (cluster-b) — before restore, per docs/mariadb/migration.md,
-  #     so restore can point root_secret_name/root_secret_key at it. Renamed
-  #     to the Secret key "password" here so the same secret+key directly
-  #     serves check-connection, restore, and setup-replication below. ------
+  #     so restore can point root_secret_name/root_secret_key at it. Root's
+  #     password lands under Secret key "password" (serves check-connection
+  #     and restore); repl's lands under "repl_password" (serves
+  #     setup-replication, step 7). --------------------------------------
   http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fimport-db-env-from-vault" \
     "$(jq -nc --arg ns "$DST_NS" --arg vp "$vault_path" --arg sn "$secret_name" '{
       namespace: $ns, vault_path: $vp, secret_name: $sn,
-      keys: "root_password=password"
+      keys: "root_password=password,repl_password=repl_password"
     }')"
   assert_equal "$HTTP_CODE" "202"
   wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')"
@@ -205,8 +278,8 @@ _result_data() {
   #     authenticate to the source, using the relayed secret — gates the
   #     restore below, same as docs/mariadb/migration.md step 5. -----------
   http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fcheck-connection" \
-    "$(jq -nc --arg ns "$DST_NS" --arg ip "$source_host" --arg sn "$secret_name" '{
-      namespace: $ns, ip: $ip,
+    "$(jq -nc --arg ns "$DST_NS" --arg ip "$source_host" --arg port "$source_port" --arg sn "$secret_name" '{
+      namespace: $ns, ip: $ip, port: $port,
       repl_password_secret: $sn, repl_password_key: "password"
     }')"
   assert_equal "$HTTP_CODE" "202"
@@ -241,25 +314,29 @@ _result_data() {
   [[ -n "$restore_target" && "$restore_target" != "null" ]]
   export RESTORE_TARGET="$restore_target"
 
-  # --- Step 7: plan replication against the source, using the relayed
-  #     secret and a non-root repl_user (dry-run only — see file header) ----
+  # --- Step 7: point the restored target at the source as its replication
+  #     master, for real — using the dedicated repl account (repl_password_
+  #     secret's "repl_password" key, from step 4), not root's. -------------
   http_post "${MARIADB_AQSH_B_URL}/tasks/migration%2Fsetup-replication" \
-    "$(jq -nc --arg ns "$DST_NS" --arg mdb "$restore_target" --arg sn "$secret_name" '{
+    "$(jq -nc --arg ns "$DST_NS" --arg mdb "$restore_target" --arg sn "$secret_name" \
+      --arg host "$source_host" --arg port "$source_port" '{
       namespace: $ns, mdb: $mdb,
-      host: "mariadb.mariadb-e2e-src.svc.cluster.local",
+      host: $host, port: $port,
       repl_user: "repl",
       repl_password_secret: $sn,
-      repl_password_key: "password",
-      dry_run: "true"
+      repl_password_key: "repl_password",
+      dry_run: "false", confirm: "true"
     }')"
   assert_equal "$HTTP_CODE" "202"
   wait_for_task "$MARIADB_AQSH_B_URL" "$(echo "$HTTP_BODY" | jq -r '.id')"
 
   local repl_data
   repl_data="$(_result_data)"
-  echo "setup-replication plan: ${repl_data}" >&2
+  echo "setup-replication result: ${repl_data}" >&2
+  assert_equal "$(echo "$repl_data" | jq -r '.status // empty')" "DONE"
+  assert_equal "$(echo "$repl_data" | jq -r '.reason_code // empty')" "REPLICATION_CONFIGURED"
   assert_equal "$(echo "$repl_data" | jq -r '.replication.user // empty')" "repl"
-  assert_equal "$(echo "$repl_data" | jq -r '.dry_run // empty')" "true"
-  run echo "$repl_data" | jq -r '.sql_plan[]'
-  assert_output --partial "MASTER_USER='repl'"
+  run echo "$repl_data" | jq -r '.slave_status'
+  assert_output --partial "Slave_IO_Running: Yes"
+  assert_output --partial "Slave_SQL_Running: Yes"
 }

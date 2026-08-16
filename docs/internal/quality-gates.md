@@ -25,7 +25,7 @@ come from. There is no `make lint` target yet; run them directly.
 
 | Check | Local command | Cost |
 |-------|---------------|------|
-| ShellCheck | `find . -type f -name '*.sh' -print0 \| xargs -0 shellcheck --severity=warning -x` | seconds |
+| ShellCheck | `find . -type f -name '*.sh' -print0 \| xargs -0 --no-run-if-empty shellcheck --severity=warning -x` | seconds |
 | Bats unit tests | `bats --recursive tests/unit` | ~seconds |
 | Hadolint | `docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL4006 - < Dockerfile` | seconds |
 | Image build | `docker build -t db-runbooks:ci .` | ~1 min |
@@ -56,12 +56,12 @@ layer decision (`task-authoring` skill) **before** updating the snapshot.
 
 ## ⚙️ CI-only — expensive, don't discover failures here
 
-These need real Kind clusters and cannot be meaningfully shortened. The
-timeouts are the worst-case cost of one wrong push.
+These integration suites need real Kind clusters and cannot be meaningfully
+shortened. The timeouts are the worst-case cost of one wrong push. (`tests/unit`
+is not here — it is mocked and belongs to the cheap table above.)
 
 | Suite | Local command | CI timeout |
 |-------|---------------|-----------:|
-| `tests/unit` | `bats --recursive tests/unit` | (in `lint`, 10 min) |
 | `tests/mariadb` | `bats tests/mariadb/` | 30 min |
 | `tests/mariadb-legacy` | `bats tests/mariadb-legacy/` | 60 min |
 | `tests/mongodb` (4 shards) | `bats tests/mongodb/` | 75 min |

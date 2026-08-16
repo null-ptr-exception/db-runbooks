@@ -23,7 +23,7 @@ out 30–75 minutes later — or never.
 failures:
 
 ```bash
-find . -type f -name '*.sh' -print0 | xargs -0 shellcheck --severity=warning -x
+find . -type f -name '*.sh' -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
 bats --recursive tests/unit
 docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL4006 - < Dockerfile
 ```
@@ -100,10 +100,16 @@ belongs to.
 for X, but one environment wants the *same* value of X on every call, X is
 internal config, not a task input.
 
-**Identities are never task inputs, at any tier.** A credential, a Vault
-AppRole, a signing key, an endpoint that decides *who we act as* — exposing one
-lets a caller redirect the action to an identity the deployment was never
-provisioned with. That is a confused-deputy hole, not flexibility.
+**The deployment's own identity is never a task input, at any tier.** A Vault
+AppRole, a signing key, the credentials this deployment was provisioned with —
+exposing one lets a caller borrow privilege the deputy holds and the caller
+does not. That is a confused-deputy hole, not flexibility.
+
+A credential the *caller* already holds, for a system outside this deployment
+(a migration source's object storage), is the other case: it grants no
+privilege the caller lacks, so it may be an input. It then owes four things —
+never reaching the task result, the logs, or process argv, and still falling
+back to deploy-time config so the ordinary call carries no secret at all.
 
 **`*_DEFAULT` naming is load-bearing.** The internal-config variable must carry
 the `_DEFAULT` suffix and must not reuse the task input's env var name —

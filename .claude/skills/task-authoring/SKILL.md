@@ -17,9 +17,12 @@ the decision procedure plus the mistakes that are easy to make.
 
 Ask, in order:
 
-1. **Is it an identity or a capability grant** (a credential, a Vault role, a
-   signing key, an endpoint that determines *who we act as*)?
+1. **Is it *this deployment's own* identity or capability grant** (a Vault role,
+   a signing key, the credentials this deployment was provisioned with, an
+   endpoint that determines *who we act as*)?
    → **Never a task input**, at any tier. Deploy-time internal config only.
+   A credential the **caller** already holds, for a system outside this
+   deployment, is not this case — see the note under the worked example.
 2. **Would two different deployments reasonably want different values, while
    one deployment wants the same value on every call?**
    → **Internal config** (`aqsh-tasks/config/*.env` → ConfigMap →
@@ -43,7 +46,7 @@ working.
 
 | Value | Layer | Why |
 |-------|-------|-----|
-| `minio_endpoint` / `minio_access_key` / `minio_bucket` | **task input**, falling back to `MINIO_*_DEFAULT` | A migration source is legitimately *some other* MinIO than this deployment's own. Same deployment, different value per call → input. |
+| `minio_endpoint` / `minio_access_key` / `minio_bucket` | **task input**, falling back to `MINIO_*_DEFAULT` | A migration source is legitimately *some other* MinIO than this deployment's own, so no deploy-time value can reach it. Same deployment, different value per call → input. See the credential note below — this is deliberately not a Rule 1 violation. |
 | `VAULT_ADDR` / `VAULT_MOUNT` / `VAULT_ROLE_ID` / `VAULT_SECRET_ID` | **internal config only**, no input at any tier | These are not a value, they are an **identity**. Exposing them would let a caller redirect a write to a Vault identity other than the one this deployment was provisioned with. Rule 1. |
 | `vault_path` | **task input** | Where the values land, not who may write them. Rule 4. |
 
@@ -51,6 +54,38 @@ Both decisions live in the same feature. When a reviewer asks "why is one
 caller-suppliable and the other not?", *that* distinction — value vs identity —
 is the answer, and it belongs in the script header the way
 `aqsh-tasks/lib/vault.sh` writes it.
+
+#### Why a caller-supplied credential is not a Rule 1 violation
+
+`minio_access_key`/`minio_secret_key` are credential-shaped, so the two rows
+above look contradictory until you ask *whose* identity is at stake:
+
+- The **Vault AppRole** is the deployment's own. Accepting it per call would let
+  a caller borrow privilege the deputy holds and the caller does not — a
+  confused deputy. There is no legitimate reason to override it, because the
+  deployment can only ever write as itself.
+- The **MinIO keys** belong to the caller's own migration source. They grant
+  nothing the caller doesn't already have, and no deploy-time value could reach
+  an arbitrary third-party endpoint. Refusing them would not add safety, it
+  would just make cross-deployment migration impossible.
+
+So the test is not "does it look like a secret" but **"could a caller use this
+to act as someone they aren't?"**
+
+A caller-supplied credential still owes three things, all of which the migration
+tasks do today — copy them:
+
+1. **Never in the result payload.** `migration-preflight.sh` builds its result
+   without any `minio_*` credential field.
+2. **Never in a log line.** Log the Secret *name*, never a value.
+3. **Never in process argv.** Reach the tool through the environment
+   (`export AWS_SECRET_ACCESS_KEY=...`) or stdin, never `--flag "$SECRET"` on a
+   command line that `ps -ef` can read. `lib/vault.sh` goes further for the
+   token, using a mode-600 `curl --config` file.
+
+Plus the fourth, which is what keeps the common case clean: **fall back to
+`*_DEFAULT` deploy-time config**, so a caller migrating within one deployment
+sends no secret at all.
 
 ### When the API surface should be smaller than the resolution chain
 

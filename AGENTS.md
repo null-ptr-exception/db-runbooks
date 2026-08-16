@@ -49,7 +49,10 @@ bats --recursive tests/unit
 docker run --rm -i hadolint/hadolint hadolint --ignore DL3008 --ignore DL4006 - < Dockerfile
 ```
 
-Everything else needs real Kind clusters and costs 30–75 minutes per CI cycle.
+The integration suites need real Kind clusters and cost 30–75 minutes per CI
+cycle. Not everything outside those three commands does: the image build is
+another cheap local check, and `yamllint`/`actionlint` have config files that
+nothing in this repo ever runs.
 Full inventory of what is and isn't enforced:
 [`docs/internal/quality-gates.md`](docs/internal/quality-gates.md).
 

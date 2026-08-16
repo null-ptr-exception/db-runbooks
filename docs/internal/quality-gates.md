@@ -1,6 +1,6 @@
 # Quality gates — the full inventory
 
-Reference for the summary in `CLAUDE.md` → *Quality Gates*. Read `CLAUDE.md`
+Reference for the summary in `AGENTS.md` → *Quality Gates*. Read `AGENTS.md`
 for the four owner types and the three commands worth running before every
 push. Read this when you need the complete picture: exact commands, CI job
 costs, and what is not covered at all.
@@ -115,6 +115,6 @@ pattern.
 
 | Convention | Where |
 |------------|-------|
-| Which layer a value belongs to | `CLAUDE.md` → *Configuration Layers*; decision procedure in [`task-authoring.md`](../agent/task-authoring.md) |
+| Which layer a value belongs to | `AGENTS.md` → *Configuration Layers*; decision procedure in [`task-authoring.md`](../agent/task-authoring.md) |
 | How a tier resolves, per family | [`resolution-tiers.md`](resolution-tiers.md) |
-| `--context` on every `kubectl` | `CLAUDE.md` → *kubectl Contexts* |
+| `--context` on every `kubectl` | `AGENTS.md` → *kubectl Contexts* |

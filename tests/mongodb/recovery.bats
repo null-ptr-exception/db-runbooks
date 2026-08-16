@@ -658,7 +658,7 @@ _wait_for_rs_healthy() {
 # Wrong-profile / data_path-mismatch coverage (data_path was previously a
 # task input, so a caller could trigger this on purpose) moved to
 # tests/unit/mongodb/recovery.bats's mocked-kubectl G5/G6 path-mismatch
-# tests — data_path/mount_path are no longer task inputs (see CLAUDE.md
+# tests — data_path/mount_path are no longer task inputs (see AGENTS.md
 # "Configuration Layers"), so there's no longer an API-level way to pass a
 # mismatched path; the only way for a real deployment to hit this is a
 # detection bug, which the live e2e detection tests (recovery_autodetect*
@@ -701,7 +701,7 @@ _wait_for_rs_healthy() {
 }
 
 # credential_user/credential_user_key task-input override coverage removed:
-# they're no longer task inputs (see CLAUDE.md "Configuration Layers"). The
+# they're no longer task inputs (see AGENTS.md "Configuration Layers"). The
 # underlying _mongo_load_credentials direct_user mechanism they exercised is
 # still covered — now via detection — by tests/unit/mongodb/recovery-detect
 # .bats and the live e2e recovery_autodetect*.bats fixtures (literal-username

@@ -12,7 +12,7 @@ set -euo pipefail
 # (mariadb_list_member_pods, lib/mariadb.sh).
 #
 # The NAMESPACE is the only required input; the instance itself is
-# auto-detected — never a task input (see CLAUDE.md "Configuration Layers").
+# auto-detected — never a task input (see AGENTS.md "Configuration Layers").
 # LOG_LEVEL is optional per-call log verbosity, matching the MongoDB gateway.
 # =============================================================================
 

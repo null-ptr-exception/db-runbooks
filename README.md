@@ -69,7 +69,7 @@ made from a pod (e.g. `test-client`), not from the host.
 | `mariadb-1` | cluster-a | MariaDB instance (operator-managed) |
 | `minio` | cluster-b | MinIO object storage |
 
-See [CLAUDE.md](CLAUDE.md) for the full architecture reference, including the
+See [AGENTS.md](AGENTS.md) for the full architecture reference, including the
 configuration-layers convention (task input vs. internal config vs. live
 auto-detection) used by the MongoDB account/recovery tasks.
 
@@ -210,7 +210,7 @@ docs/
 └── mongodb/                  # Per-task runbooks
 
 AGENTS.md                     # Entry point for coding agents (points at the above)
-CLAUDE.md                     # Project guide: contexts, architecture, rules
+AGENTS.md                     # Project guide: contexts, architecture, rules
 ```
 
 ### Writing a New Task Script
@@ -248,7 +248,7 @@ jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
    See [docs/agent/task-authoring.md](docs/agent/task-authoring.md) for the
    decision procedure: when a value belongs in `input:` vs.
    `aqsh-tasks/config/*.env` vs. live auto-detection vs. a hardcoded library
-   fallback, and CLAUDE.md "Configuration Layers" for the short rule.
+   fallback, and AGENTS.md "Configuration Layers" for the short rule.
 4. See [docs/lib/](docs/lib/) for the full `aqsh-tasks/lib/*.sh` API reference.
 
 ### Iterating
@@ -318,7 +318,7 @@ MIT
 
 1. Follow existing code style (ShellCheck + yamllint pass)
 2. Add `.bats` coverage for new tasks
-3. Update `docs/` for user-facing changes, and CLAUDE.md for architecture/convention changes
+3. Update `docs/` for user-facing changes, and AGENTS.md for architecture/convention changes
 
 ---
 

@@ -211,7 +211,7 @@ wait_for_task() {
 # "G5 silently degrades to warn" / "G6 is skipped with a warn" integration
 # tests in recovery.bats triggered the wrong-path failure mode by passing
 # them directly in the request body. They're not task inputs anymore (see
-# CLAUDE.md "Configuration Layers" / "Auto-detect tier") — internal config
+# AGENTS.md "Configuration Layers" / "Auto-detect tier") — internal config
 # is the only lever left to make resolution land on a wrong path, so this
 # reproduces the same scenario through that remaining lever instead.
 @test "recovery/pre-check G5/G6 degrade to warn (not block) when internal config points at the wrong data_path" {

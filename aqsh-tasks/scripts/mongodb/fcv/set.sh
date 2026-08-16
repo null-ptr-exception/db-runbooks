@@ -15,7 +15,7 @@ set -euo pipefail
 #   DRY_RUN             — default "true": validate + preview, change nothing
 #   CONFIRM             — must be "true" when DRY_RUN is "false"
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config -> live cluster
 # auto-detect -> hardcoded literal fallback.
 # =============================================================================

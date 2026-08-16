@@ -2,7 +2,7 @@
 
 # Keeps docs/internal/resolution-tiers.md's per-family registry honest.
 #
-# CLAUDE.md's "Maintaining this file" rule says a list of "which tasks are in
+# AGENTS.md's "Maintaining this file" rule says a list of "which tasks are in
 # category X" is a registry, it will drift, and it belongs somewhere a test can
 # check it. This is that test.
 #

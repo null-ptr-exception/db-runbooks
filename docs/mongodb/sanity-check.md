@@ -6,7 +6,7 @@
 
 Reads MongoDB credentials at runtime from a Kubernetes Secret in the target namespace — no credentials pass through the task API.
 
-`sts_name`/credential secret+keys are never task inputs (see CLAUDE.md
+`sts_name`/credential secret+keys are never task inputs (see AGENTS.md
 "Configuration Layers" → "Auto-detect tier") — this task only takes
 `namespace`. StatefulSet name, credentials, and the StatefulSet's headless
 Service are all resolved from live cluster state: `sts_name` from
@@ -20,7 +20,7 @@ that primary. Works on standalone instances too.
 
 The Layer 1 PVC disk-usage check's mount path is likewise never a task input:
 it asks mongod itself for its real dbPath (`db.serverCmdLineOpts().parsed.storage.dbPath`,
-the same live detection `recovery/*` uses — see CLAUDE.md "Configuration
+the same live detection `recovery/*` uses — see AGENTS.md "Configuration
 Layers" → "Auto-detect tier") so the check works unchanged whether the
 deployment is a Bitnami chart (`/bitnami/mongodb/data/db`) or an official
 image (`/data/db`), falling back to the Bitnami path only if no pod in the
@@ -59,7 +59,7 @@ Served by **aqsh-mongodb** on NodePort `30082`.
 
 > StatefulSet name, credential secret/keys, and headless Service name are
 > never task inputs for this task — they resolve internal config → live
-> auto-detect → hardcoded literal, with no caller override (CLAUDE.md
+> auto-detect → hardcoded literal, with no caller override (AGENTS.md
 > "Configuration Layers" → "Auto-detect tier"). See `docs/mongodb/recovery.md`
 > "API Reference" for the full resolution chain.
 

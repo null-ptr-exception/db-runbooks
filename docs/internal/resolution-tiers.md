@@ -1,7 +1,7 @@
 # Resolution tiers — how tasks resolve a value
 
-Reference for the resolution machinery summarised in `CLAUDE.md` →
-*Configuration Layers*. Read `CLAUDE.md` for the rule (which layer does a value
+Reference for the resolution machinery summarised in `AGENTS.md` →
+*Configuration Layers*. Read `AGENTS.md` for the rule (which layer does a value
 belong to). Read this when you need to know **how a specific tier actually
 works**, or **which tier combination a given task family uses**.
 

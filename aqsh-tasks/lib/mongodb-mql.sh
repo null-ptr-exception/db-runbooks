@@ -105,7 +105,7 @@ mql_pipeline_has_write_stage() {
 # ---------------------------------------------------------------------------
 # mql_resolve_deployment <target_pod_input>
 # Resolves sts_name + credential secret/keys via the standard 3-tier chain
-# (internal config -> live auto-detect -> hardcoded fallback; see CLAUDE.md
+# (internal config -> live auto-detect -> hardcoded fallback; see AGENTS.md
 # "Configuration Layers") and sets globals: _MQL_STS, _MQL_SECRET,
 # _MQL_DIRECT_USER, _MQL_USER_KEY, _MQL_PASS_KEY. Shared by mql/read.sh and
 # mql/write.sh so the two scripts can't drift apart on how this resolves —

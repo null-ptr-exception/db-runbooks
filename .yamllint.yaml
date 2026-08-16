@@ -4,3 +4,10 @@ rules:
     max: 200
   truthy:
     allowed-values: ['true', 'false']
+
+# Helm templates are Go templates that only become YAML after `helm template`
+# renders them; every file here starts with `{{- if ... }}`, which yamllint
+# reports as a syntax error. Linting them as YAML is not possible — checking
+# the rendered output would be a separate job.
+ignore: |
+  tests/chart/templates/

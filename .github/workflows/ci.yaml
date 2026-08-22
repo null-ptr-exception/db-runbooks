@@ -60,26 +60,33 @@ jobs:
         env:
           ACTIONLINT_VERSION: 1.7.12
         run: |
-          if ! command -v actionlint >/dev/null 2>&1; then
-            # Download and extract as separate commands, never a pipe: the
-            # default shell here is `bash -e` without pipefail, so a failing
-            # curl in a `curl | tar` pipeline would surface as tar's status.
-            tmp="$(mktemp -d)"
-            trap 'rm -rf "$tmp"' EXIT
-            base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
-            asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-            curl -fsSL -o "$tmp/$asset" "$base/$asset"
-            curl -fsSL -o "$tmp/checksums.txt" \
-              "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
-            # Verify before the privileged extraction, the same shape the
-            # Dockerfile uses for kubectl. This catches a truncated or
-            # mismatched artifact; it does not attest the release itself,
-            # since the checksum comes from the same host as the archive.
-            grep " ${asset}\$" "$tmp/checksums.txt" > "$tmp/expected.txt"
-            (cd "$tmp" && sha256sum -c expected.txt)
-            sudo tar -xzf "$tmp/$asset" -C /usr/local/bin actionlint
-          fi
-          actionlint
+          # No `command -v` short-circuit. This step used to install into
+          # /usr/local/bin, which outlives the job on these runners (see the
+          # "Clean slate" step below), so from the second lint job on an
+          # instance onwards it would have skipped its own download and
+          # checksum and run whatever binary was already there — leaving
+          # ACTIONLINT_VERSION with nothing to enforce. Always fetch, verify,
+          # and run the pinned build out of a job-local directory; nothing is
+          # written outside it, so no sudo either.
+          #
+          # Download and extract as separate commands, never a pipe: the
+          # default shell here is `bash -e` without pipefail, so a failing
+          # curl in a `curl | tar` pipeline would surface as tar's status.
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tmp/$asset" "$base/$asset"
+          curl -fsSL -o "$tmp/checksums.txt" \
+            "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          # Verify before extraction, the same shape the Dockerfile uses for
+          # kubectl. This catches a truncated or mismatched artifact; it does
+          # not attest the release itself, since the checksum comes from the
+          # same host as the archive.
+          grep " ${asset}\$" "$tmp/checksums.txt" > "$tmp/expected.txt"
+          (cd "$tmp" && sha256sum -c expected.txt)
+          tar -xzf "$tmp/$asset" -C "$tmp" actionlint
+          "$tmp/actionlint"
 
       - name: Run Bats unit tests
         run: |

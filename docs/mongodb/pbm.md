@@ -9,7 +9,7 @@ required. Supersedes the legacy `backup` task (mongodump tarball — kept but
 deprecated).
 
 Deployment naming, the agent sidecar container, the storage location, and the
-S3 credentials are **not task inputs** (see CLAUDE.md "Configuration
+S3 credentials are **not task inputs** (see AGENTS.md "Configuration
 Layers") — they resolve internal config → live cluster auto-detect →
 convention literal. The API surface per call is `namespace` plus genuinely
 per-call operational decisions.

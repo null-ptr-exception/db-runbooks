@@ -28,7 +28,7 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
   sanity-check:
     script: mongodb/sanity-check.sh
@@ -73,23 +73,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -190,23 +190,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -237,23 +237,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -284,23 +284,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -335,23 +335,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -381,23 +381,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -433,23 +433,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: auth_db
         env: ACCOUNT_AUTH_DB
         required: false
@@ -510,23 +510,23 @@ tasks:
         env: MONGO_STS_NAME
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
       - name: credential_secret
         env: MONGO_CRED_SECRET
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_user_key
         env: MONGO_CRED_USER_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
       - name: credential_pass_key
         env: MONGO_CRED_PASS_KEY
         required: false
         type: string
-        default: ""  # deployment convention; see CLAUDE.md "Configuration Layers"
+        default: ""  # deployment convention; see AGENTS.md "Configuration Layers"
   recovery/pre-check:
     script: mongodb/recovery/pre-check.sh
     description: "Run G1-G8 pre-flight gates for a target pod (read-only)"
@@ -616,7 +616,7 @@ tasks:
         pattern: '^([a-z0-9]([-a-z0-9]*[a-z0-9])?)?$'
   # Reconfig gateway (see docs/mongodb/reconfig.md). Deployment-naming fields
   # (sts_name, credential_*) are deliberately NOT task inputs — same
-  # auto-detect tier as recovery/* (CLAUDE.md "Configuration Layers").
+  # auto-detect tier as recovery/* (AGENTS.md "Configuration Layers").
   reconfig/plan:
     script: mongodb/reconfig/plan.sh
     description: "Read-only risk report for a proposed RS reconfig (returns plan_hash)"
@@ -754,7 +754,7 @@ tasks:
         default: "300"
   # FCV gateway (see docs/mongodb/fcv.md). Deployment-naming fields
   # (sts_name, credential_*) are deliberately NOT task inputs — same
-  # auto-detect tier as recovery/* (CLAUDE.md "Configuration Layers").
+  # auto-detect tier as recovery/* (AGENTS.md "Configuration Layers").
   fcv/status:
     script: mongodb/fcv/status.sh
     description: "Read-only: server version, current FCV, transitional state, allowed FCV targets"
@@ -796,7 +796,7 @@ tasks:
   # backups + PITR; physical restore runs a full-downtime StatefulSet
   # takeover (see docs/mongodb/pbm.md). Deployment-naming fields (sts_name, agent
   # container, storage location, S3 credentials) are deliberately NOT task
-  # inputs — same auto-detect tier as recovery/* (CLAUDE.md "Configuration
+  # inputs — same auto-detect tier as recovery/* (AGENTS.md "Configuration
   # Layers"). log_level IS a task input: per-call debug verbosity is a
   # genuinely per-call decision.
   pbm/status:
@@ -1161,7 +1161,7 @@ tasks:
   # Upsert is plan -> apply with a stateless CAS plan_hash (reconfig model);
   # delete is confirm-gated. The PGP key path and the protected-secret list
   # are deliberately NOT task inputs — internal config + live auto-detect
-  # only (CLAUDE.md "Configuration Layers").
+  # only (AGENTS.md "Configuration Layers").
   secrets/pubkey:
     script: secrets/pubkey.sh
     description: "Return the deployment PGP public key callers encrypt secrets payloads against"
@@ -1306,7 +1306,7 @@ tasks:
   # state — replSetResizeOplog only resizes the node it runs against, so
   # oplog/resize enumerates every current replica-set member itself rather
   # than taking a target_pod. sts_name/credentials are deliberately NOT task
-  # inputs — same auto-detect tier as recovery/* (CLAUDE.md "Configuration
+  # inputs — same auto-detect tier as recovery/* (AGENTS.md "Configuration
   # Layers").
   oplog/status:
     script: mongodb/oplog/status.sh
@@ -1361,7 +1361,7 @@ tasks:
   # views — target_pod (optional) pins both list/kill to the same member;
   # omitted, both default to the elected PRIMARY. sts_name/credentials are
   # deliberately NOT task inputs — same auto-detect tier as recovery/*
-  # (CLAUDE.md "Configuration Layers").
+  # (AGENTS.md "Configuration Layers").
   ops/list:
     script: mongodb/ops/list.sh
     description: "Read-only: currently active operations on a single node (default: primary)"
@@ -1432,7 +1432,7 @@ tasks:
   # Profiler gateway (see docs/mongodb/profiler.md). The profiler level is
   # per-node state — target_pod (optional) defaults to the elected PRIMARY.
   # sts_name/credentials are deliberately NOT task inputs — same auto-detect
-  # tier as recovery/* (CLAUDE.md "Configuration Layers").
+  # tier as recovery/* (AGENTS.md "Configuration Layers").
   profiler/status:
     script: mongodb/profiler/status.sh
     description: "Read-only: query profiler level/threshold/sampleRate on a single node (default: primary)"
@@ -1508,7 +1508,7 @@ tasks:
         pattern: '^(DEBUG|INFO|WARN|ERROR)?$'
   # STS orphan-delete gateway (see docs/mongodb/sts-orphan-delete.md).
   # sts_name is deliberately NOT a task input — same auto-detect tier as
-  # recovery/* (CLAUDE.md "Configuration Layers").
+  # recovery/* (AGENTS.md "Configuration Layers").
   sts/orphan-delete:
     script: mongodb/sts/orphan-delete.sh
     description: "Delete the StatefulSet with --cascade=orphan — Pods/PVCs stay running, unmanaged; dry_run -> confirm. Step 1 of the enlarge-PVC workaround (PVC resize + STS recreate are separate manual steps)"
@@ -1541,7 +1541,7 @@ tasks:
   # deployment — never connects to mongod, works unchanged for Bitnami and
   # official images. Distinct from ops/kill, which kills a mongod OPERATION
   # by opid, not a Pod. sts_name is deliberately NOT a task input — same
-  # auto-detect tier as ops/* (CLAUDE.md "Configuration Layers").
+  # auto-detect tier as ops/* (AGENTS.md "Configuration Layers").
   pods/list:
     script: mongodb/pods/list.sh
     description: "Read-only: list the live Pods belonging to this namespace's MongoDB StatefulSet"
@@ -1601,7 +1601,7 @@ tasks:
   # MQL gateway (see docs/mongodb/mql.md). Structured-JSON CRUD, no raw
   # eval — filter/projection/pipeline/document(s)/update are validated JSON
   # embedded into the query, never arbitrary caller-supplied JS. sts_name/
-  # credentials are not task inputs (CLAUDE.md "Configuration Layers");
+  # credentials are not task inputs (AGENTS.md "Configuration Layers");
   # admin/local/config are always refused (PROTECTED_DATABASE).
   mql/read:
     script: mongodb/mql/read.sh

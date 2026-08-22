@@ -40,7 +40,7 @@ Valid namespace in this sandbox: `mongo-1`.
 `sts_name` is an escape hatch for a caller who genuinely needs a different
 StatefulSet name on a single call. When omitted (the normal case), the
 StatefulSet name is resolved via the deployment's configuration layers (see
-CLAUDE.md "Configuration Layers"):
+AGENTS.md "Configuration Layers"):
 
 1. Task input `sts_name`, if the caller explicitly passed one.
 2. Internal config `MONGO_STS_NAME_DEFAULT` (`aqsh-tasks/config/mongodb.env`,

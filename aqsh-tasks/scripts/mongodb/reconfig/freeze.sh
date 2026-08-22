@@ -14,7 +14,7 @@ set -euo pipefail
 #   FREEZE_ENABLED — "true" | "false"
 #   FREEZE_REASON  — free text, recorded in the annotation and audit log
 #
-# sts_name is not a task input (see CLAUDE.md "Configuration Layers").
+# sts_name is not a task input (see AGENTS.md "Configuration Layers").
 # =============================================================================
 
 LIB_DIR="/tasks/lib"

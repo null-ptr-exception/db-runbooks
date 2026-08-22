@@ -27,7 +27,7 @@ _MONGODB_PBM_LIB_LOADED=1
 
 # Internal config (*_DEFAULT knobs). mongodb-recovery.sh sources this too;
 # re-sourcing is harmless — the file only sets *_DEFAULT-suffixed names, so
-# it can never clobber an explicit caller value (see CLAUDE.md).
+# it can never clobber an explicit caller value (see AGENTS.md).
 [[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
 
 # Poll cadence for backup/restore wait loops (seconds).

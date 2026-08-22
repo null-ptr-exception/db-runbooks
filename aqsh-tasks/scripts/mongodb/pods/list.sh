@@ -14,7 +14,7 @@ set -euo pipefail
 #   DB_NAMESPACE — target namespace, e.g. "mongo-1"
 #   LOG_LEVEL    — optional per-call log verbosity
 #
-# sts_name is not a task input (see CLAUDE.md "Configuration Layers") — it
+# sts_name is not a task input (see AGENTS.md "Configuration Layers") — it
 # resolves internal config -> live cluster auto-detect (exactly one
 # StatefulSet in the namespace) -> hardcoded literal fallback, the same
 # resolver ops/list.sh already uses.

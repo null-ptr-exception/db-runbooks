@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # =============================================================================
-# E2E proof of the G1 self-heal mechanism (see CLAUDE.md "Auto-detect tier"
+# E2E proof of the G1 self-heal mechanism (see AGENTS.md "Auto-detect tier"
 # and lib/mongodb-recovery.sh's _recovery_auto_patch_init_container /
 # _recovery_revert_auto_patch): when the data-recovery init container is
 # missing, recovery/wipe and recovery/recover (gate mode) patch it in live —
@@ -390,7 +390,7 @@ _wipe_target() {
 # _other_pods <target_pod>
 # Echo every mongodb-N pod name except target_pod, one per line — the set
 # of pods that must NEVER restart while target_pod is being self-healed/
-# wiped/reset (see CLAUDE.md "不重啟其他pod狀態").
+# wiped/reset (see AGENTS.md "不重啟其他pod狀態").
 # ---------------------------------------------------------------------------
 _other_pods() {
   local target_pod="$1" p
@@ -541,7 +541,7 @@ _sts_auto_patched_annotation() {
   assert_equal "$annotation" "true"
 
   # The OTHER pods must not have been touched by the self-heal patch — the
-  # partition lock in the same patch call is what CLAUDE.md's "不重啟其他
+  # partition lock in the same patch call is what AGENTS.md's "不重啟其他
   # pod" requirement depends on.
   _assert_uids_unchanged "$ANS" "$others_uids"
 

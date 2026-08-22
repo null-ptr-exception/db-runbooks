@@ -44,7 +44,7 @@
 [[ -n "${_SECRETS_LIB_LOADED:-}" ]] && return 0
 _SECRETS_LIB_LOADED=1
 
-# Internal config (deploy-time conventions — see CLAUDE.md "Configuration
+# Internal config (deploy-time conventions — see AGENTS.md "Configuration
 # Layers"). Sourced at module load so *_DEFAULT values are visible before the
 # calling script's own config lines run. Only one of the two files exists in
 # a given deployment (mongodb.env on the MongoDB gateway, mariadb.env on the

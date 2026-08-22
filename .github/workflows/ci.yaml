@@ -31,14 +31,43 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y shellcheck
           fi
-          find . -type f -name '*.sh' -print0 \
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
+
+      - name: Run yamllint
+        run: |
+          if ! command -v yamllint >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y yamllint
+          fi
+          yamllint .
+
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          if ! command -v actionlint >/dev/null 2>&1; then
+            # Download and extract as two commands, not a pipe: the default
+            # shell here is `bash -e` without pipefail, so a failing curl in a
+            # `curl | tar` pipeline would be reported as tar's exit status.
+            tmp="$(mktemp -d)"
+            curl -fsSL -o "$tmp/actionlint.tar.gz" \
+              "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+            sudo tar -xzf "$tmp/actionlint.tar.gz" -C /usr/local/bin actionlint
+            rm -rf "$tmp"
+          fi
+          actionlint
 
       - name: Run Bats unit tests
         run: |
-          if [ -d tests/unit ]; then
-            bats --recursive tests/unit
+          # Fail closed: a missing tests/unit means the only test suite that
+          # runs without a Kind cluster has silently stopped running, and the
+          # job stays green while covering nothing.
+          if [ ! -d tests/unit ]; then
+            echo "tests/unit not found — the unit suite cannot be skipped silently" >&2
+            exit 1
           fi
+          bats --recursive tests/unit
 
       - name: Run Hadolint
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0

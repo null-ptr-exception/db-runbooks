@@ -135,11 +135,16 @@ internal config — see `tests/chart/templates/mongodb-rbac.yaml`.
 
 ---
 
-## G1 self-heal
+## Self-healing the missing init container (gate G1)
+
+`recovery/*` runs eight pre-flight gates, G1-G8; each reports a
+`{"gate":"G1",...}` line. **G1 is the one that checks the `data-recovery` init
+container is present in the StatefulSet spec** — the full gate table is in
+[recovery](../mongodb/recovery.md#pre-flight-gates-g1g8).
 
 `wipe`/`recover` (gate mode only — `pre-check` stays read-only) go one step
-beyond detection when the `data-recovery` init container is missing: instead of
-failing G1 with a manual-setup suggestion, they patch it in live.
+beyond detection when that init container is missing: instead of failing G1 with
+a manual-setup suggestion, they patch it in live.
 
 - **Volume name / mount path** detected from the main container's own existing
   `volumeMounts` against the already-detected `data_path` — works for any
@@ -226,10 +231,11 @@ for an already-gone target instead of that case always surfacing as
 
 A confirmed delete (`dry_run=false`) additionally requires `pod_uid` — the
 target's UID from the preceding dry-run — and rejects with `POD_REPLACED` if the
-live UID no longer matches, closing the window where the instance recreates a
-same-name replacement between dry-run and confirm. `kubectl delete` has no
-native UID-precondition flag, so this is a script-level check immediately before
-the delete, not a server-enforced one.
+live UID no longer matches. `kubectl delete` has no UID-precondition flag, so
+this is a script-level check immediately before a name-based
+`kubectl delete pod`, not a server-enforced one: it closes the *realistic*
+window — the often human-paced gap between a dry-run and its confirm — but a
+replacement created between the check and the delete itself would still be hit.
 
 Whether the delete is graceful or forced (`--grace-period=0 --force`) is decided
 internally from the pod's own `Ready` condition, never a caller-facing field.

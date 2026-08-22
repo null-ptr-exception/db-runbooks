@@ -80,8 +80,11 @@ combination a given task family uses, is in
   cluster state rather than guessing an image profile, fail *soft* when they
   find no confident signal, and do not expose the resolved fields as task
   inputs at all
-- G1 self-heal, the `secrets/*` and `pods/*` contracts, and `blue-green/*` —
-  the one family that does expose its resolution fields as task inputs
+- how `wipe`/`recover` patch a missing `data-recovery` init container into the
+  StatefulSet rather than failing the gate that checks for it (gate G1 of
+  `recovery/*`'s eight pre-flight gates), and revert it afterwards
+- the `secrets/*` and `pods/*` contracts, and `blue-green/*` — the one family
+  that does expose its resolution fields as task inputs
 - a per-family registry table, kept honest by
   `tests/unit/aqsh/resolution_registry_drift.bats`
 

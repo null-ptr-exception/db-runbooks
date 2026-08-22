@@ -37,7 +37,7 @@ families_from_registry() {
   grep -E '^\| `[A-Za-z0-9_-]+/\*` ' \
     "${REPO_ROOT}/docs/internal/resolution-tiers.md" \
     | sed 's/^| `//; s/`.*//' \
-    | sort -u
+    | sort
 }
 
 @test "resolution-tiers registry lists exactly the namespaced task families" {
@@ -71,7 +71,7 @@ families_from_registry() {
 @test "no task key uses a format the family extractor would skip" {
   local unrecognised
   unrecognised="$(awk '
-    /^  [^ #]/ && /:[[:space:]]*$/ && !/^  [A-Za-z0-9_\/-]+:[[:space:]]*$/ {
+    /^  [^ #]/ && /:[[:space:]]*$/ && !/^  [A-Za-z0-9_\/-]+:$/ {
       print FILENAME ":" FNR ": " $0
     }' \
     "${REPO_ROOT}/aqsh-tasks/tasks-mariadb.yaml" \

@@ -28,7 +28,7 @@ set -euo pipefail
 #   RECONFIG_PLAN_HASH — plan_hash from the dry_run (required on confirm)
 #   REQUESTED_BY — audit field (free text)
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers").
 # =============================================================================
 

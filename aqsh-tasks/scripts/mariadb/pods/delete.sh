@@ -25,7 +25,7 @@ set -euo pipefail
 #                  recreated since the dry-run that inspected it.
 #   LOG_LEVEL    — optional per-call log verbosity, matching MongoDB's gateway
 #
-# The instance itself is not a task input (see CLAUDE.md "Configuration
+# The instance itself is not a task input (see AGENTS.md "Configuration
 # Layers") — same auto-detect as pods/list. Whether the delete is graceful
 # or forced (--grace-period=0 --force) is decided internally from the pod's
 # own Ready condition, not a caller-facing field — a not-Ready pod is

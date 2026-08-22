@@ -12,7 +12,7 @@ set -euo pipefail
 #   FORCE_WIPE            — set "true" to bypass 100GB G5 gate (default: false)
 #
 # sts_name/recovery_configmap/credential secret-and-keys/data-and-mount-path
-# are not task inputs (see CLAUDE.md "Configuration Layers") — they resolve
+# are not task inputs (see AGENTS.md "Configuration Layers") — they resolve
 # internal config (/etc/aqsh/config/mongodb.env) -> live cluster auto-detect
 # -> hardcoded literal fallback.
 # =============================================================================

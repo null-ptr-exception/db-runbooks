@@ -16,7 +16,7 @@ set -euo pipefail
 #   RECOVERY_LEVEL          — diagnose | unfreeze | reconfig | force-primary
 #   RECOVERY_FORCE_POD      — pod name required when level=force-primary
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config (/etc/aqsh/config/
 # mongodb.env) -> live cluster auto-detect -> hardcoded literal fallback.
 # =============================================================================

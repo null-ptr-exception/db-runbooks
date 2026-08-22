@@ -20,7 +20,7 @@ set -euo pipefail
 #   CONFIRM      — must be "true" when DRY_RUN is "false"
 #   LOG_LEVEL    — optional per-call log verbosity
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config -> live cluster
 # auto-detect -> hardcoded literal fallback.
 # =============================================================================

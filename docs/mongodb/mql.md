@@ -12,7 +12,7 @@ vector.
 Deployment naming/credential conventions (StatefulSet name, credential
 secret and keys) are **not task inputs** — they resolve via internal config
 → live-cluster auto-detect → hardcoded fallback, exactly like `recovery/*`,
-`ops/*`, and `profiler/*` (see CLAUDE.md "Configuration Layers"). The same
+`ops/*`, and `profiler/*` (see AGENTS.md "Configuration Layers"). The same
 auto-detect also covers both the official and Bitnami MongoDB image
 conventions with no special-casing here.
 

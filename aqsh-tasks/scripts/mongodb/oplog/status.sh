@@ -13,7 +13,7 @@ set -euo pipefail
 #   DB_NAMESPACE — target namespace, e.g. "mongo-1"
 #   LOG_LEVEL    — optional per-call log verbosity
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config -> live cluster
 # auto-detect -> hardcoded literal fallback.
 # =============================================================================

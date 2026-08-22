@@ -12,7 +12,7 @@
 # on, and fail fast with a clear message when a required CRD is absent instead of
 # emitting a cryptic `no matches for kind "PhysicalBackup"`.
 #
-# Resolution mirrors the 3-tier chain documented in CLAUDE.md:
+# Resolution mirrors the 3-tier chain documented in AGENTS.md:
 #   1. Internal config  — MARIADB_OPERATOR_GROUP_DEFAULT, set once per deployment
 #   2. Auto-detect      — the group serving the `mariadbs` CRD (present in BOTH
 #                         generations); trusted only when exactly one group does

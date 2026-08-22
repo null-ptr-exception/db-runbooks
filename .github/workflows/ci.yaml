@@ -31,7 +31,13 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y shellcheck
           fi
-          find . -type f \( -name '*.sh' -o -name '*.bash' \) -print0 \
+          # tests/test_helper/bats-* is vendored third-party code, cloned by
+          # preflight.sh and gitignored. It is not ours to lint, and its
+          # findings differ by ShellCheck version, so exclude it explicitly
+          # rather than leaving the job's result dependent on which release
+          # apt happens to ship.
+          find . -type f \( -name '*.sh' -o -name '*.bash' \) \
+            -not -path './tests/test_helper/bats-*/*' -print0 \
             | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
 
       - name: Run yamllint

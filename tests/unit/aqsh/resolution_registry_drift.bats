@@ -2,9 +2,9 @@
 
 # Keeps docs/internal/resolution-tiers.md's per-family registry honest.
 #
-# AGENTS.md's "Maintaining this file" rule says a list of "which tasks are in
-# category X" is a registry, it will drift, and it belongs somewhere a test can
-# check it. This is that test.
+# A list of "which tasks are in category X" is a registry: it is maintained by
+# hand, it drifts, and it belongs somewhere a test can check it. This is that
+# test.
 #
 # The check is exact set equality with NO exemption list, deliberately: an
 # allowlist is itself a registry and would drift the same way. A family that
@@ -20,12 +20,11 @@ setup_file() {
 # Task keys use two-space indentation in the AQSH config; a key containing "/"
 # is a namespaced task, and its first path segment is the family.
 families_from_tasks() {
-  awk '/^  [A-Za-z0-9_\/-]+:$/ {
-         gsub(/^  |:$/, "")
-         if (index($0, "/") > 0) { split($0, a, "/"); print a[1] "/*" }
+  awk '/^  [A-Za-z0-9_\/-]+:([[:space:]].*)?$/ {
+         key = $0; sub(/^  /, "", key); sub(/:.*$/, "", key)
+         if (index(key, "/") > 0) { split(key, a, "/"); print a[1] "/*" }
        }' \
-    "${REPO_ROOT}/aqsh-tasks/tasks-mariadb.yaml" \
-    "${REPO_ROOT}/aqsh-tasks/tasks-mongodb.yaml" \
+    "${REPO_ROOT}"/aqsh-tasks/tasks-*.yaml \
     | sort -u
 }
 
@@ -71,15 +70,33 @@ families_from_registry() {
 @test "no task key uses a format the family extractor would skip" {
   local unrecognised
   unrecognised="$(awk '
-    /^  [^ #]/ && /:[[:space:]]*$/ && !/^  [A-Za-z0-9_\/-]+:$/ {
+    /^  [^ #]/ && /:/ && !/^  [A-Za-z0-9_\/-]+:([[:space:]].*)?$/ {
       print FILENAME ":" FNR ": " $0
     }' \
-    "${REPO_ROOT}/aqsh-tasks/tasks-mariadb.yaml" \
-    "${REPO_ROOT}/aqsh-tasks/tasks-mongodb.yaml")"
+    "${REPO_ROOT}"/aqsh-tasks/tasks-*.yaml)"
 
   if [ -n "$unrecognised" ]; then
     echo "Task keys the family extractor cannot read — a namespaced family" >&2
     echo "declared like this would be invisible to the drift check above:" >&2
+    echo "$unrecognised" >&2
+  fi
+
+  [ -z "$unrecognised" ]
+}
+
+# The registry side needs the same guard as the task side: a row whose family
+# cell is not a bare backticked "<family>/*" is skipped by the grep above, so a
+# stale row reformatted as, say, **`zzz/*`** would sit in the table unnoticed.
+@test "no registry row uses a format the registry extractor would skip" {
+  local unrecognised
+  unrecognised="$(awk '
+    /^\|/ && /`[A-Za-z0-9_-]+\/\*`/ && !/^\| `[A-Za-z0-9_-]+\/\*` / {
+      print FNR ": " $0
+    }' "${REPO_ROOT}/docs/internal/resolution-tiers.md")"
+
+  if [ -n "$unrecognised" ]; then
+    echo "Registry rows the family extractor cannot read — a stale or new row" >&2
+    echo "written like this would be invisible to the drift check above:" >&2
     echo "$unrecognised" >&2
   fi
 

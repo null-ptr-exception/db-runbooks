@@ -75,11 +75,10 @@ combination a given task family uses, is in
 - the three-tier chain for account tasks (task input → internal config →
   library fallback), and why the internal-config variable carries a distinct
   `*_DEFAULT` suffix
-- the **Auto-detect tier** used by `recovery/*`, `reconfig/*`, `fcv/*`, `pbm/*`,
-  `sts/*`, `oplog/*`, `ops/*`, `profiler/*` and `mql/*` — these query live
-  cluster state rather than guessing an image profile, fail *soft* when they
-  find no confident signal, and do not expose the resolved fields as task
-  inputs at all
+- the **Auto-detect tier** — which families use it is the registry table's job,
+  not this file's. They query live cluster state rather than guessing an image
+  profile, fail *soft* when they find no confident signal, and do not expose the
+  resolved fields as task inputs at all
 - how `wipe`/`recover` patch a missing `data-recovery` init container into the
   StatefulSet rather than failing the gate that checks for it (gate G1 of
   `recovery/*`'s eight pre-flight gates), and revert it afterwards

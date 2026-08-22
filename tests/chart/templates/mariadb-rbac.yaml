@@ -7,7 +7,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     resourceNames: ["mariadb"]
-    verbs: ["get"]
+    # patch/update: restore-in-place temporarily fences rollout with OnDelete.
+    # The v24 operator reconciles replicas, so the task never scales this STS.
+    verbs: ["get", "patch", "update"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list", "watch"]
@@ -24,15 +26,16 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "list", "watch"]
-  # Hand-rolled physical restore on a legacy operator pre-creates the datadir PVC
-  # and runs a prepare Job (mbstream + mariabackup --prepare) before the new
-  # instance adopts the PVC.
+  # Hand-rolled physical restore may create a datadir PVC for a new instance.
+  # v24 in-place restore only gets/lists existing PVCs and never deletes them.
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
-    verbs: ["get", "list", "watch", "create"]
+    # Hand-rolled new-instance physical restore creates and cleans a prepare Job.
+    # In-place restore uses MariaDB.spec.initContainers and creates no Job.
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["secrets"]
     # Shared gateway rule: create-account itself only reads a caller-provided

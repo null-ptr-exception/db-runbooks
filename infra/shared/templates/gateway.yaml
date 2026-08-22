@@ -14,3 +14,14 @@ spec:
       hosts:
         - "*.kind-a.test"
         - "*.kind-b.test"
+    # MySQL passthrough on the gateway's 3306 (nodePort 30091). Plain TCP has no
+    # host header, so routing is by port alone and hosts must be "*" — one
+    # database per cluster can be published this way, which is all the
+    # cross-cluster replication suite needs. Harmless when no VirtualService
+    # binds it: the listener simply has no route.
+    - port:
+        number: 3306
+        name: tcp-mariadb
+        protocol: TCP
+      hosts:
+        - "*"

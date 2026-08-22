@@ -124,8 +124,10 @@ pod to disambiguate — it returns **nothing** and resolution falls through to t
 hardcoded fallback exactly as before. It never guesses.
 
 ⚠️ Failing soft means a permanently-broken detection is **indistinguishable
-from a working one** at the API. Report the winning tier in the result payload
-so an operator can tell the difference.
+from a working one** at the API. Reporting the winning tier in the result
+payload would let an operator tell the difference — **not implemented**: no
+task emits it today (`git grep -E 'resolved_via|resolution_source' aqsh-tasks/`
+is empty). Recorded here as the known gap, not as described behaviour.
 
 Failing soft also does not change what RBAC permits: the ClusterRole's
 `resourceNames` must already match the *real* object names for the deployment to

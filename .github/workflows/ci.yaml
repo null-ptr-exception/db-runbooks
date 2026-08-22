@@ -31,14 +31,73 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y shellcheck
           fi
-          find . -type f -name '*.sh' -print0 \
-            | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
+          # Lint the tracked set, not the working tree. `find` also walks
+          # whatever else the tree holds by this point in the job:
+          # tests/test_helper/bats-* is cloned by preflight.sh and gitignored,
+          # so the file set differed between a local checkout and CI and the
+          # job's verdict depended on which one it ran in. git ls-files is the
+          # same set in both.
+          mapfile -d '' files < <(git ls-files -z -- '*.sh' '*.bash')
+          # Fail closed. The default shell is `bash -e` without pipefail, so a
+          # failing git (or an empty match) would otherwise reach
+          # `xargs --no-run-if-empty` and the step would report success having
+          # linted nothing.
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell sources matched — refusing to report a vacuous pass" >&2
+            exit 1
+          fi
+          printf '%s\0' "${files[@]}" | xargs -0 shellcheck --severity=warning -x
+
+      - name: Run yamllint
+        run: |
+          if ! command -v yamllint >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y yamllint
+          fi
+          yamllint .
+
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          # No `command -v` short-circuit. This step used to install into
+          # /usr/local/bin, which outlives the job on these runners (see the
+          # "Clean slate" step below), so from the second lint job on an
+          # instance onwards it would have skipped its own download and
+          # checksum and run whatever binary was already there — leaving
+          # ACTIONLINT_VERSION with nothing to enforce. Always fetch, verify,
+          # and run the pinned build out of a job-local directory; nothing is
+          # written outside it, so no sudo either.
+          #
+          # Download and extract as separate commands, never a pipe: the
+          # default shell here is `bash -e` without pipefail, so a failing
+          # curl in a `curl | tar` pipeline would surface as tar's status.
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          base="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}"
+          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "$tmp/$asset" "$base/$asset"
+          curl -fsSL -o "$tmp/checksums.txt" \
+            "$base/actionlint_${ACTIONLINT_VERSION}_checksums.txt"
+          # Verify before extraction, the same shape the Dockerfile uses for
+          # kubectl. This catches a truncated or mismatched artifact; it does
+          # not attest the release itself, since the checksum comes from the
+          # same host as the archive.
+          grep " ${asset}\$" "$tmp/checksums.txt" > "$tmp/expected.txt"
+          (cd "$tmp" && sha256sum -c expected.txt)
+          tar -xzf "$tmp/$asset" -C "$tmp" actionlint
+          "$tmp/actionlint"
 
       - name: Run Bats unit tests
         run: |
-          if [ -d tests/unit ]; then
-            bats --recursive tests/unit
+          # Fail closed: a missing tests/unit means the only test suite that
+          # runs without a Kind cluster has silently stopped running, and the
+          # job stays green while covering nothing.
+          if [ ! -d tests/unit ]; then
+            echo "tests/unit not found — the unit suite cannot be skipped silently" >&2
+            exit 1
           fi
+          bats --recursive tests/unit
 
       - name: Run Hadolint
         uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0

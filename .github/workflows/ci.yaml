@@ -31,14 +31,22 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y shellcheck
           fi
-          # tests/test_helper/bats-* is vendored third-party code, cloned by
-          # preflight.sh and gitignored. It is not ours to lint, and its
-          # findings differ by ShellCheck version, so exclude it explicitly
-          # rather than leaving the job's result dependent on which release
-          # apt happens to ship.
-          find . -type f \( -name '*.sh' -o -name '*.bash' \) \
-            -not -path './tests/test_helper/bats-*/*' -print0 \
-            | xargs -0 --no-run-if-empty shellcheck --severity=warning -x
+          # Lint the tracked set, not the working tree. `find` also walks
+          # whatever else the tree holds by this point in the job:
+          # tests/test_helper/bats-* is cloned by preflight.sh and gitignored,
+          # so the file set differed between a local checkout and CI and the
+          # job's verdict depended on which one it ran in. git ls-files is the
+          # same set in both.
+          mapfile -d '' files < <(git ls-files -z -- '*.sh' '*.bash')
+          # Fail closed. The default shell is `bash -e` without pipefail, so a
+          # failing git (or an empty match) would otherwise reach
+          # `xargs --no-run-if-empty` and the step would report success having
+          # linted nothing.
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shell sources matched — refusing to report a vacuous pass" >&2
+            exit 1
+          fi
+          printf '%s\0' "${files[@]}" | xargs -0 shellcheck --severity=warning -x
 
       - name: Run yamllint
         run: |

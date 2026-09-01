@@ -129,8 +129,8 @@ assert_error_reason() {
   [ "$(result_field '.data.dryRun')" = "true" ]
   [ "$(result_field '.data.provisioned')" = "false" ]
   [ "$(result_field '.data.restored')" = "false" ]
-  ! grep -Fq 'private-target' "${RESULT}"
-  ! grep -Fq 'private.registry.invalid' "${RESULT}"
+  run ! grep -Fq 'private-target' "${RESULT}"
+  run ! grep -Fq 'private.registry.invalid' "${RESULT}"
   [ ! -f "${CAPTURE}" ]
 }
 
@@ -193,7 +193,7 @@ assert_error_reason() {
   run_restore DRY_RUN=false CONFIRM=true STORAGE_SIZE=1Gi MOCK_BACKUP_EXISTS=1
   [ "$status" -ne 0 ]
   assert_error_reason DATABASE_CONFIGURATION_AMBIGUOUS
-  ! grep -Fq 'mariadb:10.6' "${RESULT}"
+  run ! grep -Fq 'mariadb:10.6' "${RESULT}"
   ! grep -Fq 'mariadb:11.4' "${RESULT}"
 }
 
@@ -218,7 +218,7 @@ assert_error_reason() {
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi
   [ "$status" -ne 0 ]
   assert_error_reason INVALID_REQUEST
-  ! grep -Fq 'private-timeout-marker' "${RESULT}"
+  run ! grep -Fq 'private-timeout-marker' "${RESULT}"
 
   run_restore DRY_RUN=true WAIT_TIMEOUT=0s \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi

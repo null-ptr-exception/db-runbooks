@@ -103,7 +103,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   MOCK_CR_STATUS=1
   MOCK_CR_STDERR="$private_error"
 
-  ! mdbt_s3_workload_contract database
+  if mdbt_s3_workload_contract database; then return 1; fi
   [ "$MDBT_S3_ERROR" = "cannot read the selected MariaDB workload spec" ]
   [[ "$MDBT_S3_ERROR" != *"$private_error"* ]]
 
@@ -128,7 +128,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
 @test "literal credentials fail with a redacted actionable error" {
   MOCK_CR='{"spec":{"env":[{"name":"S3_ACCESS_KEY","value":"do-not-copy-this"}]}}'
-  ! mdbt_s3_workload_contract database
+  if mdbt_s3_workload_contract database; then return 1; fi
   [[ "$MDBT_S3_ERROR" == *"must use secretKeyRef"* ]]
   [[ "$MDBT_S3_ERROR" != *"do-not-copy-this"* ]]
 }
@@ -136,7 +136,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 @test "conflicting MariaDB and Pod workload contracts fail closed" {
   MOCK_CR='{"spec":{"env":[{"name":"S3_BUCKET","value":"one-bucket"}]}}'
   MOCK_PODS='{"items":[{"spec":{"containers":[{"name":"mariadb","env":[{"name":"S3_BUCKET","value":"other-bucket"}]}]}}]}'
-  ! mdbt_s3_workload_contract database
+  if mdbt_s3_workload_contract database; then return 1; fi
   [[ "$MDBT_S3_ERROR" == *"conflicting"* ]]
   [[ "$MDBT_S3_ERROR" != *"one-bucket"* ]]
   [[ "$MDBT_S3_ERROR" != *"other-bucket"* ]]
@@ -236,7 +236,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   BACKUP_SECRET_ACCESS_SECRET='operator-credentials'
   BACKUP_SECRET_KEY='operator-secret'
 
-  ! mdbt_resolve_backup_location tenant-a database
+  if mdbt_resolve_backup_location tenant-a database; then return 1; fi
   [[ "$MDBT_S3_ERROR" == *"conflicting"* ]]
   [[ "$MDBT_S3_ERROR" != *"one-bucket"* ]]
   [[ "$MDBT_S3_ERROR" != *"other-bucket"* ]]
@@ -275,7 +275,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 @test "missing envFrom keys fall through but an incomplete credential pair fails" {
   MOCK_SECRET_PRIMARY="$(jq -cn --arg access "$(b64 'private-a')" '{data:{S3_ACCESS_KEY:$access}}')"
   MOCK_CR='{"spec":{"envFrom":[{"secretRef":{"name":"storage-primary"}}]}}'
-  ! mdbt_resolve_backup_location tenant-a database
+  if mdbt_resolve_backup_location tenant-a database; then return 1; fi
   [[ "$MDBT_S3_ERROR" == *"both S3 credential references"* ]]
 }
 

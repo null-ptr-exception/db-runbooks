@@ -33,7 +33,7 @@
 [[ -n "${_MONGODB_RECONFIG_LIB_LOADED:-}" ]] && return 0
 _MONGODB_RECONFIG_LIB_LOADED=1
 
-# Internal-config tier (CLAUDE.md "Configuration Layers"): policy knobs that
+# Internal-config tier (AGENTS.md "Configuration Layers"): policy knobs that
 # are fixed per deployment. None of these are task inputs.
 [[ -f /etc/aqsh/config/mongodb.env ]] && source /etc/aqsh/config/mongodb.env
 _RECONFIG_AUDIT_CM="${RECONFIG_AUDIT_CONFIGMAP_DEFAULT:-mongodb-reconfig-audit}"

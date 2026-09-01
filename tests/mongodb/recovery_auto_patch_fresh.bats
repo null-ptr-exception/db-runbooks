@@ -10,7 +10,7 @@
 # A single recovery/recover call against a StatefulSet that has NEITHER the
 # data-recovery init container NOR the mongodb-recovery-config ConfigMap
 # must self-heal both and complete the wipe+resync — proving an operator
-# never needs the One-Time Setup script as a precondition. See CLAUDE.md
+# never needs the One-Time Setup script as a precondition. See AGENTS.md
 # "Gate G1 self-heal" and _recovery_auto_patch_init_container in
 # aqsh-tasks/lib/mongodb-recovery.sh.
 #

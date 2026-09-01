@@ -884,7 +884,7 @@ tasks:
   # Upsert is plan -> apply with a stateless CAS plan_hash (reconfig model);
   # delete is confirm-gated. The PGP key path and the protected-secret list
   # are deliberately NOT task inputs — internal config + live auto-detect
-  # only (CLAUDE.md "Configuration Layers").
+  # only (AGENTS.md "Configuration Layers").
   secrets/pubkey:
     script: secrets/pubkey.sh
     description: "Return the deployment PGP public key callers encrypt secrets payloads against"
@@ -1028,7 +1028,7 @@ tasks:
   # Pods gateway (see docs/mariadb/pods.md). Pure Kubernetes-level Pod
   # list/delete for this namespace's MariaDB instance. The instance itself
   # is deliberately NOT a task input — same auto-detect tier as
-  # list-backups/delete-backup (CLAUDE.md "Configuration Layers").
+  # list-backups/delete-backup (AGENTS.md "Configuration Layers").
   pods/list:
     script: mariadb/pods/list.sh
     description: "Read-only: list the live Pods belonging to this namespace's MariaDB instance"

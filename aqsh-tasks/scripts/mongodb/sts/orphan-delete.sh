@@ -19,7 +19,7 @@ set -euo pipefail
 #   CONFIRM      — must be "true" when DRY_RUN is "false"
 #   LOG_LEVEL    — optional per-call log verbosity
 #
-# sts_name is deliberately NOT a task input (see CLAUDE.md "Configuration
+# sts_name is deliberately NOT a task input (see AGENTS.md "Configuration
 # Layers" / "Auto-detect tier") — resolved via recovery_resolve_sts_name:
 # internal config -> single-StatefulSet-in-namespace auto-detect ->
 # hardcoded "mongodb" fallback. This task detaches a StatefulSet from

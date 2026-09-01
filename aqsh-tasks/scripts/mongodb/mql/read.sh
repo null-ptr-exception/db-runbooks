@@ -23,7 +23,7 @@ set -euo pipefail
 # admin/local/config (plus MQL_PROTECTED_DATABASES_DEFAULT internal config)
 # are always refused (PROTECTED_DATABASE) — see docs/mongodb/mql.md.
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config -> live cluster
 # auto-detect -> hardcoded literal fallback.
 # =============================================================================

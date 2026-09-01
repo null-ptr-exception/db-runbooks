@@ -117,7 +117,7 @@ mongodb:
   updateStrategy: RollingUpdate
   # Naming convention this deployment's recovery/account/sanity-check/
   # reconfig tasks use by default (see aqsh-tasks/config/mongodb.env's
-  # *_DEFAULT keys and CLAUDE.md "Configuration Layers"). The RBAC
+  # *_DEFAULT keys and AGENTS.md "Configuration Layers"). The RBAC
   # ClusterRole below is scoped to these names — change them together.
   stsName: mongodb
   credentialSecret: mongodb-credentials

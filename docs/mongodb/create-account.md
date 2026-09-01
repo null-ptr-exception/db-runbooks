@@ -66,7 +66,7 @@ Request fields:
 - `credential_secret`, `credential_user_key`, `credential_pass_key` — deployment
   conventions sourced from internal config (`/etc/aqsh/config/mongodb.env`) by
   default; rarely need to be passed explicitly. See `docs/mongodb/recovery.md`
-  "API Reference" and CLAUDE.md "Configuration Layers".
+  "API Reference" and AGENTS.md "Configuration Layers".
 - `auth_db` (default `admin`)
 - `username`
 - `roles_json` (`[{"role":"readWrite","db":"mydb"}]`)

@@ -165,7 +165,7 @@ read API either:
    list alone applies. It never guesses.
 
 There is deliberately no per-call escape hatch — same posture as the
-`recovery/*` auto-detect tier (CLAUDE.md "Configuration Layers"). If a
+`recovery/*` auto-detect tier (AGENTS.md "Configuration Layers"). If a
 protected write is truly intended, it belongs to the owning workflow (e.g.
 PBM storage migration via `pbm/config`), not this API.
 

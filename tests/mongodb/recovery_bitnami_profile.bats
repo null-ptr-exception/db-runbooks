@@ -22,7 +22,7 @@
 #
 # It coexists with mongo-1 (profile=standard) to prove a second deployment
 # can legitimately use a different profile with zero naming/path inputs —
-# data_path/mount_path are not task inputs (see CLAUDE.md "Configuration
+# data_path/mount_path are not task inputs (see AGENTS.md "Configuration
 # Layers"); detection reads the real --dbpath this profile's mongod was
 # started with directly, no per-call override needed.
 #

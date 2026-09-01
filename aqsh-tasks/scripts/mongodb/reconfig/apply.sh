@@ -19,7 +19,7 @@ set -euo pipefail
 #   OVERRIDE_REASON      — required when the plan is warn-level
 #   REQUESTED_BY / REQUEST_ID — audit fields (free text)
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers").
 # =============================================================================
 

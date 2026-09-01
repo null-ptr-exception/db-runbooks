@@ -14,7 +14,7 @@ once per `target_pod`.
 Deployment naming/credential conventions (StatefulSet name, credential
 secret and keys) are **not task inputs** — they resolve via internal config
 → live-cluster auto-detect → hardcoded fallback, exactly like `recovery/*`
-and `fcv/*` (see CLAUDE.md "Configuration Layers").
+and `fcv/*` (see AGENTS.md "Configuration Layers").
 
 ## Table of Contents
 

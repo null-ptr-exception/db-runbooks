@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # =============================================================================
-# E2E proof that the auto-detect tier (CLAUDE.md "Configuration Layers") does
+# E2E proof that the auto-detect tier (AGENTS.md "Configuration Layers") does
 # real work, not just match the hardcoded literal by coincidence.
 #
 # recovery.bats's mongo-1 RS and recovery_custom_naming.bats both happen to

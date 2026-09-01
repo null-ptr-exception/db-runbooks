@@ -23,7 +23,7 @@ set -euo pipefail
 #                     change between plan and apply.
 #
 # The deployment PGP key path and the protected-secret list are NOT task
-# inputs (see CLAUDE.md "Configuration Layers") — internal config +
+# inputs (see AGENTS.md "Configuration Layers") — internal config +
 # live-cluster auto-detect only.
 # =============================================================================
 

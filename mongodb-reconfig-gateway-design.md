@@ -42,7 +42,7 @@ reconfig/freeze    namespace, enabled, reason
 ```
 
 sts_name / credential_* / audit CM 名稱 / DR 門檻等全部走
-internal-config → auto-detect → fallback 三層(CLAUDE.md "Configuration
+internal-config → auto-detect → fallback 三層(AGENTS.md "Configuration
 Layers"),與 recovery/* 相同,無任何 per-call 逃生口。
 
 ## 已知邊界(記錄,不假裝解決)

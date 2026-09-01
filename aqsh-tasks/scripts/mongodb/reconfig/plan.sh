@@ -14,7 +14,7 @@ set -euo pipefail
 #   RECONFIG_OPS_JSON  — JSON array of intent ops, e.g.
 #                        [{"action":"set_votes","member":"mongodb-2","votes":0}]
 #
-# sts_name/credential secret/user/keys are not task inputs (see CLAUDE.md
+# sts_name/credential secret/user/keys are not task inputs (see AGENTS.md
 # "Configuration Layers") — they resolve internal config -> live cluster
 # auto-detect -> hardcoded literal fallback.
 # =============================================================================

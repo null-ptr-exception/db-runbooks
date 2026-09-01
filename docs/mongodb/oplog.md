@@ -18,7 +18,7 @@ leave secondaries at their old size.
 Deployment naming/credential conventions (StatefulSet name, credential
 secret and keys) are **not task inputs** — they resolve via internal config
 → live-cluster auto-detect → hardcoded fallback, exactly like `recovery/*`
-and `fcv/*` (see CLAUDE.md "Configuration Layers"). Both official
+and `fcv/*` (see AGENTS.md "Configuration Layers"). Both official
 (`MONGO_INITDB_ROOT_*`) and Bitnami (`MONGODB_ROOT_*`, including
 file-mounted `*_FILE` secrets) credential conventions are detected from the
 live StatefulSet spec.

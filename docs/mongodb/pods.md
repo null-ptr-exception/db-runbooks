@@ -16,7 +16,7 @@ afterward. The two are unrelated and can be used independently.
 The StatefulSet name is **not a task input** — it resolves via internal
 config → live-cluster auto-detect (exactly one StatefulSet in the namespace)
 → hardcoded fallback, the same resolver and same fallback behavior `ops/*`
-already uses (see CLAUDE.md "Configuration Layers").
+already uses (see AGENTS.md "Configuration Layers").
 
 ## Table of Contents
 

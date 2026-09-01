@@ -14,7 +14,7 @@ set -euo pipefail
 #   LOG_LEVEL    — optional per-call log verbosity (DEBUG|INFO|WARN|ERROR)
 #
 # sts_name / agent container / storage location are not task inputs (see
-# CLAUDE.md "Configuration Layers") — they resolve internal config -> live
+# AGENTS.md "Configuration Layers") — they resolve internal config -> live
 # cluster auto-detect -> hardcoded literal fallback.
 # =============================================================================
 

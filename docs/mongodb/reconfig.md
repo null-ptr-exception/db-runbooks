@@ -8,7 +8,7 @@ projects the change, risk-checks it against live cluster facts (MongoDB
 health + Kubernetes topology), and executes it step by step.
 
 Naming/credential conventions (`sts_name`, `credential_secret`, …) are
-**not** task inputs — same auto-detect tier as `recovery/*` (see CLAUDE.md
+**not** task inputs — same auto-detect tier as `recovery/*` (see AGENTS.md
 "Configuration Layers").
 
 ---

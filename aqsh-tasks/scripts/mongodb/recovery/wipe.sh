@@ -12,7 +12,7 @@ set -euo pipefail
 #   FORCE_WIPE            — "true" to bypass 100GB gate (default: false)
 #
 # sts_name/recovery_configmap/credential secret-and-keys/data-and-mount-path
-# are not task inputs (see CLAUDE.md "Configuration Layers") — they resolve
+# are not task inputs (see AGENTS.md "Configuration Layers") — they resolve
 # internal config (/etc/aqsh/config/mongodb.env) -> live cluster auto-detect
 # -> hardcoded literal fallback.
 # =============================================================================
@@ -56,7 +56,7 @@ log_info "recovery-wipe" "Starting wipe for pod ${_TARGET} in namespace ${DB_NAM
 recovery_resolve_data_paths "$_TARGET" "$_MONGO_USER" "$_MONGO_PASS" "$_STS"
 
 # --- Phase 1: run gates (gate mode — exits on first blocking failure) ---
-# G1 self-heals a missing init container here (see CLAUDE.md "Auto-detect
+# G1 self-heals a missing init container here (see AGENTS.md "Auto-detect
 # tier"); _AUTO_PATCHED carries that into the final output below so a
 # caller doesn't need to separately inspect the StatefulSet to know.
 log_info "recovery-wipe" "Running pre-flight gates (gate mode)"

@@ -94,7 +94,7 @@ where the data lives, and the gates must authenticate as a real MongoDB
 user. None of `sts_name`, `recovery_configmap`, `credential_secret`,
 `credential_user`, `credential_user_key`, `credential_pass_key`,
 `data_path`, or `mount_path` are task inputs — there is no per-call way to
-pass any of them (see CLAUDE.md "Configuration Layers" for why: these
+pass any of them (see AGENTS.md "Configuration Layers" for why: these
 tasks operate on something close to a destructive action, so the API
 surface is deliberately kept to `namespace` + the genuinely per-call
 operational decisions). Resolution is a 3-tier chain with no task-input
@@ -318,7 +318,7 @@ aqsh-tasks/scripts/mongodb/recovery/setup-data-recovery.sh \
 > real path live from mongod (see "Data Paths and Credentials Are
 > Auto-Detected" above). Internal config (`RECOVERY_DATA_PATH_DEFAULT`/
 > `RECOVERY_MOUNT_PATH_DEFAULT`) remains available only for deployments
-> where detection can't resolve it. See CLAUDE.md "Configuration Layers".
+> where detection can't resolve it. See AGENTS.md "Configuration Layers".
 
 ---
 
@@ -338,7 +338,7 @@ Task timeouts (from `tasks-mongodb.yaml`): `recover` 12m, `wipe` 10m,
 > `*_DEFAULT` keys) → live cluster auto-detect → hardcoded library fallback.
 > There is no per-call override; if a deployment's convention is too unusual
 > for detection to resolve, internal config is the only escape hatch. See
-> CLAUDE.md "Configuration Layers" for the full precedence rule and the
+> AGENTS.md "Configuration Layers" for the full precedence rule and the
 > "Data Paths and Credentials Are Auto-Detected" section above for how
 > detection works.
 
@@ -935,7 +935,7 @@ rules:
 > deploy-time concern independent of whether the script learns the name via
 > internal config or by detecting it live; `sts_name`/`credential_secret`/
 > `recovery_configmap` are not task inputs, so there is no caller-supplied
-> name that needs separate RBAC consideration. See CLAUDE.md "Configuration
+> name that needs separate RBAC consideration. See AGENTS.md "Configuration
 > Layers".
 
 **Not required**: `persistentvolumeclaims/delete`, node access,

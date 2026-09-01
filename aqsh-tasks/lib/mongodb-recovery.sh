@@ -27,7 +27,7 @@
 _MONGODB_RECOVERY_LIB_LOADED=1
 
 # Data paths vary by MongoDB deployment type; resolved 3 tiers deep. Not a
-# task input (see CLAUDE.md "Configuration Layers" — recovery/* deliberately
+# task input (see AGENTS.md "Configuration Layers" — recovery/* deliberately
 # doesn't expose deployment-naming-convention fields at the API layer; only
 # internal config remains as an explicit override):
 #   1. RECOVERY_DATA_PATH_DEFAULT/RECOVERY_MOUNT_PATH_DEFAULT (deploy-time internal
@@ -186,7 +186,7 @@ _recovery_mongosh_host() {
 # Auto-detect functions
 #
 # Sit between "internal config" and "hardcoded literal" in the resolution
-# chain (CLAUDE.md "Configuration Layers"): sts_name/recovery_configmap/
+# chain (AGENTS.md "Configuration Layers"): sts_name/recovery_configmap/
 # credential secret-and-keys/data_path/mount_path are NOT task inputs — when
 # no /etc/aqsh/config/mongodb.env *_DEFAULT is set, these discover the real
 # naming convention from live cluster state instead of guessing a Bitnami-vs-
@@ -255,7 +255,7 @@ _recovery_detect_headless_service() {
 
 # ---------------------------------------------------------------------------
 # recovery_resolve_headless_service <sts_name>
-# Standard 3-tier resolution (CLAUDE.md "Configuration Layers") for the
+# Standard 3-tier resolution (AGENTS.md "Configuration Layers") for the
 # headless Service name used in pod seed FQDNs:
 #   1. MONGO_HEADLESS_SVC_DEFAULT (internal config) — the escape hatch when
 #      live detection can't run (e.g. RBAC denies the STS get)
@@ -540,7 +540,7 @@ _recovery_detect_run_as_user() {
 # recovery_wipe_pod/recovery_reset already require: `create` on configmaps
 # (unscoped — Kubernetes RBAC ignores resourceNames for create requests, so
 # it can't be pinned to just the recovery ConfigMap's name; see
-# tests/chart/templates/mongodb-rbac.yaml and CLAUDE.md "Auto-detect tier").
+# tests/chart/templates/mongodb-rbac.yaml and AGENTS.md "Auto-detect tier").
 # The ConfigMap is created via apply (not create), so a concurrent caller
 # creating the same one is a no-op, not a race.
 #
@@ -724,7 +724,7 @@ EOF
 # ---------------------------------------------------------------------------
 # recovery_resolve_sts_name <explicit> [target_pod]
 # <explicit> is whatever the caller already resolved from the internal-config
-# tier (empty if unset — sts_name is not a task input; see CLAUDE.md
+# tier (empty if unset — sts_name is not a task input; see AGENTS.md
 # "Configuration Layers"). Centralizes the detect-then-fallback step so every
 # recovery/*.sh script doesn't reimplement it inline.
 # ---------------------------------------------------------------------------
@@ -756,7 +756,7 @@ recovery_resolve_configmap() {
 # ---------------------------------------------------------------------------
 # recovery_resolve_credentials <secret> <direct_user> <user_key> <pass_key> <sts_name>
 # All 4 args are whatever the caller already resolved from the internal-
-# config tier (credentials are not a task input; see CLAUDE.md "Configuration
+# config tier (credentials are not a task input; see AGENTS.md "Configuration
 # Layers"). Detection only runs when ALL FOUR are empty — a deployment that
 # declared even one credential field via internal config has signaled it
 # already knows its convention, so partial detection (which could silently
@@ -1297,7 +1297,7 @@ recovery_run_gates() {
   # G1: init container present. In gate mode (wipe/recover — pre-check's
   # report mode must stay read-only) a missing container is self-healed once
   # via _recovery_auto_patch_init_container before the recorded check below
-  # runs — see CLAUDE.md "Auto-detect tier". Fails soft: if it can't
+  # runs — see AGENTS.md "Auto-detect tier". Fails soft: if it can't
   # self-heal (ConfigMap missing too, or no confident mount signal), G1
   # below just fails exactly as it always has.
   if [[ "$mode" == "gate" ]]; then

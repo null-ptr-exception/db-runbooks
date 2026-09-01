@@ -79,7 +79,7 @@ reuses.
 | `confirm` | no | `"false"` | Must be `"true"` when `dry_run="false"` |
 | `log_level` | no | — | `DEBUG`/`INFO`/`WARN`/`ERROR` |
 
-`sts_name` is **not** a task input — see CLAUDE.md "Configuration Layers" /
+`sts_name` is **not** a task input — see AGENTS.md "Configuration Layers" /
 "Auto-detect tier". This task detaches a StatefulSet from control of its
 own Pods, so the API surface is kept to just `namespace` plus the
 dry_run/confirm gate, matching the `recovery/*`/`reconfig/*`/`fcv/*`/`pbm/*`

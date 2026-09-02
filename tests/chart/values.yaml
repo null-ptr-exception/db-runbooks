@@ -156,6 +156,15 @@ nginx:
 curl:
   enabled: false
 
+# --- vault (dev-mode, for migration credential relay) ---
+vault:
+  enabled: false
+  image: hashicorp/vault:1.15
+  # Sandbox-only: a fixed dev root token, never used past provisioning
+  # (setup_suite.bash uses it once to create an AppRole, then aqsh talks to
+  # Vault via that AppRole instead). Not a real secret.
+  devRootToken: vault-dev-root-token
+
 # --- Istio VirtualServices (route through shared-gateway) ---
 gateway:
   enabled: false

@@ -699,6 +699,444 @@ tasks:
         required: false
         type: string
         default: "false"
+  migration/export-db-env-to-vault:
+    script: mariadb/migration/export-db-env-to-vault.sh
+    description: "Read values from a MariaDB pod's environment and/or an existing Kubernetes Secret, and write them to a Vault KV-v2 path — values are never returned in the task result or logged, since this task is reachable by any system:serviceaccounts caller. At least one of (mdb + envs) or (secret_name + secret_keys) is required; both may be given together. Each envs/secret_keys entry may be NAME or NAME=vault_key to store it under a different Vault key; all found values land in one Vault write. Requires Vault AppRole to be configured as deploy-time internal config (VAULT_ADDR/VAULT_MOUNT/VAULT_ROLE_ID/VAULT_SECRET_ID); fails clearly with VAULT_NOT_CONFIGURED otherwise."
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      # mdb is required only when envs is given (validated in-script, not
+      # here): this task reads pod credentials off a specific instance on
+      # purpose, so the caller must name it explicitly rather than risk a
+      # silently-wrong target if the namespace's instance set changes.
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+        default: ""
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      # Comma-separated; each entry is VAR or VAR=vault_key (e.g.
+      # "MARIADB_ROOT_PASSWORD=root_password,MARIADB_DATABASE"). Required
+      # together with mdb, unless secret_name/secret_keys are given instead.
+      - name: envs
+        env: ENVS_STR
+        required: false
+        type: string
+        default: ""
+      # secret_name/secret_keys: an alternative (combinable) source to envs —
+      # reads from an existing Secret instead of a pod's env, for credentials
+      # that never appear as pod env vars (e.g. a non-root account's password,
+      # which create-account stores in a Secret, not the pod's environment).
+      # secret_name is required only when secret_keys is given.
+      - name: secret_name
+        env: SECRET_NAME
+        required: false
+        type: string
+        default: ""
+      # Comma-separated; each entry is KEY or KEY=vault_key.
+      - name: secret_keys
+        env: SECRET_KEYS_STR
+        required: false
+        type: string
+        default: ""
+      # vault_path is where the values land, not who can write them: Vault
+      # identity (VAULT_ROLE_ID/VAULT_SECRET_ID) stays deploy-time-only config
+      # (see script header) so a caller can never redirect writes under a
+      # different Vault identity than this deployment's.
+      - name: vault_path
+        env: VAULT_PATH
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9._/-]+$'
+  migration/import-db-env-from-vault:
+    script: mariadb/migration/import-db-env-from-vault.sh
+    description: "Read a Vault KV-v2 path written by migration/export-db-env-to-vault and materialize its values as a Kubernetes Secret — values are never returned in the task result or logged, since this task is reachable by any system:serviceaccounts caller. Each keys entry may be VAULT_KEY or VAULT_KEY=secret_key to store it under a different Secret key than its Vault key name; omit keys entirely to import every key at the path. The Secret write is idempotent — re-running updates it in place. Requires Vault AppRole to be configured as deploy-time internal config (VAULT_ADDR/VAULT_MOUNT/VAULT_ROLE_ID/VAULT_SECRET_ID); fails clearly with VAULT_NOT_CONFIGURED otherwise."
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: vault_path
+        env: VAULT_PATH
+        required: true
+        type: string
+        pattern: '^[A-Za-z0-9._/-]+$'
+      # secret_name is the Kubernetes Secret this task creates/updates in
+      # namespace — caller picks it so e.g. migration/setup-replication's
+      # --repl-password-secret can reference it directly.
+      - name: secret_name
+        env: SECRET_NAME
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # Comma-separated; each entry is VAULT_KEY or VAULT_KEY=secret_key.
+      # Omit to import every key at vault_path as-is.
+      - name: keys
+        env: KEYS_STR
+        required: false
+        type: string
+        default: ""
+  migration/preflight:
+    script: mariadb/migration/migration-preflight.sh
+    description: "Pre-flight readiness checks for a MariaDB migration source: pod exec and MinIO connectivity. MinIO options fall back to this deployment's MINIO_*_DEFAULT internal config when omitted."
+    timeout: 3m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: resource
+        env: MARIADB_RESOURCE
+        required: false
+        type: string
+        default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: container
+        env: MARIADB_CONTAINER
+        required: false
+        type: string
+        default: mariadb
+      # Each falls back to this deployment's MINIO_*_DEFAULT internal config
+      # (aqsh-tasks/config/mariadb.env) when omitted; MinIO checks are skipped
+      # with WARN only if still unset after that.
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: false
+        type: string
+        default: ""
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: ""
+  migration/check-connection:
+    script: mariadb/migration/check-connection.sh
+    description: "Check if a MariaDB pod can connect to a given host IP, then compare @@server_id on both sides to flag a replication collision risk. Authenticates with repl_password_secret if given (e.g. a source password relayed via migration/import-db-env-from-vault), else the pod's own MARIADB_ROOT_PASSWORD."
+    timeout: 2m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: ip
+        env: TARGET_IP
+        required: true
+        type: string
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      - name: port
+        env: TARGET_PORT
+        required: false
+        type: string
+        default: "3306"
+      # Password to authenticate the target IP with. Defaults to using the
+      # pod's own MARIADB_ROOT_PASSWORD, which only makes sense when the
+      # target shares that password. For a cross-cluster check with a
+      # differently-credentialed source, point this at the Secret
+      # migration/import-db-env-from-vault relayed the source's password into.
+      - name: repl_password_secret
+        env: REPL_PASSWORD_SECRET
+        required: false
+        type: string
+        default: ""
+      - name: repl_password_key
+        env: REPL_PASSWORD_KEY
+        required: false
+        type: string
+        default: password
+  migration/setup-replication:
+    script: mariadb/migration/setup-replication.sh
+    description: "Configure a MariaDB GTID replication channel. Authenticates as repl_user (default root); repl_password_secret is required for every real (dry_run=false) run regardless of repl_user — the target pod's own root password is only used as a repl_user=root, dry_run=true SQL-plan-preview convenience, never on a real run. After START SLAVE, polls the channel's Slave_IO_Running/Slave_SQL_Running for a few seconds and reports ERROR/REPLICATION_NOT_HEALTHY rather than a false DONE if the channel never comes up."
+    timeout: 5m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: host
+        env: REPL_HOST
+        required: true
+        type: string
+      - name: channel
+        env: REPL_CHANNEL
+        required: false
+        type: string
+        default: ""
+      - name: port
+        env: REPL_PORT
+        required: false
+        type: string
+        default: "3306"
+      - name: delay
+        env: REPL_DELAY
+        required: false
+        type: string
+        default: ""
+      - name: async
+        env: REPL_ASYNC
+        required: false
+        type: string
+        default: "false"
+      # - name: resource
+      #   env: MARIADB_RESOURCE
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      - name: mdb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      # - name: container
+      #   env: MARIADB_CONTAINER
+      #   required: false
+      #   type: string
+      #   default: mariadb
+      # Account CHANGE MASTER authenticates as. Default: root. Non-root
+      # requires repl_password_secret — there is no sensible default password
+      # for an arbitrary user (see setup-replication.sh validation).
+      - name: repl_user
+        env: REPL_USER
+        required: false
+        type: string
+        default: root
+      - name: repl_password_secret
+        env: REPL_PASSWORD_SECRET
+        required: false
+        type: string
+        default: ""
+      - name: repl_password_key
+        env: REPL_PASSWORD_KEY
+        required: false
+        type: string
+        default: password
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  migration/restore:
+    script: mariadb/migration/restore.sh
+    description: "Restore a MariaDB instance from a specific physical backup at a caller-specified MinIO endpoint. backup_file is the S3 prefix path to the exact backup directory (sets bootstrapFrom.s3.prefix directly). MinIO options fall back to this deployment's MINIO_*_DEFAULT internal config when omitted. Fails clearly if the backup cannot be found in MinIO before applying anything. The minio_secret_key is written to a temporary Kubernetes Secret and never logged or returned. image and storage_size are auto-detected from any existing instance in the namespace; required inputs for a fresh migration-destination namespace. root_secret_name/root_secret_key default to the platform's own convention (mariadb/password); a migration caller can point them at the Secret migration/import-db-env-from-vault relayed the source's real root password into."
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # backup_file is the S3 prefix path to the exact backup directory, e.g.
+      # mariadb/source-ns/mariadb-migration-20260712143022. Used directly as
+      # bootstrapFrom.s3.prefix — the operator restores that specific backup.
+      - name: backup_file
+        env: BACKUP_FILE
+        required: true
+        type: string
+      # Each falls back to this deployment's MINIO_*_DEFAULT internal config
+      # (aqsh-tasks/config/mariadb.env) when omitted; the task fails clearly
+      # if still unset after that.
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: false
+        type: string
+        default: ""
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: false
+        type: string
+        default: ""
+      # minio_secret_key is sensitive: the script writes it to a temporary
+      # Kubernetes Secret and unsets the env var before any CR is applied.
+      # The raw value never appears in logs or the result JSON.
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: ""
+      # image and storage_size: auto-detected from the namespace's existing
+      # MariaDB CR when omitted. Required for a fresh destination namespace.
+      - name: image
+        env: RESTORE_IMAGE
+        required: false
+        type: string
+        default: ""
+      - name: storage_size
+        env: STORAGE_SIZE
+        required: false
+        type: string
+        default: ""
+      - name: target
+        env: RESTORE_TARGET
+        required: false
+        type: string
+        default: ""
+      # Root credential Secret the restored CR's rootPasswordSecretKeyRef
+      # points at. Defaults to the platform's own convention ("mariadb"/
+      # "password") when omitted. A migration caller sets these to point at
+      # the Secret migration/import-db-env-from-vault relayed the source's
+      # real root password into — otherwise the operator's Ready-probe
+      # authenticates against the physically-restored DB with whatever
+      # unrelated password the destination namespace's default secret holds.
+      - name: root_secret_name
+        env: ROOT_SECRET_NAME
+        required: false
+        type: string
+        default: ""
+      - name: root_secret_key
+        env: ROOT_SECRET_KEY
+        required: false
+        type: string
+        default: ""
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # Unlike other wait_timeout inputs, "0" (skip-wait) is rejected: the
+      # MinIO credential Secret is temporary and deleted when this task exits,
+      # so the operator must be given time to read it before that happens.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+  migration/sourcedb-backup:
+    script: mariadb/migration/sourcedb-backup.sh
+    description: "Physical (mariabackup) backup of a migration source MariaDB to a caller-specified external MinIO endpoint. MinIO options fall back to this deployment's MINIO_*_DEFAULT internal config when omitted, same as migration/preflight. The minio_secret_key is written immediately to a temporary Kubernetes Secret and never logged or returned in the result."
+    timeout: 20m
+    allowed_groups: ["system:serviceaccounts"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      # Each falls back to this deployment's MINIO_*_DEFAULT internal config
+      # (aqsh-tasks/config/mariadb.env) when omitted; the task fails clearly
+      # if still unset after that.
+      - name: minio_endpoint
+        env: MINIO_ENDPOINT
+        required: false
+        type: string
+        default: ""
+      - name: minio_access_key
+        env: MINIO_ACCESS_KEY
+        required: false
+        type: string
+        default: ""
+      # minio_secret_key is sensitive: the script writes it to a temporary
+      # Kubernetes Secret immediately and unsets the env var before any backup
+      # CR is applied. The raw value never appears in logs or the result JSON.
+      - name: minio_secret_key
+        env: MINIO_SECRET_KEY
+        required: false
+        type: string
+        default: ""
+      - name: minio_bucket
+        env: MINIO_BUCKET
+        required: false
+        type: string
+        default: ""
+      - name: mariadb
+        env: MARIADB_NAME
+        required: false
+        type: string
+      - name: target
+        env: BACKUP_TARGET
+        required: false
+        type: string
+        default: PreferReplica
+      - name: compression
+        env: BACKUP_COMPRESSION
+        required: false
+        type: string
+        default: bzip2
+      - name: backup_name
+        env: BACKUP_NAME
+        required: false
+        type: string
+        default: ""
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+      # Unlike other wait_timeout inputs, "0" (skip-wait) is rejected: the
+      # MinIO credential Secret is temporary and deleted when this task exits,
+      # so the operator must be given time to read it before that happens.
+      - name: wait_timeout
+        env: WAIT_TIMEOUT
+        required: false
+        type: string
+        default: 10m
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
   backup:
     script: backup/backup-mariadb.sh
     description: "Create a logical backup for the database identified by namespace"

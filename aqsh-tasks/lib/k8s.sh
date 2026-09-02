@@ -659,6 +659,38 @@ k8s_get_secret() {
 }
 
 # ---------------------------------------------------------------------------
+# k8s_secret_value <secret_name> <key>
+# Read and base64-decode a single key out of a Secret. Prints the decoded
+# value to stdout (rc 0), or nothing (rc 1) if the Secret, key, or decoded
+# value doesn't resolve to something non-empty. No log_info/log_error here on
+# purpose — callers of this (credential relay tasks) must not log the fact
+# that a lookup succeeded/failed in a way that could hint at key names, and
+# some callers treat "not found" as a normal, expected branch, not an error.
+# ---------------------------------------------------------------------------
+k8s_secret_value() {
+  local secret_name="${1:?secret_name is required}"
+  local key="${2:?key is required}"
+
+  # -o json + jq map-key lookup, not jsonpath: jsonpath's {.data.<key>}
+  # treats "." as a field separator, so a key containing a literal "."
+  # (e.g. "tls.crt") would be misread as nested traversal instead of one
+  # flat Secret data key.
+  local secret_json
+  secret_json=$(_kubectl get secret "$secret_name" -o json 2>/dev/null) || return 1
+  [[ -n "$secret_json" ]] || return 1
+
+  local encoded
+  encoded=$(printf '%s' "$secret_json" | jq -r --arg k "$key" '.data[$k] // empty' 2>/dev/null) || return 1
+  [[ -n "$encoded" ]] || return 1
+
+  local value
+  value=$(printf '%s' "$encoded" | base64 -d 2>/dev/null) || return 1
+  [[ -n "$value" ]] || return 1
+
+  printf '%s' "$value"
+}
+
+# ---------------------------------------------------------------------------
 # k8s_top_pods
 # Get CPU/memory usage of pods (requires metrics-server).
 # Returns: JSON response with raw text output.

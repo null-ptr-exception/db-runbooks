@@ -82,7 +82,9 @@ _assess_linked() {
   [ "$(jq -r '.reason' "$MDBT_RESULT_FILE")" = "INTERNAL_ERROR" ]
 }
 
-@test "peer token is read from a non-empty projected service-account file" {
+@test "peer token falls back to a non-empty projected service-account file" {
+  # TokenRequest minting is skipped when the in-cluster namespace file is absent
+  # (unit tests are out of cluster); the projected file remains the fallback.
   local token_file="$BATS_TEST_TMPDIR/token"
   printf 'federated-service-account-token' > "$token_file"
 
@@ -101,7 +103,31 @@ _assess_linked() {
   [ "$status" -ne 0 ]
 }
 
-# --- peer address ------------------------------------------------------------
+@test "peer token prefers a minted TokenRequest bearer over the projected file" {
+  local token_file="$BATS_TEST_TMPDIR/token"
+  printf '%s' 'eyJhbGciOiJub25lIn0.eyJrdWJlcm5ldGVzLmlvIjp7InNlcnZpY2VhY2NvdW50Ijp7Im5hbWUiOiJrdWJlLWF1dGgtcHJveHkifX19.sig' > "$token_file"
+
+  run mdbr_service_account_name "$token_file"
+  [ "$status" -eq 0 ]
+  [ "$output" = "kube-auth-proxy" ]
+
+  # Mint path: mock TokenRequest and the in-cluster namespace file.
+  run bash -c "
+    set -euo pipefail
+    export LIB_DIR=\"$LIB_DIR\"
+    source \"\$LIB_DIR/mariadb-replication-link.sh\"
+    _kubectl_global() { printf minted-peer-token; }
+    cat() {
+      if [[ \$1 == /var/run/secrets/kubernetes.io/serviceaccount/namespace ]]; then
+        printf db-ops; return 0
+      fi
+      command cat \"\$@\"
+    }
+    mdbr_read_peer_token \"$token_file\"
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "minted-peer-token" ]
+}
 
 @test "peer host is derived from the namespace alone" {
   run mdbr_peer_host "mariadb-1"

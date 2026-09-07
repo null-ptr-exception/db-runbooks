@@ -95,8 +95,17 @@ setup() {
   # Called without `run` so MDBT_PEER_ERR lands in this shell.
   mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}' || true
   [ "$(jq -r '.stage' <<<"$MDBT_PEER_ERR")" = "peer-operation" ]
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_REQUEST_REJECTED" ]
   # No backend diagnostics leak into the marker.
   [[ "$MDBT_PEER_ERR" != *"bad request"* ]]
+}
+
+@test "auth failures are classified without leaking response bodies" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}' || true
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_AUTH_FAILED" ]
+  [[ "$MDBT_PEER_ERR" != *"unauthorized"* ]]
 }
 
 @test "a failed peer task is reported as a failure" {

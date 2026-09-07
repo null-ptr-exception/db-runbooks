@@ -202,7 +202,9 @@ if [[ "$ACTION" == "rebuild" ]]; then
       '{namespace:$ns,dry_run:"false",confirm:"true",wait_timeout:$timeout}')" \
     "$MDBR_PEER_TASK_TIMEOUT")"; then
     mdbt_fail "$OP" "a fresh backup could not be produced on the primary" \
-      "$(_assessment_data backup false)" 1 PEER_OPERATION_FAILED
+      "$(jq -nc --argjson base "$(_assessment_data backup false)" \
+        --argjson peer "${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}" \
+        '$base + {peer: $peer}')" 1 PEER_OPERATION_FAILED
   fi
   BACKUP_NAME="$(jq -r '.backupName // empty' <<<"$PEER_BACKUP")"
   if ! mdbt_validate_silently mdbt_validate_dns_label \

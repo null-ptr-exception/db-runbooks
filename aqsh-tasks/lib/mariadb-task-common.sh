@@ -441,19 +441,26 @@ mdbt_peer_call_task() {
     curl_rc=$?
   fi
   if (( curl_rc != 0 )); then
-    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_UNREACHABLE"}'
     return 1
   fi
 
   code="$(printf '%s' "$submit" | tail -n1)"
   body="$(printf '%s' "$submit" | sed '$d')"
   if [[ "$code" != "202" ]]; then
-    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    # Keep the marker public-safe: HTTP class only, never the response body
+    # (which can carry auth diagnostics).
+    case "$code" in
+      401|403) MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_AUTH_FAILED"}' ;;
+      400)     MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_REQUEST_REJECTED"}' ;;
+      *)       MDBT_PEER_ERR="$(jq -nc --arg code "$code" \
+                 '{stage:"peer-operation",reason:"PEER_SUBMIT_FAILED",httpStatus:$code}')" ;;
+    esac
     return 1
   fi
   task_id="$(jq -r '.id // empty' <<<"$body" 2>/dev/null || true)"
   if [[ -z "$task_id" ]]; then
-    MDBT_PEER_ERR='{"stage":"peer-operation"}'
+    MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_SUBMIT_FAILED"}'
     return 1
   fi
 
@@ -466,7 +473,7 @@ mdbt_peer_call_task() {
       curl_rc=$?
     fi
     if (( curl_rc != 0 )); then
-      MDBT_PEER_ERR='{"stage":"peer-operation"}'
+      MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_UNREACHABLE"}'
       return 1
     fi
     status="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
@@ -480,13 +487,13 @@ mdbt_peer_call_task() {
         return 0
         ;;
       failed)
-        MDBT_PEER_ERR='{"stage":"peer-operation"}'
+        MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_TASK_FAILED"}'
         return 1
         ;;
     esac
     sleep 5
   done
 
-  MDBT_PEER_ERR='{"stage":"peer-operation"}'
+  MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_TASK_TIMEOUT"}'
   return 1
 }

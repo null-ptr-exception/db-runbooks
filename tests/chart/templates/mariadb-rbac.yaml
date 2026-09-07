@@ -76,4 +76,33 @@ subjects:
     name: kube-auth-proxy
     namespace: {{ $root.Release.Namespace }}
 {{- end }}
+
+---
+# Mint TokenRequest tokens for peer AQSH auth. Projected volume tokens are
+# audience-bound to the local apiserver; replication/attach mints a reviewable
+# bearer for the federated TokenReview path. Scoped to this ServiceAccount only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aqsh-peer-token
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["kube-auth-proxy"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aqsh-peer-token
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aqsh-peer-token
+subjects:
+  - kind: ServiceAccount
+    name: kube-auth-proxy
+    namespace: {{ .Release.Namespace }}
 {{- end }}

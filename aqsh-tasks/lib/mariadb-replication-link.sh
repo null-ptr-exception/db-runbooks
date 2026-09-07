@@ -98,12 +98,47 @@ mdbr_peer_host() {
   printf '%s%s.%s.svc.cluster.local' "$ns" "$MDBR_PEER_SUFFIX" "$ns"
 }
 
+# mdbr_service_account_name <projected-token-file>
+# Resolve this workload's ServiceAccount name from the projected JWT. Used to
+# mint a TokenRequest for peer AQSH auth; the projected volume token itself is
+# audience-bound to the local apiserver and often fails peer TokenReview.
+mdbr_service_account_name() {
+  local token_file="${1:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
+  local token payload padded name
+  [[ -r "$token_file" ]] || return 1
+  token="$(<"$token_file")"
+  [[ -n "$token" ]] || return 1
+  payload="${token#*.}"
+  payload="${payload%%.*}"
+  [[ -n "$payload" ]] || return 1
+  padded="$payload$(printf '%*s' $(( (4 - ${#payload} % 4) % 4 )) '' | tr ' ' '=')"
+  name="$(printf '%s' "$padded" | tr '_-' '/+' | base64 -d 2>/dev/null     | jq -r '."kubernetes.io".serviceaccount.name // empty' 2>/dev/null)" || return 1
+  [[ -n "$name" ]] || return 1
+  printf '%s' "$name"
+}
+
 # mdbr_read_peer_token <projected-token-file>
-# Peer authentication is workload identity, not caller input. Read the token
-# only when a rebuild actually needs to call the peer AQSH and fail closed on a
-# missing or empty projection.
+# Peer authentication is workload identity, not caller input. Prefer a freshly
+# minted TokenRequest token: projected volume tokens are audience-bound to the
+# local apiserver, while peer AQSH auth goes through federated TokenReview and
+# needs a reviewable bearer (the same shape `kubectl create token` produces).
+# Fall back to the projected file only when minting is unavailable. Fail closed
+# when neither yields a non-empty token.
 mdbr_read_peer_token() {
-  local token_file="$1" token
+  local token_file="$1" token sa_ns sa_name
+  local ttl="${MDBR_PEER_TOKEN_TTL:-30m}"
+
+  sa_ns="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || true)"
+  if [[ -n "$sa_ns" ]] && sa_name="$(mdbr_service_account_name "$token_file")"; then
+    # Use _kubectl_global: task K8S_NAMESPACE is the MariaDB namespace, but the
+    # ServiceAccount lives in the AQSH release namespace (e.g. db-ops).
+    token="$(_kubectl_global -n "$sa_ns" create token "$sa_name" --duration="$ttl" 2>/dev/null || true)"
+    if [[ -n "$token" ]]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  fi
+
   [[ -r "$token_file" ]] || return 1
   token="$(<"$token_file")"
   [[ -n "$token" ]] || return 1

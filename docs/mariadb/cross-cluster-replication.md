@@ -180,7 +180,8 @@ in place. Repeating detach after the link is gone is a successful no-op.
   credential from B.
 - Both workloads resolve the same S3 endpoint, bucket, prefix, and credentials.
 - AQSH B has an A AQSH URL, and A's TokenReview policy trusts B's AQSH service
-  account. B reads its projected token internally; callers never submit it.
+  account. B mints a TokenRequest bearer for the peer call (falling back to its
+  projected token); callers never submit a peer credential.
 
 Relevant deployment configuration:
 
@@ -192,7 +193,7 @@ Relevant deployment configuration:
 | `REPL_IGNORED_ACCOUNTS_DEFAULT` | platform account list | Sessions excluded from the guard. |
 | `REPL_PEER_CONNECT_TIMEOUT_DEFAULT` | `10` | Peer SQL connection timeout in seconds. |
 | `REPL_PEER_AQSH_URL_DEFAULT` | unset | Primary AQSH URL used to request a backup. |
-| `REPL_PEER_TOKEN_FILE_DEFAULT` | projected service-account token | Internal token used for the peer AQSH call. |
+| `REPL_PEER_TOKEN_FILE_DEFAULT` | projected service-account token | Fallback token file; attach prefers a minted TokenRequest bearer for peer AQSH auth. |
 | `REPL_PEER_TASK_TIMEOUT_DEFAULT` | `900` | Maximum peer backup task wait. |
 | `REPL_SERVER_ID_START_INDEX_DEFAULT` | unset | v24 standby server-id base; use a range disjoint from the peer. |
 

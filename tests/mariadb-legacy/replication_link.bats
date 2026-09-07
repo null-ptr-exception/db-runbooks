@@ -31,6 +31,17 @@ setup_file() {
 
   TOKEN=$(kubectl --context "$CTX_B" -n "$NS" create token test-client --duration=60m)
 
+  # physical_backup_restore.bats may leave a provisioned restore CR if its
+  # teardown raced; peer physical-backup autodetect needs a single MariaDB CR.
+  local restore_target
+  while IFS= read -r restore_target; do
+    [[ -n "$restore_target" ]] || continue
+    kubectl --context "$CTX_A" -n "$DB_NS" delete mariadb "$restore_target" --ignore-not-found >/dev/null 2>&1 || true
+    kubectl --context "$CTX_A" -n "$DB_NS" wait --for=delete "mariadb/${restore_target}" --timeout=180s >/dev/null 2>&1 || true
+  done < <(kubectl --context "$CTX_A" -n "$DB_NS" get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | sed -n '/^mariadb-1-restore-[0-9]\{14\}$/p')
+
   export CTX_A CTX_B NS DB_NS AQSH_A_URL AQSH_B_URL TEST_POD TOKEN
 }
 

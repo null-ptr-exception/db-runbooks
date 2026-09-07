@@ -128,6 +128,29 @@ _assess_linked() {
   [ "$output" = "minted-from-config" ]
 }
 
+@test "peer token fails closed when deploy-time SA minting fails" {
+  local token_file="$BATS_TEST_TMPDIR/token"
+  printf 'projected-fallback' > "$token_file"
+
+  run bash -c "
+    set -euo pipefail
+    export LIB_DIR=\"$LIB_DIR\"
+    source \"\$LIB_DIR/mariadb-replication-link.sh\"
+    MDBR_PEER_TOKEN_SA=kube-auth-proxy
+    _kubectl_global() { return 1; }
+    cat() {
+      if [[ \$1 == /var/run/secrets/kubernetes.io/serviceaccount/namespace ]]; then
+        printf db-ops; return 0
+      fi
+      command cat \"\$@\"
+    }
+    mdbr_read_peer_token \"$token_file\"
+  "
+  [ "$status" -ne 0 ]
+  # Must not leak the projected bearer when TokenRequest was required.
+  [[ "$output" != *projected-fallback* ]]
+}
+
 @test "peer token prefers a minted TokenRequest bearer over the projected file" {
   local token_file="$BATS_TEST_TMPDIR/token"
   printf '%s' 'eyJhbGciOiJub25lIn0.eyJrdWJlcm5ldGVzLmlvIjp7InNlcnZpY2VhY2NvdW50Ijp7Im5hbWUiOiJrdWJlLWF1dGgtcHJveHkifX19.sig' > "$token_file"

@@ -120,3 +120,31 @@ setup() {
   run mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}'
   [ "$status" -eq 1 ]
 }
+
+@test "capture helper keeps MDBT_PEER_ERR in the current shell on failure" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  out="stale"
+  # Must NOT use `run` / $(...) here — that is the footgun under test.
+  mdbt_peer_call_task_capture out "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}' || true
+  [ -z "$out" ]
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_AUTH_FAILED" ]
+}
+
+@test "capture helper stores peer result JSON on success" {
+  out=""
+  mdbt_peer_call_task_capture out "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}'
+  [ "$(jq -r '.ok' <<<"$out")" = "true" ]
+}
+
+@test "command substitution drops MDBT_PEER_ERR (the attach footgun)" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  MDBT_PEER_ERR='{"stage":"peer-operation","reason":"STALE"}'
+  # Intentionally wrong call shape — documents why attach must use capture.
+  out="$(mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}')" || true
+  # Parent shell still sees the pre-call value; the real reason lived only in the subshell.
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "STALE" ]
+}

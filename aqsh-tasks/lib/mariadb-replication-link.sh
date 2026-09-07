@@ -131,11 +131,14 @@ mdbr_service_account_name() {
 mdbr_read_peer_token() {
   local token_file="$1" token sa_ns sa_name
   local ttl="${MDBR_PEER_TOKEN_TTL:-30m}"
+  local sa_configured=0
 
   sa_ns="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || true)"
   # Prefer deploy-time SA name; JWT parse is only a fallback when unset.
   sa_name="${MDBR_PEER_TOKEN_SA:-}"
-  if [[ -z "$sa_name" ]]; then
+  if [[ -n "$sa_name" ]]; then
+    sa_configured=1
+  else
     sa_name="$(mdbr_service_account_name "$token_file" 2>/dev/null || true)"
   fi
   if [[ -n "$sa_ns" && -n "$sa_name" ]]; then
@@ -147,6 +150,13 @@ mdbr_read_peer_token() {
     if [[ -n "$token" ]]; then
       printf '%s' "$token"
       return 0
+    fi
+    # Deploy-time SA means TokenRequest is required. Falling back to the
+    # projected volume token would only produce PEER_AUTH_FAILED later: that
+    # bearer is audience-bound to the local apiserver and fails federated
+    # TokenReview on the peer.
+    if [[ "$sa_configured" -eq 1 ]]; then
+      return 1
     fi
   fi
 

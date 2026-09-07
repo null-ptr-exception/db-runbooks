@@ -196,11 +196,14 @@ if [[ "$ACTION" == "rebuild" ]]; then
       "$(_assessment_data assess false)" 1 PEER_CONFIGURATION_UNAVAILABLE
   fi
 
-  if ! PEER_BACKUP="$(mdbt_peer_call_task "$PEER_AQSH_URL" "$PEER_TOKEN" \
+  # Do not capture mdbt_peer_call_task in $(...): that subshell drops
+  # MDBT_PEER_ERR and the public peer marker collapses to {stage:peer-operation}.
+  PEER_BACKUP=""
+  if ! mdbt_peer_call_task_capture PEER_BACKUP "$PEER_AQSH_URL" "$PEER_TOKEN" \
     "physical-backup" \
     "$(jq -nc --arg ns "$NAMESPACE" --arg timeout "${MDBR_PEER_TASK_TIMEOUT}s" \
       '{namespace:$ns,dry_run:"false",confirm:"true",wait_timeout:$timeout}')" \
-    "$MDBR_PEER_TASK_TIMEOUT")"; then
+    "$MDBR_PEER_TASK_TIMEOUT"; then
     mdbt_fail "$OP" "a fresh backup could not be produced on the primary" \
       "$(jq -nc --argjson base "$(_assessment_data backup false)" \
         --argjson peer "${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}" \

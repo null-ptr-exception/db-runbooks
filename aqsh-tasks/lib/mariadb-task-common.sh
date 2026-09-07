@@ -505,3 +505,22 @@ mdbt_peer_call_task() {
   MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_TASK_TIMEOUT"}'
   return 1
 }
+
+# mdbt_peer_call_task_capture <out_var> <peer_url> <peer_token> <task_path> <payload> [timeout]
+# Same contract as mdbt_peer_call_task, but stores success JSON in <out_var> and
+# keeps MDBT_PEER_ERR in the *current* shell. Callers must not wrap this (or
+# mdbt_peer_call_task) in $(...) when they need the failure marker — command
+# substitution runs in a subshell and drops MDBT_PEER_ERR.
+mdbt_peer_call_task_capture() {
+  local __out_var="$1"; shift
+  local __tmp __rc=0
+  __tmp="$(mktemp)"
+  mdbt_peer_call_task "$@" >"$__tmp" || __rc=$?
+  if [[ "$__rc" -eq 0 ]]; then
+    printf -v "$__out_var" '%s' "$(<"$__tmp")"
+  else
+    printf -v "$__out_var" '%s' ''
+  fi
+  rm -f "$__tmp"
+  return "$__rc"
+}

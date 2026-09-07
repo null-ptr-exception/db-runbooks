@@ -148,3 +148,20 @@ setup() {
   # Parent shell still sees the pre-call value; the real reason lived only in the subshell.
   [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "STALE" ]
 }
+
+@test "embedding MDBT_PEER_ERR into jq must not use brace-default footgun" {
+  # Regression: "${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}" appends a
+  # stray "}" when the variable is set, so --argjson rejects the marker and
+  # attach collapsed its public data to {}.
+  MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_AUTH_FAILED"}'
+  peer_err="${MDBT_PEER_ERR:-}"
+  [[ -n "$peer_err" ]] || peer_err='{"stage":"peer-operation"}'
+  run jq -nc --argjson base '{"stage":"backup"}' --argjson peer "$peer_err" \
+    '$base + {peer: $peer}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.peer.reason' <<<"$output")" = "PEER_AUTH_FAILED" ]
+
+  # Document the broken expansion still produces invalid JSON.
+  broken="${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}"
+  [[ "$broken" == *"}}" ]]
+}

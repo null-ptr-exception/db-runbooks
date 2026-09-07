@@ -204,9 +204,14 @@ if [[ "$ACTION" == "rebuild" ]]; then
     "$(jq -nc --arg ns "$NAMESPACE" --arg timeout "${MDBR_PEER_TASK_TIMEOUT}s" \
       '{namespace:$ns,dry_run:"false",confirm:"true",wait_timeout:$timeout}')" \
     "$MDBR_PEER_TASK_TIMEOUT"; then
+    # Never use ${MDBT_PEER_ERR:-{...}} — bash closes the expansion at the
+    # first "}" inside the default, so a set marker becomes "<json>}" and
+    # --argjson fails, collapsing the public data payload to {}.
+    peer_err="${MDBT_PEER_ERR:-}"
+    [[ -n "$peer_err" ]] || peer_err='{"stage":"peer-operation"}'
     mdbt_fail "$OP" "a fresh backup could not be produced on the primary" \
       "$(jq -nc --argjson base "$(_assessment_data backup false)" \
-        --argjson peer "${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}" \
+        --argjson peer "$peer_err" \
         '$base + {peer: $peer}')" 1 PEER_OPERATION_FAILED
   fi
   BACKUP_NAME="$(jq -r '.backupName // empty' <<<"$PEER_BACKUP")"

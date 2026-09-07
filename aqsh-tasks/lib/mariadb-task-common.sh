@@ -487,7 +487,15 @@ mdbt_peer_call_task() {
         return 0
         ;;
       failed)
-        MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_TASK_FAILED"}'
+        # Keep public-safe: only peer-exported reason/code fields, never bodies.
+        MDBT_PEER_ERR="$(jq -nc           --argjson peer "$(jq -c '
+              .result.data as $d
+              | (($d | try fromjson catch null)
+                 // (if ($d | type) == "object" then $d else {} end))
+              | {reason:(.reason // empty), code:(.code // empty)}
+            ' <<<"$resp" 2>/dev/null || printf '{}')"           '{stage:"peer-operation",reason:"PEER_TASK_FAILED"}
+           + (if ($peer.reason|length)>0 then {peerReason:$peer.reason} else {} end)
+           + (if ($peer.code|tostring|length)>0 then {peerCode:($peer.code|tostring)} else {} end)'           2>/dev/null || printf '%s' '{"stage":"peer-operation","reason":"PEER_TASK_FAILED"}')"
         return 1
         ;;
     esac

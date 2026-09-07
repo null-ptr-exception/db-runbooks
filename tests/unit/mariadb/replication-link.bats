@@ -103,6 +103,31 @@ _assess_linked() {
   [ "$status" -ne 0 ]
 }
 
+@test "peer token mints with deploy-time SA name when JWT claims are absent" {
+  local token_file="$BATS_TEST_TMPDIR/token"
+  # Not a JWT — deploy-time SA name must still drive TokenRequest minting.
+  printf 'not-a-jwt' > "$token_file"
+
+  run bash -c "
+    set -euo pipefail
+    export LIB_DIR=\"$LIB_DIR\"
+    source \"\$LIB_DIR/mariadb-replication-link.sh\"
+    MDBR_PEER_TOKEN_SA=kube-auth-proxy
+    _kubectl_global() {
+      printf minted-from-config
+    }
+    cat() {
+      if [[ \$1 == /var/run/secrets/kubernetes.io/serviceaccount/namespace ]]; then
+        printf db-ops; return 0
+      fi
+      command cat \"\$@\"
+    }
+    mdbr_read_peer_token \"$token_file\"
+  "
+  [ "$status" -eq 0 ]
+  [ "$output" = "minted-from-config" ]
+}
+
 @test "peer token prefers a minted TokenRequest bearer over the projected file" {
   local token_file="$BATS_TEST_TMPDIR/token"
   printf '%s' 'eyJhbGciOiJub25lIn0.eyJrdWJlcm5ldGVzLmlvIjp7InNlcnZpY2VhY2NvdW50Ijp7Im5hbWUiOiJrdWJlLWF1dGgtcHJveHkifX19.sig' > "$token_file"

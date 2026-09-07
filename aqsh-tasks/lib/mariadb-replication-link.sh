@@ -71,6 +71,10 @@ MDBR_PEER_CONNECT_TIMEOUT="${REPL_PEER_CONNECT_TIMEOUT_DEFAULT:-10}"
 # normal SERVER_ID_CONFLICT guard remains in force.
 MDBR_SERVER_ID_START_INDEX="${REPL_SERVER_ID_START_INDEX_DEFAULT:-}"
 
+# ServiceAccount used to mint the peer TokenRequest bearer. Prefer this over
+# JWT parsing so a projected-token claim shape cannot silently skip minting.
+MDBR_PEER_TOKEN_SA="${REPL_PEER_TOKEN_SA_DEFAULT:-}"
+
 # mdbr_require_v24 <operation>
 # PR #99 intentionally targets mariadb-operator 0.24 only. That generation has
 # no ExternalMariaDB or multiCluster API, so the runbook owns the SQL link. Fail
@@ -129,9 +133,16 @@ mdbr_read_peer_token() {
   local ttl="${MDBR_PEER_TOKEN_TTL:-30m}"
 
   sa_ns="$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || true)"
-  if [[ -n "$sa_ns" ]] && sa_name="$(mdbr_service_account_name "$token_file")"; then
+  # Prefer deploy-time SA name; JWT parse is only a fallback when unset.
+  sa_name="${MDBR_PEER_TOKEN_SA:-}"
+  if [[ -z "$sa_name" ]]; then
+    sa_name="$(mdbr_service_account_name "$token_file" 2>/dev/null || true)"
+  fi
+  if [[ -n "$sa_ns" && -n "$sa_name" ]]; then
     # Use _kubectl_global: task K8S_NAMESPACE is the MariaDB namespace, but the
     # ServiceAccount lives in the AQSH release namespace (e.g. db-ops).
+    # Omit --audience so the minted bearer matches `kubectl create token`
+    # clients that already pass federated TokenReview in this suite.
     token="$(_kubectl_global -n "$sa_ns" create token "$sa_name" --duration="$ttl" 2>/dev/null || true)"
     if [[ -n "$token" ]]; then
       printf '%s' "$token"

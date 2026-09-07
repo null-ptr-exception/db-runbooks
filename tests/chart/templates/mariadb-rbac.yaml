@@ -80,7 +80,10 @@ subjects:
 ---
 # Mint TokenRequest tokens for peer AQSH auth. Projected volume tokens are
 # audience-bound to the local apiserver; replication/attach mints a reviewable
-# bearer for the federated TokenReview path. Scoped to this ServiceAccount only.
+# bearer for the federated TokenReview path.
+# Do not pin resourceNames on create: Kubernetes RBAC ignores resourceNames for
+# create in the general case, and TokenRequest minting must not depend on that
+# special-case matching. The Role lives in the AQSH release namespace only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -89,7 +92,6 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["serviceaccounts/token"]
-    resourceNames: ["kube-auth-proxy"]
     verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

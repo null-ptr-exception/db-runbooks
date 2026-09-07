@@ -194,6 +194,7 @@ Relevant deployment configuration:
 | `REPL_PEER_CONNECT_TIMEOUT_DEFAULT` | `10` | Peer SQL connection timeout in seconds. |
 | `REPL_PEER_AQSH_URL_DEFAULT` | unset | Primary AQSH URL used to request a backup. |
 | `REPL_PEER_TOKEN_FILE_DEFAULT` | projected service-account token | Fallback token file; attach prefers a minted TokenRequest bearer for peer AQSH auth. |
+| `REPL_PEER_TOKEN_SA_DEFAULT` | unset (JWT claim fallback) | ServiceAccount name used to mint the peer TokenRequest bearer. |
 | `REPL_PEER_TASK_TIMEOUT_DEFAULT` | `900` | Maximum peer backup task wait. |
 | `REPL_SERVER_ID_START_INDEX_DEFAULT` | unset | v24 standby server-id base; use a range disjoint from the peer. |
 

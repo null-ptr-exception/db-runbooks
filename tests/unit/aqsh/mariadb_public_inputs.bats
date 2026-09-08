@@ -31,7 +31,9 @@ task_inputs() {
 
   run task_inputs physical-backup
   [ "$status" -eq 0 ]
-  [ "$output" = $'namespace\ndry_run\nwait_timeout\nconfirm' ]
+  # target is a deliberate user decision (Primary/Replica/PreferReplica); attach
+  # rebuild passes Primary so the standby is not seeded from replica slave state.
+  [ "$output" = $'namespace\ndry_run\nwait_timeout\nconfirm\ntarget' ]
 
   run task_inputs logical-backup
   [ "$status" -eq 0 ]

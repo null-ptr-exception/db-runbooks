@@ -387,17 +387,47 @@ _assess_linked() {
   [ "$(jq -r '.sourceHost' <<<"$output")" = "null" ]
 }
 
-@test "replica status parses one running SQL connection" {
+@test "replica status ignores the operator local connection" {
+  # CI failure mode: after rebuild, SHOW ALL SLAVES STATUS shows only
+  # connectionName=mariadb-operator → mariadb-internal. That is local topology,
+  # not the cross-cluster link.
   mariadb_sql_vertical() {
     printf '%s\n' \
       '*************************** 1. row ***************************' \
-      '              Connection_name:' \
-      '                  Master_Host: mariadb-1-rw.mariadb-1.svc.cluster.local' \
+      '              Connection_name: mariadb-operator' \
+      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 3306' \
+      '             Slave_IO_Running: No' \
+      '            Slave_SQL_Running: No' \
+      '        Seconds_Behind_Master: NULL' \
+      '                    Using_Gtid: Current_Pos' \
+      '                 Last_IO_Error:' \
+      '                Last_SQL_Error:'
+  }
+
+  run mdbr_replica_status pod-0 secret
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.configured' <<<"$output")" = "false" ]
+  [ "$(jq -r '.sourceHost' <<<"$output")" = "null" ]
+}
+
+@test "replica status parses the named cross-cluster connection" {
+  mariadb_sql_vertical() {
+    printf '%s\n' \
+      '*************************** 1. row ***************************' \
+      '              Connection_name: mariadb-operator' \
+      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
       '                  Master_Port: 3306' \
       '             Slave_IO_Running: Yes' \
       '            Slave_SQL_Running: Yes' \
+      '*************************** 2. row ***************************' \
+      '              Connection_name: aqsh-cross-cluster' \
+      '                  Master_Host: mariadb-1-rw.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 30091' \
+      '             Slave_IO_Running: Yes' \
+      '            Slave_SQL_Running: Yes' \
       '        Seconds_Behind_Master: 4' \
-      '                    Using_Gtid: Slave_Pos' \
+      '                    Using_Gtid: Current_Pos' \
       '                 Last_IO_Error:' \
       '                Last_SQL_Error:'
   }
@@ -407,28 +437,12 @@ _assess_linked() {
   [ "$(jq -r '.configured' <<<"$output")" = "true" ]
   [ "$(jq -r '.running' <<<"$output")" = "true" ]
   [ "$(jq -r '.sourceHost' <<<"$output")" = "mariadb-1-rw.mariadb-1.svc.cluster.local" ]
-  [ "$(jq -r '.sourcePort' <<<"$output")" = "3306" ]
+  [ "$(jq -r '.sourcePort' <<<"$output")" = "30091" ]
+  [ "$(jq -r '.connectionName' <<<"$output")" = "aqsh-cross-cluster" ]
   [ "$(jq -r '.secondsBehind' <<<"$output")" = "4" ]
 }
 
-@test "replica status refuses to choose between multiple SQL connections" {
-  mariadb_sql_vertical() {
-    printf '%s\n' \
-      'Slave_IO_Running: Yes' \
-      'Slave_IO_Running: No'
-  }
-
-  run mdbr_replica_status pod-0 secret
-  [ "$status" -eq 0 ]
-  [ "$(jq -r '.configured' <<<"$output")" = "true" ]
-  [ "$(jq -r '.running' <<<"$output")" = "false" ]
-  [ "$(jq -r '.error' <<<"$output")" = "MULTIPLE_REPLICATION_CONNECTIONS" ]
-  [ "$(jq -r '.rows' <<<"$output")" = "2" ]
-}
-
-@test "replica configure on an unconfigured primary skips STOP/RESET" {
-  # Rebuild restores a primary image: STOP SLAVE would ER_SLAVE_NOT_CONFIGURED
-  # (1200) and abort before CHANGE MASTER. Skip stop/reset when not configured.
+@test "replica configure uses the named connection and skips STOP when absent" {
   local captured="$BATS_TEST_TMPDIR/change-master.sql"
   mdbr_replica_status() {
     printf '%s' '{"configured":false,"running":false,"ioRunning":false,"sqlRunning":false,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"error":null}'
@@ -438,28 +452,29 @@ _assess_linked() {
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 current_pos
 
   ! grep -q 'STOP' "$captured"
-  ! grep -q 'RESET SLAVE ALL' "$captured"
-  grep -q 'START ALL SLAVES' "$captured"
+  ! grep -q 'ALL SLAVES' "$captured"
+  grep -q "CHANGE MASTER 'aqsh-cross-cluster' TO" "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
   grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
   grep -q 'MASTER_USE_GTID=current_pos' "$captured"
+  grep -q "START SLAVE 'aqsh-cross-cluster'" "$captured"
   ! grep -q 's3cr!t' "$captured"
 }
 
-@test "replica configure clears an existing link before CHANGE MASTER" {
+@test "replica configure resets only the named connection when present" {
   local captured="$BATS_TEST_TMPDIR/sql.log"
   : > "$captured"
   mdbr_replica_status() {
-    printf '%s' '{"configured":true,"running":true,"ioRunning":true,"sqlRunning":true,"secondsBehind":0,"sourceHost":"old","sourcePort":3306,"connectionName":null,"error":null}'
+    printf '%s' '{"configured":true,"running":true,"ioRunning":true,"sqlRunning":true,"secondsBehind":0,"sourceHost":"old","sourcePort":3306,"connectionName":"aqsh-cross-cluster","error":null}'
   }
   mariadb_sql() { printf '%s\n' "$3" >> "$captured"; }
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 slave_pos
 
-  grep -q 'STOP ALL SLAVES' "$captured"
-  grep -q 'RESET SLAVE ALL' "$captured"
-  grep -q 'START ALL SLAVES' "$captured"
-  grep -q "MASTER_HOST='peer.example'" "$captured"
+  grep -q "STOP SLAVE 'aqsh-cross-cluster'" "$captured"
+  grep -q "RESET SLAVE 'aqsh-cross-cluster' ALL" "$captured"
+  ! grep -q 'ALL SLAVES' "$captured"
+  grep -q "CHANGE MASTER 'aqsh-cross-cluster' TO" "$captured"
   grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
 }
 

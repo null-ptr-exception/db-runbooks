@@ -249,6 +249,32 @@ if [[ "$ACTION" == "rebuild" ]]; then
   ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
     mdbt_fail "$OP" "database credentials are unavailable after restore" \
       "$(_assessment_data wire true)" 1 INTERNAL_ERROR
+  # Wire on the writable primary only. After restore the operator may briefly
+  # report a local replica as currentPrimary; that member still has the
+  # mariadb-operator slave connection and must not receive CHANGE MASTER.
+  _wire_wait=0
+  while :; do
+    _ro="$(mariadb_sql "$PRIMARY_POD" "$ROOT_PASSWORD" \
+      'SELECT @@GLOBAL.read_only' 2>/dev/null || true)"
+    [[ "$_ro" == "0" ]] && break
+    if (( _wire_wait >= WAIT_TIMEOUT )); then
+      mdbt_fail "$OP" "database has no writable primary after restore" \
+        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
+    fi
+    sleep 5
+    _wire_wait=$((_wire_wait + 5))
+    CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
+      mdbt_fail "$OP" "database is unavailable after restore" \
+        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
+    PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+    [[ -n "$PRIMARY_POD" ]] || \
+      mdbt_fail "$OP" "database has no current primary after restore" \
+        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
+    mapfile -t PODS < <(mariadb_list_pods "$(mariadb_cr_replicas || true)")
+    ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
+      mdbt_fail "$OP" "database credentials are unavailable after restore" \
+        "$(_assessment_data wire true)" 1 INTERNAL_ERROR
+  done
   if [[ -n "$MDBR_SERVER_ID_START_INDEX" ]] \
     && ! mdbr_configure_server_ids "$ROOT_PASSWORD" "${PODS[@]}"; then
     mdbt_fail "$OP" "restored standby server ids could not be configured" \

@@ -75,6 +75,11 @@ MDBR_SERVER_ID_START_INDEX="${REPL_SERVER_ID_START_INDEX_DEFAULT:-}"
 # JWT parsing so a projected-token claim shape cannot silently skip minting.
 MDBR_PEER_TOKEN_SA="${REPL_PEER_TOKEN_SA_DEFAULT:-}"
 
+# Named MariaDB multi-source connection for the cross-cluster link. Must not
+# collide with mariadb-operator's local connection ("mariadb-operator"). Status,
+# attach, and detach only look at this name so local topology is invisible.
+MDBR_CONNECTION_NAME="${REPL_CONNECTION_NAME_DEFAULT:-aqsh-cross-cluster}"
+
 # mdbr_require_v24 <operation>
 # PR #99 intentionally targets mariadb-operator 0.24 only. That generation has
 # no ExternalMariaDB or multiCluster API, so the runbook owns the SQL link. Fail
@@ -221,40 +226,66 @@ mdbr_configure_server_ids() {
 # restore-in-place, status, and detach share one v24-compatible contract.
 
 # mdbr_replica_status <pod> <password>
-# Emit a redacted, stable view of the current primary's first replication
-# connection.  A v24 standby has one cross-cluster connection; multiple rows are
-# reported as ambiguous instead of silently selecting an arbitrary source.
+# Emit a redacted view of the cross-cluster connection named
+# $MDBR_CONNECTION_NAME. Operator-managed local links (e.g. "mariadb-operator")
+# are ignored so a local replica topology never looks like a peer attach.
 mdbr_replica_status() {
-  local pod="$1" password="$2" out row_count io sql lag host port connection_name
-  local io_error sql_error using_gtid configured
+  local pod="$1" password="$2" out block=""
+  local io sql lag host port connection_name io_error sql_error using_gtid
+  local configured _found=0 _buf="" _line _cname
+
+  [[ "$MDBR_CONNECTION_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || return 2
 
   out="$(mariadb_sql_vertical "$pod" "$password" 'SHOW ALL SLAVES STATUS')" || return 1
-  row_count="$(awk -F': *' '$1 ~ "^[* ]*Slave_IO_Running$" {n++} END {print n+0}' <<<"$out")"
 
-  if [[ "$row_count" == "0" ]]; then
+  # Vertical output separates rows with a "**** N. row ****" banner. Keep only
+  # the block whose Connection_name matches our cross-cluster name.
+  while IFS= read -r _line || [[ -n "$_line" ]]; do
+    if [[ "$_line" =~ ^\*+ ]]; then
+      if [[ -n "$_buf" ]]; then
+        _cname="$(mariadb_status_field Connection_name <<<"$_buf")"
+        if [[ "$_cname" == "$MDBR_CONNECTION_NAME" ]]; then
+          _found=$((_found + 1))
+          block="$_buf"
+        fi
+      fi
+      _buf=""
+      continue
+    fi
+    _buf+="${_line}"$'\n'
+  done <<<"$out"
+  if [[ -n "$_buf" ]]; then
+    _cname="$(mariadb_status_field Connection_name <<<"$_buf")"
+    if [[ "$_cname" == "$MDBR_CONNECTION_NAME" ]]; then
+      _found=$((_found + 1))
+      block="$_buf"
+    fi
+  fi
+
+  if ((_found > 1)); then
+    jq -nc '{configured: true, running: false,
+      ioRunning: null, sqlRunning: null, secondsBehind: null,
+      sourceHost: null, sourcePort: null, connectionName: null,
+      error: "MULTIPLE_REPLICATION_CONNECTIONS", rows: 2}'
+    return 0
+  fi
+
+  if [[ -z "$block" ]]; then
     jq -nc '{configured: false, running: false, ioRunning: false,
       sqlRunning: false, secondsBehind: null, sourceHost: null,
       sourcePort: null, connectionName: null, error: null}'
     return 0
   fi
 
-  if [[ "$row_count" != "1" ]]; then
-    jq -nc --argjson rows "$row_count" '{configured: true, running: false,
-      ioRunning: null, sqlRunning: null, secondsBehind: null,
-      sourceHost: null, sourcePort: null, connectionName: null,
-      error: "MULTIPLE_REPLICATION_CONNECTIONS", rows: $rows}'
-    return 0
-  fi
-
-  io="$(mariadb_status_field Slave_IO_Running <<<"$out")"
-  sql="$(mariadb_status_field Slave_SQL_Running <<<"$out")"
-  lag="$(mariadb_status_field Seconds_Behind_Master <<<"$out")"
-  host="$(mariadb_status_field Master_Host <<<"$out")"
-  port="$(mariadb_status_field Master_Port <<<"$out")"
-  connection_name="$(mariadb_status_field Connection_name <<<"$out")"
-  io_error="$(mariadb_status_field Last_IO_Error <<<"$out")"
-  sql_error="$(mariadb_status_field Last_SQL_Error <<<"$out")"
-  using_gtid="$(mariadb_status_field Using_Gtid <<<"$out")"
+  io="$(mariadb_status_field Slave_IO_Running <<<"$block")"
+  sql="$(mariadb_status_field Slave_SQL_Running <<<"$block")"
+  lag="$(mariadb_status_field Seconds_Behind_Master <<<"$block")"
+  host="$(mariadb_status_field Master_Host <<<"$block")"
+  port="$(mariadb_status_field Master_Port <<<"$block")"
+  connection_name="$(mariadb_status_field Connection_name <<<"$block")"
+  io_error="$(mariadb_status_field Last_IO_Error <<<"$block")"
+  sql_error="$(mariadb_status_field Last_SQL_Error <<<"$block")"
+  using_gtid="$(mariadb_status_field Using_Gtid <<<"$block")"
 
   [[ "$lag" == "NULL" || -z "$lag" ]] && lag=""
   [[ -n "$io_error" ]] || io_error="$sql_error"
@@ -284,48 +315,46 @@ mdbr_replica_status() {
 }
 
 # mdbr_replica_configure <pod> <password> <host> <port> <gtid_mode>
-# Configure one cross-cluster source and start it.  The remote root password is
-# intentionally the same platform-managed credential already used by
-# mdbr_remote_sql; it never appears in the task result or logs.  Encoding the
-# password as a SQL hex literal avoids quoting/injection problems for arbitrary
-# secret values.
+# Configure the named cross-cluster source and start it. Never STOP/RESET ALL
+# SLAVES: that would wipe mariadb-operator's local connection on a member that
+# still carries it. Only touch $MDBR_CONNECTION_NAME.
 mdbr_replica_configure() {
   local pod="$1" password="$2" host="$3" port="$4" gtid_mode="$5"
-  local password_hex status
+  local password_hex status name
 
   [[ "$host" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 2
   [[ "$gtid_mode" == "current_pos" || "$gtid_mode" == "slave_pos" ]] || return 2
+  name="$MDBR_CONNECTION_NAME"
+  [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || return 2
   password_hex="$(printf '%s' "$password" | od -An -tx1 | tr -d '[:space:]')"
   [[ -n "$password_hex" ]] || return 2
 
-  # A freshly restored primary image (rebuild) has never been a slave.
-  # STOP SLAVE / STOP ALL SLAVES then fails with ER_SLAVE_NOT_CONFIGURED (1200)
-  # and aborts the multi-statement before CHANGE MASTER — the post-rebuild
-  # LINK_NOT_ESTABLISHED seen in CI. Only stop/reset when a link exists.
-  # Prefer ALL SLAVES so a named local operator connection is cleared too.
   status="$(mdbr_replica_status "$pod" "$password")" || return 1
   if [[ "$(jq -r '.configured // false' <<<"$status")" == "true" ]]; then
-    mariadb_sql "$pod" "$password" 'STOP ALL SLAVES; RESET SLAVE ALL;' >/dev/null || return 1
+    mariadb_sql "$pod" "$password" \
+      "STOP SLAVE '${name}'; RESET SLAVE '${name}' ALL;" >/dev/null || return 1
   fi
 
   mariadb_sql "$pod" "$password" "
-    CHANGE MASTER TO
+    CHANGE MASTER '${name}' TO
       MASTER_HOST='${host}',
       MASTER_PORT=${port},
       MASTER_USER='root',
       MASTER_PASSWORD=0x${password_hex},
       MASTER_USE_GTID=${gtid_mode};
-    START ALL SLAVES;
+    START SLAVE '${name}';
   " >/dev/null
 }
 
 # mdbr_replica_stop_reset <pod> <password>
-# Stop and remove only the cross-cluster source configuration.  The MariaDB
-# instance, its data, and the v24 operator's local replication remain intact.
+# Stop and remove only the cross-cluster named connection. Local operator
+# replication is left intact.
 mdbr_replica_stop_reset() {
-  local pod="$1" password="$2"
-  mariadb_sql "$pod" "$password" 'STOP ALL SLAVES; RESET SLAVE ALL;' >/dev/null
+  local pod="$1" password="$2" name="$MDBR_CONNECTION_NAME"
+  [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]] || return 2
+  mariadb_sql "$pod" "$password" \
+    "STOP SLAVE '${name}'; RESET SLAVE '${name}' ALL;" >/dev/null
 }
 
 # --- GTID comparison ---------------------------------------------------------

@@ -437,12 +437,12 @@ _assess_linked() {
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 current_pos
 
-  ! grep -q 'STOP SLAVE' "$captured"
+  ! grep -q 'STOP' "$captured"
   ! grep -q 'RESET SLAVE ALL' "$captured"
+  grep -q 'START ALL SLAVES' "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
   grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
   grep -q 'MASTER_USE_GTID=current_pos' "$captured"
-  grep -q 'START SLAVE' "$captured"
   ! grep -q 's3cr!t' "$captured"
 }
 
@@ -456,8 +456,9 @@ _assess_linked() {
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 slave_pos
 
-  grep -q 'STOP SLAVE' "$captured"
+  grep -q 'STOP ALL SLAVES' "$captured"
   grep -q 'RESET SLAVE ALL' "$captured"
+  grep -q 'START ALL SLAVES' "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
   grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
 }

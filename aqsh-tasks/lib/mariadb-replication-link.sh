@@ -300,12 +300,13 @@ mdbr_replica_configure() {
   [[ -n "$password_hex" ]] || return 2
 
   # A freshly restored primary image (rebuild) has never been a slave.
-  # STOP SLAVE then fails with ER_SLAVE_NOT_CONFIGURED (1200) and aborts the
-  # multi-statement before CHANGE MASTER runs — exactly the post-rebuild
-  # LINK_NOT_ESTABLISHED we saw in CI. Only stop/reset when a link exists.
+  # STOP SLAVE / STOP ALL SLAVES then fails with ER_SLAVE_NOT_CONFIGURED (1200)
+  # and aborts the multi-statement before CHANGE MASTER — the post-rebuild
+  # LINK_NOT_ESTABLISHED seen in CI. Only stop/reset when a link exists.
+  # Prefer ALL SLAVES so a named local operator connection is cleared too.
   status="$(mdbr_replica_status "$pod" "$password")" || return 1
   if [[ "$(jq -r '.configured // false' <<<"$status")" == "true" ]]; then
-    mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE ALL;' >/dev/null || return 1
+    mariadb_sql "$pod" "$password" 'STOP ALL SLAVES; RESET SLAVE ALL;' >/dev/null || return 1
   fi
 
   mariadb_sql "$pod" "$password" "
@@ -315,7 +316,7 @@ mdbr_replica_configure() {
       MASTER_USER='root',
       MASTER_PASSWORD=0x${password_hex},
       MASTER_USE_GTID=${gtid_mode};
-    START SLAVE;
+    START ALL SLAVES;
   " >/dev/null
 }
 
@@ -324,7 +325,7 @@ mdbr_replica_configure() {
 # instance, its data, and the v24 operator's local replication remain intact.
 mdbr_replica_stop_reset() {
   local pod="$1" password="$2"
-  mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE ALL;' >/dev/null
+  mariadb_sql "$pod" "$password" 'STOP ALL SLAVES; RESET SLAVE ALL;' >/dev/null
 }
 
 # --- GTID comparison ---------------------------------------------------------

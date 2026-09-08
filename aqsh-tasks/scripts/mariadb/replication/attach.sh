@@ -202,7 +202,7 @@ if [[ "$ACTION" == "rebuild" ]]; then
   if ! mdbt_peer_call_task_capture PEER_BACKUP "$PEER_AQSH_URL" "$PEER_TOKEN" \
     "physical-backup" \
     "$(jq -nc --arg ns "$NAMESPACE" --arg timeout "${MDBR_PEER_TASK_TIMEOUT}s" \
-      '{namespace:$ns,dry_run:"false",confirm:"true",wait_timeout:$timeout}')" \
+      '{namespace:$ns,dry_run:"false",confirm:"true",wait_timeout:$timeout,target:"Primary"}')" \
     "$MDBR_PEER_TASK_TIMEOUT"; then
     # Never use ${MDBT_PEER_ERR:-{...}} — bash closes the expansion at the
     # first "}" inside the default, so a set marker becomes "<json>}" and
@@ -228,6 +228,14 @@ if [[ "$ACTION" == "rebuild" ]]; then
   mdbr_rebuild_standby "$OP" _assessment_data
   REBUILT=true
 
+  # Pod Ready is not enough for CHANGE MASTER: wait until the MariaDB CR is
+  # Ready so the operator has finished local replica reconciliation first.
+  if ! mdbt_wait_mariadb_ready "$MDB" "${WAIT_TIMEOUT}s" "$MARIADB_RESOURCE" \
+    >/dev/null 2>&1; then
+    mdbt_fail "$OP" "database is unavailable after restore" \
+      "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
+  fi
+
   # The restored primary pod may have changed identity and always needs a fresh
   # credential read before SQL is issued.
   CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
@@ -252,6 +260,10 @@ GTID_MODE=slave_pos
 [[ "$REBUILT" == "true" ]] && GTID_MODE=current_pos
 if ! mdbr_replica_configure "$PRIMARY_POD" "$ROOT_PASSWORD" \
   "$PEER_HOST" "$MDBR_PEER_PORT" "$GTID_MODE"; then
+  # Refresh before failing: _assessment_data otherwise embeds the pre-rebuild
+  # LINK_STATUS and hides the real Last_IO_Error / configured flags.
+  LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD" 2>/dev/null)" \
+    || LINK_STATUS='{"configured":false,"running":false,"ioRunning":false,"sqlRunning":false,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"error":null}'
   mdbt_fail "$OP" "replication link could not be configured" \
     "$(_assessment_data wire true)" 1 LINK_NOT_ESTABLISHED
 fi

@@ -819,6 +819,14 @@ tasks:
         required: false
         type: string
         default: "false"
+      # Optional pod selection for the backup source. Cross-cluster attach
+      # rebuild must pass Primary so the restored standby is not seeded from a
+      # replica's slave state (PreferReplica remains the public default).
+      - name: target
+        env: BACKUP_TARGET
+        required: false
+        type: string
+        default: PreferReplica
   logical-backup:
     script: mariadb/logical-backup.sh
     description: "Create a logical backup for the database identified by namespace"

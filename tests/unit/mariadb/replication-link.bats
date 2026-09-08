@@ -426,13 +426,19 @@ _assess_linked() {
   [ "$(jq -r '.rows' <<<"$output")" = "2" ]
 }
 
-@test "replica configure emits native MariaDB SQL without plaintext password" {
+@test "replica configure on an unconfigured primary skips STOP/RESET" {
+  # Rebuild restores a primary image: STOP SLAVE would ER_SLAVE_NOT_CONFIGURED
+  # (1200) and abort before CHANGE MASTER. Skip stop/reset when not configured.
   local captured="$BATS_TEST_TMPDIR/change-master.sql"
+  mdbr_replica_status() {
+    printf '%s' '{"configured":false,"running":false,"ioRunning":false,"sqlRunning":false,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"error":null}'
+  }
   mariadb_sql() { printf '%s' "$3" > "$captured"; }
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 current_pos
 
-  grep -q 'RESET SLAVE ALL' "$captured"
+  ! grep -q 'STOP SLAVE' "$captured"
+  ! grep -q 'RESET SLAVE ALL' "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
   grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
   grep -q 'MASTER_USE_GTID=current_pos' "$captured"
@@ -440,9 +446,26 @@ _assess_linked() {
   ! grep -q 's3cr!t' "$captured"
 }
 
+@test "replica configure clears an existing link before CHANGE MASTER" {
+  local captured="$BATS_TEST_TMPDIR/sql.log"
+  : > "$captured"
+  mdbr_replica_status() {
+    printf '%s' '{"configured":true,"running":true,"ioRunning":true,"sqlRunning":true,"secondsBehind":0,"sourceHost":"old","sourcePort":3306,"connectionName":null,"error":null}'
+  }
+  mariadb_sql() { printf '%s\n' "$3" >> "$captured"; }
+
+  mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 slave_pos
+
+  grep -q 'STOP SLAVE' "$captured"
+  grep -q 'RESET SLAVE ALL' "$captured"
+  grep -q "MASTER_HOST='peer.example'" "$captured"
+  grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
+}
+
 @test "replica configure rejects an unsafe source host before SQL" {
+  mdbr_replica_status() { return 99; }
   mariadb_sql() { return 99; }
-  run mdbr_replica_configure pod-0 secret "peer';DROP TABLE x" 3306 slave_pos
+  run mdbr_replica_configure pod-0 secret "peer;DROP TABLE x" 3306 slave_pos
   [ "$status" -eq 2 ]
 }
 

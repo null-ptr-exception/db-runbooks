@@ -291,7 +291,7 @@ mdbr_replica_status() {
 # secret values.
 mdbr_replica_configure() {
   local pod="$1" password="$2" host="$3" port="$4" gtid_mode="$5"
-  local password_hex
+  local password_hex status
 
   [[ "$host" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 2
@@ -299,9 +299,16 @@ mdbr_replica_configure() {
   password_hex="$(printf '%s' "$password" | od -An -tx1 | tr -d '[:space:]')"
   [[ -n "$password_hex" ]] || return 2
 
+  # A freshly restored primary image (rebuild) has never been a slave.
+  # STOP SLAVE then fails with ER_SLAVE_NOT_CONFIGURED (1200) and aborts the
+  # multi-statement before CHANGE MASTER runs — exactly the post-rebuild
+  # LINK_NOT_ESTABLISHED we saw in CI. Only stop/reset when a link exists.
+  status="$(mdbr_replica_status "$pod" "$password")" || return 1
+  if [[ "$(jq -r '.configured // false' <<<"$status")" == "true" ]]; then
+    mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE ALL;' >/dev/null || return 1
+  fi
+
   mariadb_sql "$pod" "$password" "
-    STOP SLAVE;
-    RESET SLAVE ALL;
     CHANGE MASTER TO
       MASTER_HOST='${host}',
       MASTER_PORT=${port},

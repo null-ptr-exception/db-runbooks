@@ -326,8 +326,8 @@ mdbr_replica_raw_slave_rows() {
   awk -F': *' '$1 ~ /^[* ]*Slave_IO_Running$/ { n++ } END { print n+0 }' <<<"$out"
 }
 
-# shellcheck disable=SC2034
-MDBR_REPLICA_SQL_ERR=""
+# Populated on configure failure for attach.sh to embed in LINK_STATUS.
+export MDBR_REPLICA_SQL_ERR=""
 
 # mdbr_replica_configure <pod> <password> <host> <port> <gtid_mode>
 # Wire the default (unnamed) cross-cluster source on the writable primary.
@@ -366,7 +366,7 @@ mdbr_replica_configure() {
       MASTER_HOST='${host}',
       MASTER_PORT=${port},
       MASTER_USER='root',
-      MASTER_PASSWORD=0x${password_hex},
+      MASTER_PASSWORD=UNHEX('${password_hex}'),
       MASTER_USE_GTID=${gtid_mode};
     START SLAVE;
   " 2>&1 >/dev/null)"; then

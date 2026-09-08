@@ -453,7 +453,8 @@ _assess_linked() {
   grep -q 'CHANGE MASTER TO' "$captured"
   ! grep -q "CHANGE MASTER '" "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
-  grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
+  grep -q "MASTER_PASSWORD=UNHEX('733363722174')" "$captured"
+  ! grep -Eq 'MASTER_PASSWORD=0x[0-9a-f]+' "$captured"
   grep -q 'START SLAVE' "$captured"
 }
 
@@ -479,6 +480,8 @@ _assess_linked() {
   grep -q 'STOP ALL SLAVES' "$captured"
   grep -q 'RESET SLAVE ALL' "$captured"
   grep -q 'CHANGE MASTER TO' "$captured"
+  grep -q "MASTER_PASSWORD=UNHEX('733363722174')" "$captured"
+  ! grep -Eq 'MASTER_PASSWORD=0x[0-9a-f]+' "$captured"
   grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
 }
 

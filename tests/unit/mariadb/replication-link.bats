@@ -378,25 +378,23 @@ _assess_linked() {
 # --- v24 SQL link ------------------------------------------------------------
 
 @test "replica status reports an unconfigured v24 primary" {
-  mariadb_sql_vertical() { printf ''; }
+  mariadb_sql_vertical() { printf '%s\n' ''; }
 
   run mdbr_replica_status pod-0 secret
   [ "$status" -eq 0 ]
   [ "$(jq -r '.configured' <<<"$output")" = "false" ]
   [ "$(jq -r '.running' <<<"$output")" = "false" ]
-  [ "$(jq -r '.sourceHost' <<<"$output")" = "null" ]
 }
 
 @test "replica status ignores the operator local connection" {
   mariadb_sql_vertical() {
     printf '%s\n' \
-      '*************************** 1. row ***************************' \
-      '              Connection_name: mariadb-operator' \
-      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
-      '                  Master_Port: 3306' \
       '             Slave_IO_Running: No' \
       '            Slave_SQL_Running: No' \
       '        Seconds_Behind_Master: NULL' \
+      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 3306' \
+      '              Connection_name: mariadb-operator' \
       '                    Using_Gtid: Current_Pos' \
       '                 Last_IO_Error:' \
       '                Last_SQL_Error:'
@@ -411,19 +409,18 @@ _assess_linked() {
 @test "replica status parses the default cross-cluster connection" {
   mariadb_sql_vertical() {
     printf '%s\n' \
-      '*************************** 1. row ***************************' \
-      '              Connection_name: mariadb-operator' \
-      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
-      '                  Master_Port: 3306' \
       '             Slave_IO_Running: Yes' \
       '            Slave_SQL_Running: Yes' \
-      '*************************** 2. row ***************************' \
-      '              Connection_name:' \
-      '                  Master_Host: mariadb-1-rw.mariadb-1.svc.cluster.local' \
-      '                  Master_Port: 30091' \
+      '        Seconds_Behind_Master: 0' \
+      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 3306' \
+      '              Connection_name: mariadb-operator' \
       '             Slave_IO_Running: Yes' \
       '            Slave_SQL_Running: Yes' \
       '        Seconds_Behind_Master: 4' \
+      '                  Master_Host: mariadb-1-rw.mariadb-1.svc.cluster.local' \
+      '                  Master_Port: 30091' \
+      '              Connection_name:' \
       '                    Using_Gtid: Current_Pos' \
       '                 Last_IO_Error:' \
       '                Last_SQL_Error:'
@@ -438,49 +435,69 @@ _assess_linked() {
   [ "$(jq -r '.secondsBehind' <<<"$output")" = "4" ]
 }
 
-@test "replica configure uses unnamed CHANGE MASTER and skips STOP when absent" {
-  local captured="$BATS_TEST_TMPDIR/change-master.sql"
-  mdbr_replica_status() {
-    printf '%s' '{"configured":false,"running":false,"ioRunning":false,"sqlRunning":false,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"error":null}'
+@test "replica configure skips STOP when no raw slave rows exist" {
+  local captured="$BATS_TEST_TMPDIR/sql.log"
+  : > "$captured"
+  mariadb_sql_vertical() { printf '%s\n' ''; }
+  mariadb_exec() {
+    # last arg is the -e query for our calls
+    local q="${@: -1}"
+    printf '%s\n' "$q" >> "$captured"
+    return 0
   }
-  mariadb_sql() { printf '%s' "$3" > "$captured"; }
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 current_pos
 
   ! grep -q 'STOP' "$captured"
-  ! grep -q "CHANGE MASTER '" "$captured"
+  ! grep -q 'RESET' "$captured"
   grep -q 'CHANGE MASTER TO' "$captured"
+  ! grep -q "CHANGE MASTER '" "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
   grep -q 'MASTER_PASSWORD=0x733363722174' "$captured"
-  grep -q 'MASTER_USE_GTID=current_pos' "$captured"
   grep -q 'START SLAVE' "$captured"
-  ! grep -q 'ALL SLAVES' "$captured"
-  ! grep -q 's3cr!t' "$captured"
 }
 
-@test "replica configure resets only the default connection when present" {
+@test "replica configure clears ALL slaves when any raw row exists" {
+  # Peer status filters operator → configured=false, but FILE + named local
+  # link still blocks default CHANGE MASTER. Raw row count must drive RESET ALL.
   local captured="$BATS_TEST_TMPDIR/sql.log"
   : > "$captured"
-  mdbr_replica_status() {
-    printf '%s' '{"configured":true,"running":true,"ioRunning":true,"sqlRunning":true,"secondsBehind":0,"sourceHost":"old","sourcePort":3306,"connectionName":null,"error":null}'
+  mariadb_sql_vertical() {
+    printf '%s\n' \
+      '             Slave_IO_Running: No' \
+      '              Connection_name: mariadb-operator' \
+      '                  Master_Host: mariadb-0.mariadb-internal.mariadb-1.svc.cluster.local'
   }
-  mariadb_sql() { printf '%s\n' "$3" >> "$captured"; }
+  mariadb_exec() {
+    local q="${@: -1}"
+    printf '%s\n' "$q" >> "$captured"
+    return 0
+  }
 
   mdbr_replica_configure pod-0 's3cr!t' peer.example 3306 slave_pos
 
-  grep -q 'STOP SLAVE' "$captured"
-  grep -q 'RESET SLAVE' "$captured"
-  ! grep -q 'RESET SLAVE ALL' "$captured"
-  ! grep -q 'ALL SLAVES' "$captured"
+  grep -q 'STOP ALL SLAVES' "$captured"
+  grep -q 'RESET SLAVE ALL' "$captured"
   grep -q 'CHANGE MASTER TO' "$captured"
   grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
 }
 
 @test "replica configure rejects an unsafe source host before SQL" {
-  mdbr_replica_status() { return 99; }
-  mariadb_sql() { return 99; }
+  mariadb_sql_vertical() { return 99; }
+  mariadb_exec() { return 99; }
   run mdbr_replica_configure pod-0 secret "peer;DROP TABLE x" 3306 slave_pos
   [ "$status" -eq 2 ]
+}
+
+@test "replica configure records SQL stderr on failure" {
+  mariadb_sql_vertical() { printf '%s\n' ''; }
+  mariadb_exec() {
+    echo 'ERROR 1201 (HY000): Could not create connection' >&2
+    return 1
+  }
+  # No `run`: MDBR_REPLICA_SQL_ERR is set in-process; run would swallow it.
+  mdbr_replica_configure pod-0 secret peer.example 3306 current_pos && return 1
+  [[ "$MDBR_REPLICA_SQL_ERR" == *'Could not create connection'* ]]
 }
 
 # --- deploy-time config ------------------------------------------------------

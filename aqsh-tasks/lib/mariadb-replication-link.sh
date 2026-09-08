@@ -231,121 +231,137 @@ mdbr_configure_server_ids() {
 # Emit a redacted view of the cross-cluster (non-operator) replication
 # connection on this pod. The mariadb-operator local link is ignored so a local
 # replica topology never looks like a peer attach / source mismatch.
+# Row boundaries are Slave_IO_Running lines so parsing works with or without
+# the "**** N. row ****" banner from mariadb -E.
 mdbr_replica_status() {
   local pod="$1" password="$2" out
-  local io sql lag host port connection_name io_error sql_error using_gtid
-  local configured _buf="" _line _cname _host _io
-  local _op_name="${MDBR_OPERATOR_CONNECTION_NAME:-mariadb-operator}"
-  local -a _blocks=()
+  local filtered count
 
   out="$(mariadb_sql_vertical "$pod" "$password" 'SHOW ALL SLAVES STATUS')" || return 1
-  # A blank here-string still yields one empty read; treat whitespace-only as
-  # no rows before parsing blocks.
-  if [[ -z "${out//[[:space:]]/}" ]]; then
+  filtered="$(mdbr_filter_peer_slave_status "$out")" || return 1
+  count="$(jq -r 'length' <<<"$filtered")"
+
+  if [[ "$count" == "0" ]]; then
     jq -nc '{configured: false, running: false, ioRunning: false,
       sqlRunning: false, secondsBehind: null, sourceHost: null,
       sourcePort: null, connectionName: null, error: null}'
     return 0
   fi
 
-  while IFS= read -r _line || [[ -n "$_line" ]]; do
-    if [[ "$_line" =~ ^\*+ ]]; then
-      if [[ -n "$_buf" ]]; then
-        _cname="$(mariadb_status_field Connection_name <<<"$_buf")"
-        _host="$(mariadb_status_field Master_Host <<<"$_buf")"
-        _io="$(mariadb_status_field Slave_IO_Running <<<"$_buf")"
-        if [[ -n "$_io" && "$_cname" != "$_op_name" && "$_host" != *mariadb-internal* ]]; then
-          _blocks+=("$_buf")
-        fi
-      fi
-      _buf=""
-      continue
-    fi
-    _buf+="${_line}"$'\n'
-  done <<<"$out"
-  if [[ -n "$_buf" ]]; then
-    _cname="$(mariadb_status_field Connection_name <<<"$_buf")"
-    _host="$(mariadb_status_field Master_Host <<<"$_buf")"
-    _io="$(mariadb_status_field Slave_IO_Running <<<"$_buf")"
-    if [[ -n "$_io" && "$_cname" != "$_op_name" && "$_host" != *mariadb-internal* ]]; then
-      _blocks+=("$_buf")
-    fi
-  fi
-
-  if ((${#_blocks[@]} > 1)); then
-    jq -nc --argjson rows "${#_blocks[@]}" '{configured: true, running: false,
+  if [[ "$count" != "1" ]]; then
+    jq -nc --argjson rows "$count" '{configured: true, running: false,
       ioRunning: null, sqlRunning: null, secondsBehind: null,
       sourceHost: null, sourcePort: null, connectionName: null,
       error: "MULTIPLE_REPLICATION_CONNECTIONS", rows: $rows}'
     return 0
   fi
 
-  if ((${#_blocks[@]} == 0)); then
-    jq -nc '{configured: false, running: false, ioRunning: false,
-      sqlRunning: false, secondsBehind: null, sourceHost: null,
-      sourcePort: null, connectionName: null, error: null}'
+  jq -c '.[0]' <<<"$filtered"
+}
+
+# mdbr_filter_peer_slave_status <show_all_slaves_vertical>
+# Parse SHOW ALL SLAVES STATUS (-E) into JSON objects and drop operator-local
+# rows (connectionName=mariadb-operator or Master_Host under *.mariadb-internal.*).
+# stdout: JSON array.
+mdbr_filter_peer_slave_status() {
+  local out="$1"
+  local parsed
+  local _op_name="${MDBR_OPERATOR_CONNECTION_NAME:-mariadb-operator}"
+
+  parsed="$(awk -F': *' -v op="$_op_name" '
+    function json_str(s) {
+      gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\""
+    }
+    function flush() {
+      if (!have) return
+      if (conn == op) return
+      if (host ~ /\.mariadb-internal\./) return
+      io_json = (io == "Yes") ? "true" : "false"
+      sql_json = (sql == "Yes") ? "true" : "false"
+      lag_json = (lag == "" || lag == "NULL") ? "null" : lag
+      if (lag_json != "null" && lag_json !~ /^[0-9]+$/) lag_json = "null"
+      port_json = (port == "" || port == "NULL") ? "null" : port
+      if (port_json != "null" && port_json !~ /^[0-9]+$/) port_json = "null"
+      host_json = (host == "" ? "null" : json_str(host))
+      conn_json = (conn == "" ? "null" : json_str(conn))
+      gtid_json = (gtid == "" ? "null" : json_str(gtid))
+      err = io_err; if (err == "") err = sql_err
+      err_json = (err == "" ? "null" : json_str(err))
+      printf "{\"configured\":true,\"running\":%s,\"ioRunning\":%s,\"sqlRunning\":%s,\"secondsBehind\":%s,\"sourceHost\":%s,\"sourcePort\":%s,\"connectionName\":%s,\"usingGtid\":%s,\"error\":%s}\n",
+        ((io == "Yes" && sql == "Yes") ? "true" : "false"),
+        io_json, sql_json, lag_json, host_json, port_json, conn_json, gtid_json, err_json
+    }
+    $1 ~ /^[* ]*Slave_IO_Running$/ {
+      flush()
+      have=1; io=$2; sql=""; lag=""; host=""; port=""; conn=""; gtid=""; io_err=""; sql_err=""
+      next
+    }
+    !have { next }
+    $1 ~ /^[* ]*Slave_SQL_Running$/ { sql=$2; next }
+    $1 ~ /^[* ]*Seconds_Behind_Master$/ { lag=$2; next }
+    $1 ~ /^[* ]*Master_Host$/ { host=$2; next }
+    $1 ~ /^[* ]*Master_Port$/ { port=$2; next }
+    $1 ~ /^[* ]*Connection_name$/ { conn=$2; next }
+    $1 ~ /^[* ]*Using_Gtid$/ { gtid=$2; next }
+    $1 ~ /^[* ]*Last_IO_Error$/ { io_err=$2; next }
+    $1 ~ /^[* ]*Last_SQL_Error$/ { sql_err=$2; next }
+    END { flush() }
+  ' <<<"$out")" || return 1
+
+  if [[ -z "$parsed" ]]; then
+    printf '[]'
     return 0
   fi
 
-  local block="${_blocks[0]}"
-  io="$(mariadb_status_field Slave_IO_Running <<<"$block")"
-  sql="$(mariadb_status_field Slave_SQL_Running <<<"$block")"
-  lag="$(mariadb_status_field Seconds_Behind_Master <<<"$block")"
-  host="$(mariadb_status_field Master_Host <<<"$block")"
-  port="$(mariadb_status_field Master_Port <<<"$block")"
-  connection_name="$(mariadb_status_field Connection_name <<<"$block")"
-  io_error="$(mariadb_status_field Last_IO_Error <<<"$block")"
-  sql_error="$(mariadb_status_field Last_SQL_Error <<<"$block")"
-  using_gtid="$(mariadb_status_field Using_Gtid <<<"$block")"
-
-  [[ "$lag" == "NULL" || -z "$lag" ]] && lag=""
-  [[ -n "$io_error" ]] || io_error="$sql_error"
-  [[ -n "$io_error" ]] || io_error=""
-  [[ "$io" == "Yes" ]] && io=true || io=false
-  [[ "$sql" == "Yes" ]] && sql=true || sql=false
-  configured=true
-
-  jq -nc \
-    --arg host "$host" --arg port "$port" --arg lag "$lag" \
-    --arg connection "$connection_name" --arg usingGtid "$using_gtid" \
-    --arg error "$io_error" \
-    --argjson ioRunning "$io" --argjson sqlRunning "$sql" \
-    --argjson configured "$configured" \
-    '{
-      configured: $configured,
-      running: ($ioRunning and $sqlRunning),
-      ioRunning: $ioRunning,
-      sqlRunning: $sqlRunning,
-      secondsBehind: (if $lag == "" then null else ($lag | tonumber? // null) end),
-      sourceHost: (if $host == "" then null else $host end),
-      sourcePort: (if $port == "" then null else ($port | tonumber? // null) end),
-      connectionName: (if $connection == "" then null else $connection end),
-      usingGtid: (if $usingGtid == "" then null else $usingGtid end),
-      error: (if $error == "" then null else $error end)
-    }'
+  jq -sc '.' <<<"$parsed"
 }
+
+# mdbr_replica_raw_slave_rows <pod> <password>
+# Count Slave_IO_Running rows in SHOW ALL SLAVES STATUS (includes operator).
+# Used before wire RESET: peer status filters operator out, so configured=false
+# can hide a FILE-repo conflict with an existing named local link.
+mdbr_replica_raw_slave_rows() {
+  local pod="$1" password="$2" out
+  out="$(mariadb_sql_vertical "$pod" "$password" 'SHOW ALL SLAVES STATUS')" || return 1
+  awk -F': *' '$1 ~ /^[* ]*Slave_IO_Running$/ { n++ } END { print n+0 }' <<<"$out"
+}
+
+# shellcheck disable=SC2034
+MDBR_REPLICA_SQL_ERR=""
 
 # mdbr_replica_configure <pod> <password> <host> <port> <gtid_mode>
 # Wire the default (unnamed) cross-cluster source on the writable primary.
-# Named CHANGE MASTER needs master_info_repository=TABLE; the primary often
-# still has FILE, so a named link never appears (configured=false). Never
-# RESET SLAVE ALL — that would wipe mariadb-operator on a mis-targeted member.
+#
+# CI (75696bc / 34182885346): configure still failed with configured=false after
+# rebuild. Peer status ignores mariadb-operator, so a residual local link leaves
+# configured=false, skips STOP/RESET, then CHANGE MASTER TO fights FILE
+# master_info_repository / existing slave metadata and never creates a peer link.
+# Attach only calls this after read_only=0, so clearing ALL slaves on this pod is
+# safe (the primary must not keep a local operator slave). Skip STOP/RESET when
+# raw row count is 0 — ER_SLAVE_NOT_CONFIGURED (1200) aborts the multi-statement.
 mdbr_replica_configure() {
   local pod="$1" password="$2" host="$3" port="$4" gtid_mode="$5"
-  local password_hex status
+  local password_hex raw_rows=0 sql_err=""
 
+  MDBR_REPLICA_SQL_ERR=""
   [[ "$host" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 2
   [[ "$gtid_mode" == "current_pos" || "$gtid_mode" == "slave_pos" ]] || return 2
   password_hex="$(printf '%s' "$password" | od -An -tx1 | tr -d '[:space:]')"
   [[ -n "$password_hex" ]] || return 2
 
-  status="$(mdbr_replica_status "$pod" "$password")" || return 1
-  if [[ "$(jq -r '.configured // false' <<<"$status")" == "true" ]]; then
-    mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE;' >/dev/null || return 1
+  raw_rows="$(mdbr_replica_raw_slave_rows "$pod" "$password")" || return 1
+  if (( raw_rows > 0 )); then
+    # Writable primary only (attach read_only gate). Clear operator + junk so
+    # default CHANGE MASTER can use FILE or TABLE cleanly.
+    if ! sql_err="$(mariadb_exec "$pod" mariadb -u root -p"$password" -N -B -e \
+      'STOP ALL SLAVES; RESET SLAVE ALL;' 2>&1 >/dev/null)"; then
+      MDBR_REPLICA_SQL_ERR="${sql_err//$'\n'/; }"
+      return 1
+    fi
   fi
 
-  mariadb_sql "$pod" "$password" "
+  if ! sql_err="$(mariadb_exec "$pod" mariadb -u root -p"$password" -N -B -e "
     CHANGE MASTER TO
       MASTER_HOST='${host}',
       MASTER_PORT=${port},
@@ -353,14 +369,19 @@ mdbr_replica_configure() {
       MASTER_PASSWORD=0x${password_hex},
       MASTER_USE_GTID=${gtid_mode};
     START SLAVE;
-  " >/dev/null
+  " 2>&1 >/dev/null)"; then
+    MDBR_REPLICA_SQL_ERR="${sql_err//$'\n'/; }"
+    return 1
+  fi
+  return 0
 }
 
 # mdbr_replica_stop_reset <pod> <password>
-# Remove the default cross-cluster connection only.
+# Remove the default cross-cluster connection. Call only when peer status said
+# configured (operator-local rows are filtered out first in detach).
 mdbr_replica_stop_reset() {
   local pod="$1" password="$2"
-  mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE;' >/dev/null
+  mariadb_sql "$pod" "$password" 'STOP SLAVE; RESET SLAVE ALL;' >/dev/null
 }
 
 # --- GTID comparison ---------------------------------------------------------

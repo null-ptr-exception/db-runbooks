@@ -290,6 +290,11 @@ if ! mdbr_replica_configure "$PRIMARY_POD" "$ROOT_PASSWORD" \
   # LINK_STATUS and hides the real Last_IO_Error / configured flags.
   LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD" 2>/dev/null)" \
     || LINK_STATUS='{"configured":false,"running":false,"ioRunning":false,"sqlRunning":false,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"error":null}'
+  if [[ -n "${MDBR_REPLICA_SQL_ERR:-}" ]]; then
+    LINK_STATUS="$(jq -c --arg e "$MDBR_REPLICA_SQL_ERR" \
+      '.error = (if (.error // "") == "" then $e else .error end)' <<<"$LINK_STATUS")" \
+      || true
+  fi
   mdbt_fail "$OP" "replication link could not be configured" \
     "$(_assessment_data wire true)" 1 LINK_NOT_ESTABLISHED
 fi

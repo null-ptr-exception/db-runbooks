@@ -453,8 +453,9 @@ _assess_linked() {
   grep -q 'CHANGE MASTER TO' "$captured"
   ! grep -q "CHANGE MASTER '" "$captured"
   grep -q "MASTER_HOST='peer.example'" "$captured"
-  grep -q "MASTER_PASSWORD=UNHEX('733363722174')" "$captured"
+  grep -q "MASTER_PASSWORD='s3cr!t'" "$captured"
   ! grep -Eq 'MASTER_PASSWORD=0x[0-9a-f]+' "$captured"
+  ! grep -q 'MASTER_PASSWORD=UNHEX' "$captured"
   grep -q 'START SLAVE' "$captured"
 }
 
@@ -480,8 +481,9 @@ _assess_linked() {
   grep -q 'STOP ALL SLAVES' "$captured"
   grep -q 'RESET SLAVE ALL' "$captured"
   grep -q 'CHANGE MASTER TO' "$captured"
-  grep -q "MASTER_PASSWORD=UNHEX('733363722174')" "$captured"
+  grep -q "MASTER_PASSWORD='s3cr!t'" "$captured"
   ! grep -Eq 'MASTER_PASSWORD=0x[0-9a-f]+' "$captured"
+  ! grep -q 'MASTER_PASSWORD=UNHEX' "$captured"
   grep -q 'MASTER_USE_GTID=slave_pos' "$captured"
 }
 
@@ -490,6 +492,23 @@ _assess_linked() {
   mariadb_exec() { return 99; }
   run mdbr_replica_configure pod-0 secret "peer;DROP TABLE x" 3306 slave_pos
   [ "$status" -eq 2 ]
+}
+
+@test "replica configure SQL-escapes a single quote in MASTER_PASSWORD" {
+  local captured="$BATS_TEST_TMPDIR/sql.log"
+  : > "$captured"
+  mariadb_sql_vertical() { printf '%s\n' ''; }
+  mariadb_exec() {
+    local q="${@: -1}"
+    printf '%s\n' "$q" >> "$captured"
+    return 0
+  }
+
+  mdbr_replica_configure pod-0 "p'ass" peer.example 3306 current_pos
+
+  grep -q "MASTER_PASSWORD='p''ass'" "$captured"
+  ! grep -q 'MASTER_PASSWORD=UNHEX' "$captured"
+  ! grep -Eq 'MASTER_PASSWORD=0x[0-9a-f]+' "$captured"
 }
 
 @test "replica configure records SQL stderr on failure" {

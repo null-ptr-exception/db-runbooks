@@ -341,14 +341,16 @@ export MDBR_REPLICA_SQL_ERR=""
 # raw row count is 0 — ER_SLAVE_NOT_CONFIGURED (1200) aborts the multi-statement.
 mdbr_replica_configure() {
   local pod="$1" password="$2" host="$3" port="$4" gtid_mode="$5"
-  local password_hex raw_rows=0 sql_err=""
+  local password_sql raw_rows=0 sql_err=""
 
   MDBR_REPLICA_SQL_ERR=""
   [[ "$host" =~ ^[A-Za-z0-9._-]+$ ]] || return 2
   [[ "$port" =~ ^[1-9][0-9]*$ ]] || return 2
   [[ "$gtid_mode" == "current_pos" || "$gtid_mode" == "slave_pos" ]] || return 2
-  password_hex="$(printf '%s' "$password" | od -An -tx1 | tr -d '[:space:]')"
-  [[ -n "$password_hex" ]] || return 2
+  # CHANGE MASTER only accepts a string literal for MASTER_PASSWORD — not 0x…
+  # hex and not UNHEX(...) (both ERROR 1064 on MariaDB 10.6 in CI). Escape
+  # single quotes the SQL way; never log this value.
+  password_sql="$(printf '%s' "$password" | sed "s/'/''/g")"
 
   raw_rows="$(mdbr_replica_raw_slave_rows "$pod" "$password")" || return 1
   if (( raw_rows > 0 )); then
@@ -366,7 +368,7 @@ mdbr_replica_configure() {
       MASTER_HOST='${host}',
       MASTER_PORT=${port},
       MASTER_USER='root',
-      MASTER_PASSWORD=UNHEX('${password_hex}'),
+      MASTER_PASSWORD='${password_sql}',
       MASTER_USE_GTID=${gtid_mode};
     START SLAVE;
   " 2>&1 >/dev/null)"; then

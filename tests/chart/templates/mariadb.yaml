@@ -5,7 +5,7 @@
 apiVersion: v1
 kind: Secret
 metadata:
-  name: mariadb
+  name: {{ .Values.mariadb.name }}
   namespace: {{ .Values.mariadb.namespace }}
 stringData:
   password: {{ .Values.mariadb.rootPassword | quote }}
@@ -26,7 +26,7 @@ stringData:
 apiVersion: {{ .Values.mariadb.operatorGroup }}/v1alpha1
 kind: MariaDB
 metadata:
-  name: mariadb
+  name: {{ .Values.mariadb.name }}
   namespace: {{ .Values.mariadb.namespace }}
 spec:
 {{- if .Values.mariadb.objectStorage.enabled }}
@@ -35,7 +35,7 @@ spec:
         name: {{ .Values.mariadb.objectStorage.secretName }}
 {{- end }}
   rootPasswordSecretKeyRef:
-    name: mariadb
+    name: {{ .Values.mariadb.name }}
     key: password
   port: 3306
   image: {{ .Values.mariadb.image }}
@@ -54,7 +54,7 @@ spec:
       podIndex: 0
     replica:
       replPasswordSecretKeyRef:
-        name: mariadb
+        name: {{ .Values.mariadb.name }}
         key: password
   # Keep the operator-native role Services explicit: the namespace-local
   # database gateway routes writes to the primary and reads to secondaries.

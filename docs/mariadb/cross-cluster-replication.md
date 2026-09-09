@@ -69,7 +69,7 @@ The assessment checks:
 
 | Check | Result when it fails |
 |---|---|
-| A and B have distinct `server_id` values | `SERVER_ID_CONFLICT`; confirmed attach applies B's configured v24 range and reassesses. |
+| A and B have the same `server_id` values | `SERVER_ID_CONFLICT`; confirmed attach applies B's configured v24 range and reassesses. |
 | B has a saved `gtid_slave_pos` | `NO_REPLICATION_HISTORY`; rebuild. |
 | B is not ahead of A | `GTID_DIVERGED`; rebuild. |
 | A still retains B's starting binlog | `PRIMARY_BINLOG_PURGED`; rebuild. |

@@ -6,7 +6,7 @@ metadata:
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
-    resourceNames: ["mariadb"]
+    resourceNames: [{{ .Values.mariadb.name | quote }}]
     # patch/update: restore-in-place temporarily fences rollout with OnDelete.
     # The v24 operator reconciles replicas, so the task never scales this STS.
     verbs: ["get", "patch", "update"]

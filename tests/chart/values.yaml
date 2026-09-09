@@ -46,6 +46,8 @@ aqsh:
 # --- mariadb (operator-managed) ---
 mariadb:
   enabled: false
+  # MariaDB CR / StatefulSet name (operator uses the same name for the STS).
+  name: mariadb
   namespace: mariadb-1
   # CRD apiGroup of the mariadb-operator generation this deployment runs:
   # k8s.mariadb.com (current) or a legacy mariadb.*.mmontes.io fork. Drives both

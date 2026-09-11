@@ -372,8 +372,10 @@ field() { jq -r "$1" "${RESULT}"; }
 }
 
 @test "switch-primary waits for delayed operator rollback before declaring recovery" {
+  # This tests three delayed reads, not a one-second performance deadline.
+  # Keep enough recovery budget for shell/jq startup on a loaded local machine.
   run_switch DRY_RUN=false CONFIRM=true TARGET_POD_INDEX=1 MOCK_PRIMARY_INDEX=0 \
-    WAIT_TIMEOUT=1 SWITCH_RECOVERY_TIMEOUT=1 MOCK_SWITCH_STUCK=1 \
+    WAIT_TIMEOUT=1 SWITCH_RECOVERY_TIMEOUT=10 MOCK_SWITCH_STUCK=1 \
     MOCK_ROLLBACK_RECOVERS=1 MOCK_ROLLBACK_RECOVERY_DELAY_READS=3
   [ "$status" -ne 0 ]
   [ "$(field '.reason_code')" = "SWITCH_TIMEOUT_ROLLED_BACK" ]

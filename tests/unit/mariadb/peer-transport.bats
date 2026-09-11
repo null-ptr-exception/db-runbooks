@@ -1,0 +1,191 @@
+#!/usr/bin/env bats
+# =============================================================================
+# Unit tests for the peer-AQSH transport.
+#
+# Regression: replication/rebuild originally called blue-green's
+# bg_peer_call_task to ask the primary for a physical backup. That variant
+# injects peer_aqsh_url/peer_token into the payload — required by blue/green's
+# own task contract, but physical-backup does not declare those inputs, so aqsh
+# rejected every request with 400 and the rebuild failed at its first step.
+#
+# The distinction is now structural (neutral transport + blue/green wrapper) and
+# pinned here: what each one puts on the wire.
+# =============================================================================
+
+setup() {
+  LIB_DIR="$(cd "$BATS_TEST_DIRNAME/../../../aqsh-tasks/lib" && pwd)"
+  export LIB_DIR
+  # blue-green.sh reads ${DB_NAMESPACE:?} at source time.
+  export DB_NAMESPACE="test-ns"
+  PAYLOAD_FILE="$BATS_TEST_TMPDIR/payload.json"
+  export PAYLOAD_FILE
+
+  # shellcheck disable=SC1091
+  source "$LIB_DIR/mariadb-blue-green.sh"   # also pulls in mariadb-task-common.sh
+
+  # Intercept the wire. The submit call carries -d <payload>; the poll call does
+  # not, and answers "completed" so the transport returns immediately.
+  curl() {
+    local args=("$@") body="" i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      if [[ "${args[i]}" == "-d" ]]; then
+        body="${args[i+1]}"
+      fi
+    done
+    if [[ -n "$body" ]]; then
+      printf '%s' "$body" > "$PAYLOAD_FILE"
+      printf '%s\n202' '{"id":"task-1"}'
+    else
+      # %s, not a format string: printf would turn the \" escapes into bare
+      # quotes and emit invalid JSON, which jq then cannot parse — the poll loop
+      # would spin to its full timeout instead of seeing "completed".
+      printf '%s' '{"status":"completed","result":{"data":"{\"data\":{\"ok\":true}}"}}'
+    fi
+  }
+}
+
+@test "the neutral transport sends the payload verbatim" {
+  run mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1","confirm":"true"}'
+  [ "$status" -eq 0 ]
+
+  # Exactly the declared fields — anything extra is a 400 from aqsh.
+  run jq -Sc 'keys' "$PAYLOAD_FILE"
+  [ "$output" = '["confirm","namespace"]' ]
+}
+
+@test "the neutral transport does not inject peer credentials" {
+  mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}'
+
+  run jq -r 'has("peer_aqsh_url") or has("peer_token")' "$PAYLOAD_FILE"
+  [ "$output" = "false" ]
+}
+
+@test "the blue-green wrapper does inject peer credentials" {
+  # Its own tasks declare these as required inputs, including on internal-step
+  # calls, so the injection has to stay — just not in the shared transport.
+  run bg_peer_call_task "op" "http://peer:8080" "tok" "blue-green/create" \
+    '{"namespace":"ns-1"}'
+  [ "$status" -eq 0 ]
+
+  run jq -r '.peer_aqsh_url + "|" + .peer_token' "$PAYLOAD_FILE"
+  [ "$output" = "http://peer:8080|tok" ]
+}
+
+@test "the blue-green wrapper preserves the caller's own fields" {
+  bg_peer_call_task "op" "http://peer:8080" "tok" "blue-green/create" \
+    '{"namespace":"ns-1","internal_step":"bootstrap"}'
+
+  run jq -r '.namespace + "|" + .internal_step' "$PAYLOAD_FILE"
+  [ "$output" = "ns-1|bootstrap" ]
+}
+
+@test "the transport returns the peer task's inner result data" {
+  run mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.ok' <<<"$output")" = "true" ]
+}
+
+@test "a non-202 submit is a failure with a public-safe marker" {
+  curl() { printf '%s\n400' '{"error":"bad request"}'; }
+
+  run mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}'
+  [ "$status" -eq 1 ]
+
+  # Called without `run` so MDBT_PEER_ERR lands in this shell.
+  mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}' || true
+  [ "$(jq -r '.stage' <<<"$MDBT_PEER_ERR")" = "peer-operation" ]
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_REQUEST_REJECTED" ]
+  # No backend diagnostics leak into the marker.
+  [[ "$MDBT_PEER_ERR" != *"bad request"* ]]
+}
+
+@test "auth failures are classified without leaking response bodies" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}' || true
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_AUTH_FAILED" ]
+  [[ "$MDBT_PEER_ERR" != *"unauthorized"* ]]
+}
+
+@test "a failed peer task is reported as a failure" {
+  curl() {
+    local args=("$@") body="" i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [[ "${args[i]}" == "-d" ]] && body="${args[i+1]}"
+    done
+    if [[ -n "$body" ]]; then printf '%s\n202' '{"id":"task-1"}'; else printf '%s' '{"status":"failed"}'; fi
+  }
+
+  run mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}'
+  [ "$status" -eq 1 ]
+}
+
+@test "capture helper keeps MDBT_PEER_ERR in the current shell on failure" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  out="stale"
+  # Must NOT use `run` / $(...) here — that is the footgun under test.
+  mdbt_peer_call_task_capture out "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}' || true
+  [ -z "$out" ]
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "PEER_AUTH_FAILED" ]
+}
+
+@test "capture helper stores peer result JSON on success" {
+  out=""
+  mdbt_peer_call_task_capture out "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}'
+  [ "$(jq -r '.ok' <<<"$out")" = "true" ]
+}
+
+@test "command substitution drops MDBT_PEER_ERR (the attach footgun)" {
+  curl() { printf '%s\n401' '{"error":"unauthorized"}'; }
+
+  MDBT_PEER_ERR='{"stage":"peer-operation","reason":"STALE"}'
+  # Intentionally wrong call shape — documents why attach must use capture.
+  out="$(mdbt_peer_call_task "http://peer:8080" "tok" "physical-backup" '{"namespace":"ns-1"}')" || true
+  # Parent shell still sees the pre-call value; the real reason lived only in the subshell.
+  [ "$(jq -r '.reason' <<<"$MDBT_PEER_ERR")" = "STALE" ]
+}
+
+@test "embedding MDBT_PEER_ERR into jq must not use brace-default footgun" {
+  # Regression: "${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}" appends a
+  # stray "}" when the variable is set, so --argjson rejects the marker and
+  # attach collapsed its public data to {}.
+  MDBT_PEER_ERR='{"stage":"peer-operation","reason":"PEER_AUTH_FAILED"}'
+  peer_err="${MDBT_PEER_ERR:-}"
+  [[ -n "$peer_err" ]] || peer_err='{"stage":"peer-operation"}'
+  run jq -nc --argjson base '{"stage":"backup"}' --argjson peer "$peer_err" \
+    '$base + {peer: $peer}'
+  [ "$status" -eq 0 ]
+  [ "$(jq -r '.peer.reason' <<<"$output")" = "PEER_AUTH_FAILED" ]
+
+  # Document the broken expansion still produces invalid JSON.
+  broken="${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}"
+  [[ "$broken" == *"}}" ]]
+}
+
+@test "a failed peer task returns only stable diagnostic identifiers" {
+  curl() {
+    local args=("$@") body="" i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [[ "${args[i]}" == "-d" ]] && body="${args[i+1]}"
+    done
+    if [[ -n "$body" ]]; then
+      printf '%s\n202' '{"id":"task-1"}'
+    else
+      printf '%s' '{"status":"failed","result":{"data":"{\"operation\":\"physical-backup\",\"reason\":\"BACKUP_FAILED\",\"message\":\"secret backend detail\",\"data\":{\"stage\":\"upload\"}}"}}'
+    fi
+  }
+
+  local marker
+  mdbt_peer_call_task_capture marker "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}' || true
+  marker="$MDBT_PEER_ERR"
+
+  [ "$(jq -r '.peerReason' <<<"$marker")" = "BACKUP_FAILED" ]
+  [ "$(jq -r '.operation' <<<"$marker")" = "physical-backup" ]
+  [ "$(jq -r '.peerStage' <<<"$marker")" = "upload" ]
+  [[ "$marker" != *"secret backend detail"* ]]
+}

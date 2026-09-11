@@ -383,11 +383,11 @@ wait_for_marker_rows() {
   echo "v24 still rejects unsupported blue-green operations without mutation" >&3
   submit_allow_failure "blue-green/create" "$AQSH_A_URL" \
     "$(jq -nc --arg ns "$DB_NS" --arg peer "$AQSH_B_URL" \
-      '{namespace:$ns,blue_name:"mariadb",green_name:"unused-green",green_image:"mariadb:10.6",peer_aqsh_url:$peer,peer_token:"unused",dry_run:"true"}')"
+      '{namespace:$ns,blue_name:"mariadb",green_name:"unused-green",green_image:"mariadb:10.6",peer_aqsh_url:$peer,peer_token:"unused"}')"
   assert_equal "$(_task_result_reason)" OPERATION_UNAVAILABLE
   submit_allow_failure "blue-green/switchover" "$AQSH_A_URL" \
     "$(jq -nc --arg ns "$DB_NS" --arg peer "$AQSH_B_URL" \
-      '{namespace:$ns,blue_name:"mariadb",green_name:"unused-green",peer_aqsh_url:$peer,peer_token:"unused",dry_run:"true"}')"
+      '{namespace:$ns,blue_name:"mariadb",green_name:"unused-green",peer_aqsh_url:$peer,peer_token:"unused"}')"
   assert_equal "$(_task_result_reason)" OPERATION_UNAVAILABLE
   run kubectl --context "$CTX_A" -n "$DB_NS" get mariadb -o jsonpath='{.items[*].metadata.name}'
   assert_success

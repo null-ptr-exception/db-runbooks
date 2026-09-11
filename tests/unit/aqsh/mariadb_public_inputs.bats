@@ -24,6 +24,33 @@ task_inputs() {
   ' "${TASKS_FILE}"
 }
 
+# Check the actual E2E request against the declared API, without starting Kind.
+assert_legacy_blue_green_payload() {
+  local task="$1" expression payload unknown
+  expression="$(python3 - "$BATS_TEST_DIRNAME/../../mariadb-legacy/replication_link.bats" "$task" <<'PY'
+import pathlib, re, sys
+source = pathlib.Path(sys.argv[1]).read_text()
+match = re.search(r'submit_allow_failure "' + re.escape(sys.argv[2])
+                  + r'".*?\n\s*\'([^\n]+)\'\)"', source, re.S)
+if not match:
+    raise SystemExit("Cannot locate the literal E2E payload for " + sys.argv[2])
+print(match.group(1))
+PY
+)" || return 1
+  payload="$(jq -nc --arg ns mariadb-1 --arg peer http://peer "$expression")" || return 1
+  unknown="$(jq -nr --argjson payload "$payload" --arg allowed "$(task_inputs "$task")" \
+    '($payload | keys) - ($allowed | split("\n")) | join(",")')" || return 1
+  [[ -z "$unknown" ]] || { echo "$task E2E sends undeclared inputs: $unknown" >&2; return 1; }
+}
+
+@test "legacy blue-green create E2E payload matches the public API" {
+  assert_legacy_blue_green_payload blue-green/create
+}
+
+@test "legacy blue-green switchover E2E payload matches the public API" {
+  assert_legacy_blue_green_payload blue-green/switchover
+}
+
 @test "snapshot tasks expose only user decisions as public inputs" {
   run task_inputs backup
   [ "$status" -eq 0 ]

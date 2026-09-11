@@ -3,9 +3,8 @@ set -euo pipefail
 
 # =============================================================================
 # mariadb/replication/detach.sh
-# Remove the v24 cross-cluster SQL link from the standby's current primary.
-# The MariaDB CR, StatefulSet, PVCs, data, and operator-managed local replicas
-# are left untouched.
+# Remove the v24 cross-cluster SQL link from the standalone standby Pod.
+# The MariaDB CR, StatefulSet, PVC, and data are left untouched.
 # =============================================================================
 
 OP="replication/detach"
@@ -42,7 +41,10 @@ MDB="$MARIADB_NAME"
 
 CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
   mdbt_fail "$OP" "database is unavailable" '{"stage":"target"}' 1 DATABASE_NOT_FOUND
-PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+mdbr_is_standalone "$CR_JSON" || \
+  mdbt_fail "$OP" "v24 cross-cluster standby must disable operator local replication" \
+    '{"stage":"capability"}' 2 OPERATION_UNAVAILABLE
+PRIMARY_POD="$(mdbr_primary_pod "$CR_JSON" || true)"
 [[ -n "$PRIMARY_POD" ]] || \
   mdbt_fail "$OP" "database is not ready" '{"stage":"target"}' 1 DATABASE_NOT_READY
 mapfile -t PODS < <(mariadb_list_pods "$(mariadb_cr_replicas || true)")
@@ -56,6 +58,7 @@ LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD")" || \
     '{"stage":"detach"}' 1 DATABASE_NOT_READY
 LINK_CONFIGURED="$(jq -r '.configured // false' <<<"$LINK_STATUS")"
 LINK_SOURCE="$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")"
+LINK_CONNECTION="$(jq -r '.connectionName // empty' <<<"$LINK_STATUS")"
 
 _data() {
   local stage="$1" changed="$2"
@@ -87,7 +90,7 @@ if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then
 fi
 
 mdbt_require_confirm "$OP" "$CONFIRM"
-if ! mdbr_replica_stop_reset "$PRIMARY_POD" "$ROOT_PASSWORD"; then
+if ! mdbr_replica_stop_reset "$PRIMARY_POD" "$ROOT_PASSWORD" "$LINK_CONNECTION"; then
   mdbt_fail "$OP" "replication link could not be removed" \
     "$(_data detach false)" 1 LINK_NOT_REMOVED
 fi

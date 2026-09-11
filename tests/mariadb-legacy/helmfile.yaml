@@ -147,7 +147,10 @@ releases:
           enabled: true
           namespace: mariadb-1
           operatorGroup: mariadb.mmontes.io
-          replicas: 2
+          # v0.0.24's local-replication reconciler resets every SQL channel.
+          # The cross-cluster standby must therefore be standalone.
+          replicas: 1
+          serverIdStartIndex: 100
           objectStorage:
             enabled: true
             secretName: mariadb-storage-destination
@@ -176,7 +179,6 @@ releases:
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
               REPL_PEER_PORT_DEFAULT=30091
               REPL_PEER_AQSH_URL_DEFAULT=http://aqsh-mariadb.kind-a.test:30080
-              REPL_SERVER_ID_START_INDEX_DEFAULT=100
               REPL_PEER_TOKEN_SA_DEFAULT=kube-auth-proxy
           authProxy:
             tokenReviewURL: http://fedauth-mariadb.kind-a.test:30080

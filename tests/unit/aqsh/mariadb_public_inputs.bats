@@ -53,7 +53,7 @@ task_inputs() {
 
   run task_inputs restore-in-place
   [ "$status" -eq 0 ]
-  [ "$output" = $'namespace\nbackup\ndry_run\nwait_timeout\nconfirm' ]
+  [ "$output" = $'namespace\nbackup\ndry_run\nconfirm' ]
 
   run task_inputs logical-restore
   [ "$status" -eq 0 ]
@@ -67,7 +67,7 @@ task_inputs() {
   # authenticated call point replication at an arbitrary endpoint.
   run task_inputs "replication/attach"
   [ "$status" -eq 0 ]
-  [ "$output" = $'namespace\ndry_run\nconfirm\nwait_timeout\nexpected_action' ]
+  [ "$output" = $'namespace\ndry_run\nconfirm\nexpected_action' ]
 
   # Re-seeding is not a replication/rebuild endpoint: attach owns that decision
   # and uses the shared restore-in-place primitive internally.

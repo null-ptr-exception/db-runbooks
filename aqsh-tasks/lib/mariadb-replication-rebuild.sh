@@ -31,9 +31,9 @@
 # The caller supplies the exact backup name: a stale object cannot be selected by
 # a broad "latest under prefix" lookup.
 #
-# v0.0.24 has no `serverIdStartIndex` field. The attach task applies the
-# standby's disjoint runtime server-id policy before assessment and again after
-# this restore, because the physical backup can carry the primary's old value.
+# v0.0.24 has no `serverIdStartIndex` field. The standalone standby deployment
+# must persist a disjoint server_id in myCnf; that startup setting replaces the
+# value carried by the primary's physical backup when the Pod is recreated.
 # =============================================================================
 
 [[ -n "${_MARIADB_REPLICATION_REBUILD_LOADED:-}" ]] && return 0

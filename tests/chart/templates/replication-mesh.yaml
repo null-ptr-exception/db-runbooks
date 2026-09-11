@@ -21,7 +21,7 @@ reproduce: Cilium's own resolution path, and the real deployment's port (3306,
 not 30091) — which is exactly why the port is deploy-time config.
 */}}
 {{- if .Values.replicationMesh.expose.enabled }}
-{{- $backendHost := .Values.replicationMesh.expose.backendHost | default (printf "mariadb-primary.%s.svc.cluster.local" .Release.Namespace) }}
+{{- $backendHost := .Values.replicationMesh.expose.backendHost | default (printf "%s-primary.%s.svc.cluster.local" .Values.mariadb.name .Release.Namespace) }}
 apiVersion: networking.istio.io/v1
 kind: VirtualService
 metadata:

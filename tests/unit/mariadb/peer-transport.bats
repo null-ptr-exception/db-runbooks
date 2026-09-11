@@ -165,3 +165,27 @@ setup() {
   broken="${MDBT_PEER_ERR:-{\"stage\":\"peer-operation\"}}"
   [[ "$broken" == *"}}" ]]
 }
+
+@test "a failed peer task returns only stable diagnostic identifiers" {
+  curl() {
+    local args=("$@") body="" i
+    for ((i = 0; i < ${#args[@]}; i++)); do
+      [[ "${args[i]}" == "-d" ]] && body="${args[i+1]}"
+    done
+    if [[ -n "$body" ]]; then
+      printf '%s\n202' '{"id":"task-1"}'
+    else
+      printf '%s' '{"status":"failed","result":{"data":"{\"operation\":\"physical-backup\",\"reason\":\"BACKUP_FAILED\",\"message\":\"secret backend detail\",\"data\":{\"stage\":\"upload\"}}"}}'
+    fi
+  }
+
+  local marker
+  mdbt_peer_call_task_capture marker "http://peer:8080" "tok" "physical-backup" \
+    '{"namespace":"ns-1"}' || true
+  marker="$MDBT_PEER_ERR"
+
+  [ "$(jq -r '.peerReason' <<<"$marker")" = "BACKUP_FAILED" ]
+  [ "$(jq -r '.operation' <<<"$marker")" = "physical-backup" ]
+  [ "$(jq -r '.peerStage' <<<"$marker")" = "upload" ]
+  [[ "$marker" != *"secret backend detail"* ]]
+}

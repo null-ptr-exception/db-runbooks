@@ -52,6 +52,13 @@ replacement retries idempotent.
 
 ## v24 SQL behavior
 
+The standby must have one Pod with operator local replication disabled. The
+v24 local replication reconciler resets SQL channels; attaching to its managed
+replica topology would therefore lose the cross-cluster link on reconciliation.
+The standalone standby persists its distinct `server_id` in `spec.myCnf`, so
+Pod recreation and in-place restore do not revert it to the primary's ID.
+
+
 After an in-place restore, attach uses `MASTER_USE_GTID=current_pos`. A resumable
 standby uses `MASTER_USE_GTID=slave_pos`. The source host is derived from the
 namespace, the credential is platform-managed, and the SQL statement is never

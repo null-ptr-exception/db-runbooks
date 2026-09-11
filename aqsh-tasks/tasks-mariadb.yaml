@@ -728,11 +728,6 @@ tasks:
         required: false
         type: string
         default: "false"
-      - name: wait_timeout
-        env: WAIT_TIMEOUT
-        required: false
-        type: string
-        default: "300"
       # Optional guard: pass the action the dry run reported to refuse execution
       # if the assessment has since changed. Empty means "follow the assessment".
       - name: expected_action
@@ -951,11 +946,6 @@ tasks:
         required: false
         type: string
         default: "true"
-      - name: wait_timeout
-        env: WAIT_TIMEOUT
-        required: false
-        type: string
-        default: "900"
       - name: confirm
         env: CONFIRM
         required: false

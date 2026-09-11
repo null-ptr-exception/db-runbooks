@@ -46,7 +46,8 @@ aqsh:
 # --- mariadb (operator-managed) ---
 mariadb:
   enabled: false
-  # MariaDB CR / StatefulSet name (operator uses the same name for the STS).
+  # MariaDB CR name; the operator uses the same name for its StatefulSet and
+  # role Services. RBAC and mesh templates consume this single source of truth.
   name: mariadb
   namespace: mariadb-1
   # CRD apiGroup of the mariadb-operator generation this deployment runs:

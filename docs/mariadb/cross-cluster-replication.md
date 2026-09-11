@@ -3,22 +3,25 @@
 This runbook attaches an existing standby in cluster B to an existing primary
 in cluster A. PR #99 targets mariadb-operator 0.24 only.
 
-The operator still owns each cluster's MariaDB CR, StatefulSet, Services, and
-local primary/replica topology. It does not participate in the cross-cluster
-link: 0.24 has no `ExternalMariaDB`, `spec.multiCluster`, `PhysicalBackup`, or
-`spec.suspend` API.
+The operator still owns each cluster's MariaDB CR, StatefulSet, and Services.
+It does not participate in the cross-cluster link: 0.24 has no
+`ExternalMariaDB`, `spec.multiCluster`, `PhysicalBackup`, or `spec.suspend` API.
+The standby must be a one-Pod CR with operator local replication disabled.
+Version 0.0.24 stops and resets all SQL channels whenever it reconciles its own
+replica topology, so a multi-replica standby cannot safely share that topology
+with the runbook-owned cross-cluster channel.
 
 ## Architecture
 
 ```text
 cluster A                                          cluster B
-MariaDB primary                                   MariaDB standby
-  operator 0.24 owns local instance                 operator 0.24 owns local instance
+MariaDB primary                                   MariaDB standby (one Pod)
+  operator 0.24 owns local instance                 operator 0.24 owns the instance
   physical-backup task streams .xb                  db-runbooks owns cross-cluster SQL
            |                                                     |
            +------ shared S3/MinIO exact backup -----------------+
 
-B current primary -- CHANGE MASTER / START SLAVE --> A mesh service
+B standby Pod -- CHANGE MASTER / START SLAVE --> A mesh service
 ```
 
 The peer hostname is derived from the namespace:
@@ -30,6 +33,10 @@ The peer hostname is derived from the namespace:
 Both clusters use the same platform-managed root credential and object-storage
 policy. Callers cannot provide an arbitrary replication host, bucket, prefix,
 credential reference, or restore image.
+
+The standby deployment must persist a `server_id` distinct from every server
+in cluster A, for example through `spec.myCnf`. A runtime `SET GLOBAL server_id`
+is insufficient because it is lost whenever the Pod is recreated.
 
 ## Task API
 
@@ -44,10 +51,10 @@ credential reference, or restore image.
 Public inputs:
 
 ```text
-replication/attach  namespace, dry_run, confirm, wait_timeout, expected_action
+replication/attach  namespace, dry_run, confirm, expected_action
 replication/status  namespace, include_peer
 replication/detach  namespace, dry_run, confirm
-restore-in-place    namespace, backup, dry_run, wait_timeout, confirm
+restore-in-place    namespace, backup, dry_run, confirm
 ```
 
 `restore-in-place` is intentionally distinct from `restore`. The former replaces
@@ -69,7 +76,7 @@ The assessment checks:
 
 | Check | Result when it fails |
 |---|---|
-| A and B have the same `server_id` values | `SERVER_ID_CONFLICT`; confirmed attach applies B's configured v24 range and reassesses. |
+| A and B have distinct, persistent `server_id` values | `SERVER_ID_CONFLICT`; fix the standby deployment before attaching. |
 | B has a saved `gtid_slave_pos` | `NO_REPLICATION_HISTORY`; rebuild. |
 | B is not ahead of A | `GTID_DIVERGED`; rebuild. |
 | A still retains B's starting binlog | `PRIMARY_BINLOG_PURGED`; rebuild. |
@@ -82,19 +89,17 @@ into a destructive rebuild between calls.
 When the action is `attach`, B runs:
 
 ```sql
-STOP SLAVE;
-RESET SLAVE ALL;
-CHANGE MASTER TO
+CHANGE MASTER 'aqsh-cross-cluster' TO
   MASTER_HOST='<derived peer>',
   MASTER_PORT=<configured port>,
   MASTER_USER='root',
   MASTER_PASSWORD=<platform credential>,
   MASTER_USE_GTID=slave_pos;
-START SLAVE;
+START SLAVE 'aqsh-cross-cluster';
 ```
 
-The password is encoded as a SQL hex literal and is never included in logs or
-task results. Attach succeeds only after both replica threads are running.
+The password uses a quoted SQL string with quote doubling and a session-local
+`NO_BACKSLASH_ESCAPES` mode; it is never included in logs or task results. Attach succeeds only after both replica threads are running.
 
 ## Rebuild and in-place restore
 
@@ -160,22 +165,23 @@ It does not inspect `spec.multiCluster` because that field does not exist on
 Detach verifies that the configured source is the derived peer, then runs:
 
 ```sql
-STOP SLAVE;
-RESET SLAVE ALL;
+STOP SLAVE 'aqsh-cross-cluster';
+RESET SLAVE 'aqsh-cross-cluster' ALL;
 ```
 
-It leaves the CR, StatefulSet, PVCs, data, and operator-managed local replication
-in place. Repeating detach after the link is gone is a successful no-op.
+It leaves the CR, StatefulSet, PVC, and data in place. Repeating detach after
+the link is gone is a successful no-op.
 
 ## Deployment requirements
 
 - Both clusters run mariadb-operator 0.24 (`mariadb.*.mmontes.io`). Tasks fail
   closed when operator discovery is unknown or a different generation is found.
-- mariadb-operator 0.0.24 has no `serverIdStartIndex` field. It initially
-  assigns `10 + ordinal` on every cluster. Standby B must set
-  `REPL_SERVER_ID_START_INDEX_DEFAULT` to a range disjoint from A (for example,
-  `100`); confirmed attach applies the live values before assessment and again
-  after an in-place restore.
+- Standby B has exactly one Pod and `.spec.replication.enabled` is false or
+  absent. Operator-managed local replication is incompatible with this v24 SQL
+  channel because its reconciler stops and resets all channels.
+- mariadb-operator 0.0.24 has no `serverIdStartIndex` field. Standby B persists
+  a server ID disjoint from A in `.spec.myCnf` (for example,
+  `[mariadb]\nserver_id=100`).
 - The mesh publishes the derived peer Service and A accepts the shared
   credential from B.
 - Both workloads resolve the same S3 endpoint, bucket, prefix, and credentials.
@@ -196,7 +202,7 @@ Relevant deployment configuration:
 | `REPL_PEER_TOKEN_FILE_DEFAULT` | projected service-account token | Fallback token file; attach prefers a minted TokenRequest bearer for peer AQSH auth. |
 | `REPL_PEER_TOKEN_SA_DEFAULT` | unset (JWT claim fallback) | ServiceAccount name used to mint the peer TokenRequest bearer. |
 | `REPL_PEER_TASK_TIMEOUT_DEFAULT` | `900` | Maximum peer backup task wait. |
-| `REPL_SERVER_ID_START_INDEX_DEFAULT` | unset | v24 standby server-id base; use a range disjoint from the peer. |
+| `REPL_RESTORE_WAIT_TIMEOUT_DEFAULT` | `900` | Maximum local restore reconciliation and final link wait. |
 
 ## Testing
 
@@ -229,3 +235,47 @@ The sandbox uses the Istio TCP mesh stand-in in
 `tests/chart/templates/replication-mesh.yaml`; production uses Cilium cluster
 mesh. Kind/operator E2E is intentionally separate from the local pre-review
 suite because it provisions clusters and takes a real physical backup.
+
+## Local E2E isolation
+
+Use the [low-resource validation and AI handoff](local-validation.md) for the
+default local gate. The full E2E below is opt-in; focused unit results do not
+constitute runtime replication evidence.
+
+Run the replication file independently from the repository root:
+
+```bash
+scripts/local-e2e/run.sh tests/mariadb-legacy/replication_link.bats
+```
+
+The wrapper copies the current worktree into a fresh privileged Docker-in-Docker
+container, with no host Docker socket or kubeconfig mount and no published host
+ports. The nested daemon owns its registry, images, two Kind clusters, operator
+CRDs, namespaces, and MinIO bucket. The container is removed on exit; logs are
+retained in the printed private temporary directory. Tool installation also
+stays inside that container. Default limits are 4 CPUs and 4 GiB; deployments
+with sufficient local resources can set `LOCAL_E2E_CPUS` and `LOCAL_E2E_MEMORY`.
+An in-container watchdog stops the daemon after 3600 seconds by default
+(`LOCAL_E2E_MAX_SECONDS`), even if the host runner dies. The next invocation
+removes only stopped containers carrying this runner's ownership label.
+The runner uses HTTP/1.1 for Go clients inside the container because chart
+repository downloads can fail over HTTP/2 in nested local networking.
+Helmfile setup gets a 900-second readiness budget for cold CNI startup and at
+most three attempts for specific transport errors. Bats and AQSH operations
+are not retried, and the original readiness checks remain required.
+
+The file contains one lifecycle scenario, including real row replication, standby
+Pod restart, persistent server ID, and the public exact-backup in-place restore. Assessment, rebuild, status, repeated
+attach, and repeated detach are consecutive steps inside that scenario, so
+Bats test filtering or parallel jobs cannot split their state dependencies.
+Run another E2E file with a separate wrapper invocation; it receives a fresh
+fixture. A successful second invocation demonstrates independence from the
+first invocation's data and cleanup.
+
+Direct `bats tests/mariadb-legacy/` still uses the shared `cluster-a`/`cluster-b`
+fixtures. Do not run that command concurrently with MariaDB, MongoDB, AQSH, or
+infra suites on the same Docker daemon. Legacy setup removes current-generation
+operator CRDs; suite teardown removes shared namespaces and MinIO. Separate
+namespaces alone cannot isolate those cluster-wide operations. The wrapper
+isolates those resources, but concurrent runs still share host CPU, memory,
+network bandwidth, and disk: run them sequentially on a resource-limited laptop.

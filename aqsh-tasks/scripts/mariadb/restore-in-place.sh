@@ -23,7 +23,8 @@ NAMESPACE="${DB_NAMESPACE:-}"
 BACKUP_NAME="${BACKUP_NAME:-}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-900}"
+# Operational budget is deployment policy, not a per-call decision.
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-${REPL_RESTORE_WAIT_TIMEOUT_DEFAULT:-900}}"
 
 mdbt_load_config
 mdbt_required "namespace" "$NAMESPACE" "$OP"
@@ -53,7 +54,7 @@ MDB="$MARIADB_NAME"
 
 CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
   mdbt_fail "$OP" "database is unavailable" '{"stage":"target"}' 1 DATABASE_NOT_FOUND
-PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+PRIMARY_POD="$(mdbr_primary_pod "$CR_JSON" || true)"
 [[ -n "$PRIMARY_POD" ]] || \
   mdbt_fail "$OP" "database is not ready" '{"stage":"target"}' 1 DATABASE_NOT_READY
 mapfile -t PODS < <(mariadb_list_pods "$(mariadb_cr_replicas || true)")

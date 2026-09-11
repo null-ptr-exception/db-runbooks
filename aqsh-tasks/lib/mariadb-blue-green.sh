@@ -11,6 +11,8 @@ fi
 
 # shellcheck source=aqsh-tasks/lib/mariadb-task-common.sh
 source "${LIB_DIR}/mariadb-task-common.sh"  # pulls in logging, response, k8s + generic helpers
+# shellcheck source=aqsh-tasks/lib/mariadb-peer-transport.sh
+source "${LIB_DIR}/mariadb-peer-transport.sh"
 # shellcheck source=aqsh-tasks/lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
 
@@ -241,7 +243,7 @@ bg_local_step() {
 # BG_PEER_ERR to a stable, public-safe marker and returns 1 (does NOT exit).
 # BG_PEER_ERR is read by the orchestrator scripts that source this lib.
 # shellcheck disable=SC2034
-# The HTTP submit/poll transport now lives in mariadb-task-common.sh as
+# The HTTP submit/poll transport lives in mariadb-peer-transport.sh as
 # mdbt_peer_call_task, so non-blue/green tasks can reuse it. What stays here is
 # the part that is genuinely blue/green-specific: injecting peer_aqsh_url and
 # peer_token into the payload.

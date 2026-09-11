@@ -5,8 +5,7 @@ set -euo pipefail
 # mariadb/replication/status.sh
 # Read-only v24 cross-cluster replication status. The operator has no topology
 # object for this link, so the authoritative state is SHOW ALL SLAVES STATUS on
-# this cluster's current primary. Operator status remains useful only for local
-# readiness and local replicas.
+# the standalone standby Pod. Operator status remains useful for readiness.
 # =============================================================================
 
 OP="replication/status"
@@ -42,7 +41,10 @@ MDB="$MARIADB_NAME"
 
 CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
   mdbt_fail "$OP" "database is unavailable" '{"stage":"target"}' 1 DATABASE_NOT_FOUND
-PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+mdbr_is_standalone "$CR_JSON" || \
+  mdbt_fail "$OP" "v24 cross-cluster standby must disable operator local replication" \
+    '{"stage":"capability"}' 2 OPERATION_UNAVAILABLE
+PRIMARY_POD="$(mdbr_primary_pod "$CR_JSON" || true)"
 PEER_HOST="$(mdbr_peer_host "$NAMESPACE")"
 ROOT_PASSWORD=""
 LINK_STATUS='{"configured":null,"running":false,"ioRunning":null,"sqlRunning":null,"secondsBehind":null,"sourceHost":null,"sourcePort":null,"connectionName":null,"usingGtid":null,"error":"DATABASE_NOT_READY"}'
@@ -58,8 +60,9 @@ fi
 LOCAL_VIEW="$(jq -nc \
   --argjson cr "$CR_JSON" \
   --argjson link "$LINK_STATUS" \
+  --arg primary "$PRIMARY_POD" \
   --arg peerHost "$PEER_HOST" '
-  ($cr.status.currentPrimary // null) as $cp
+  (if $primary == "" then null else $primary end) as $cp
   | ($cr.status.replication.replicas // {}) as $replicas
   | {
       ready: any($cr.status.conditions[]?; .type == "Ready" and .status == "True"),

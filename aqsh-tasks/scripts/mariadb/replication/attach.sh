@@ -5,8 +5,8 @@ set -euo pipefail
 # mariadb/replication/attach.sh
 # Attach an existing mariadb-operator 0.24 standby to the primary in the peer
 # cluster. Cross-cluster replication is runtime MariaDB state on v24: the
-# operator continues to own the local instance and its local replicas, while
-# this runbook owns CHANGE MASTER / START SLAVE on the standby's current primary.
+# operator continues to own the standalone local instance, while this runbook
+# owns CHANGE MASTER / START SLAVE on the standby Pod.
 #
 # A read-only assessment first chooses one of two paths:
 #   attach   resume from the standby's persisted gtid_slave_pos
@@ -30,7 +30,10 @@ source "${LIB_DIR}/mariadb-replication-rebuild.sh"
 NAMESPACE="${DB_NAMESPACE:-}"
 DRY_RUN="${DRY_RUN:-true}"
 CONFIRM="${CONFIRM:-false}"
-WAIT_TIMEOUT="${WAIT_TIMEOUT:-300}"
+# Operational budget is deployment policy, not a per-call decision. AQSH no
+# longer exposes WAIT_TIMEOUT as a task input; an environment override remains
+# available to deployments and unit tests.
+WAIT_TIMEOUT="${WAIT_TIMEOUT:-${REPL_RESTORE_WAIT_TIMEOUT_DEFAULT:-900}}"
 EXPECTED_ACTION="${EXPECTED_ACTION:-}"
 PEER_AQSH_URL="${PEER_AQSH_URL:-${REPL_PEER_AQSH_URL_DEFAULT:-}}"
 PEER_TOKEN_FILE="${REPL_PEER_TOKEN_FILE_DEFAULT:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
@@ -61,7 +64,10 @@ MDB="$MARIADB_NAME"
 
 CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
   mdbt_fail "$OP" "database is unavailable" '{"stage":"target"}' 1 DATABASE_NOT_FOUND
-PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+mdbr_is_standalone "$CR_JSON" || \
+  mdbt_fail "$OP" "v24 cross-cluster standby must disable operator local replication" \
+    '{"stage":"capability"}' 2 OPERATION_UNAVAILABLE
+PRIMARY_POD="$(mdbr_primary_pod "$CR_JSON" || true)"
 [[ -n "$PRIMARY_POD" ]] || \
   mdbt_fail "$OP" "database is not ready" '{"stage":"target"}' 1 DATABASE_NOT_READY
 
@@ -83,6 +89,7 @@ fi
 LINK_CONFIGURED="$(jq -r '.configured // false' <<<"$LINK_STATUS")"
 LINK_RUNNING="$(jq -r '.running // false' <<<"$LINK_STATUS")"
 LINK_SOURCE="$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")"
+LINK_CONNECTION="$(jq -r '.connectionName // empty' <<<"$LINK_STATUS")"
 
 # Never overwrite an unrelated replication source. Detach has the same guard.
 if [[ "$LINK_CONFIGURED" == "true" && "$LINK_SOURCE" != "$PEER_HOST" ]]; then
@@ -153,25 +160,6 @@ fi
 
 mdbt_require_confirm "$OP" "$CONFIRM"
 
-# mariadb-operator 0.0.24 does not expose a server-id range in the MariaDB
-# CRD. If this standby declares the v24 deployment policy, apply it to every
-# live member before the assessment. Keep dry-run read-only; the confirmed
-# call re-assesses after the runtime-only setting so a collision is not carried
-# into CHANGE MASTER.
-if [[ -n "$MDBR_SERVER_ID_START_INDEX" ]]; then
-  if ! mdbr_configure_server_ids "$ROOT_PASSWORD" "${PODS[@]}"; then
-    mdbt_fail "$OP" "standby server ids could not be configured" \
-      "$(_assessment_data assess false)" 1 SERVER_ID_CONFIGURATION_UNAVAILABLE
-  fi
-  if ! ASSESSMENT="$(mdbr_assess "$PRIMARY_POD" "$ROOT_PASSWORD" \
-    "$PEER_HOST" "$ALREADY_LINKED")"; then
-    mdbt_fail "$OP" "replication state could not be reassessed" \
-      "$(_assessment_data assess false)" 1 "$(mdbr_assess_reason "$ASSESSMENT")"
-  fi
-  ACTION="$(jq -r '.action' <<<"$ASSESSMENT")"
-  ASSESS_REASON="$(jq -r '.reason' <<<"$ASSESSMENT")"
-fi
-
 if [[ -n "$EXPECTED_ACTION" && "$EXPECTED_ACTION" != "$ACTION" ]]; then
   mdbt_fail "$OP" "assessment does not match expected_action" \
     "$(_assessment_data assess false)" 1 UNEXPECTED_ACTION
@@ -241,7 +229,7 @@ if [[ "$ACTION" == "rebuild" ]]; then
   CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
     mdbt_fail "$OP" "database is unavailable after restore" \
       "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
-  PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
+  PRIMARY_POD="$(mdbr_primary_pod "$CR_JSON" || true)"
   [[ -n "$PRIMARY_POD" ]] || \
     mdbt_fail "$OP" "database has no current primary after restore" \
       "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
@@ -249,43 +237,23 @@ if [[ "$ACTION" == "rebuild" ]]; then
   ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
     mdbt_fail "$OP" "database credentials are unavailable after restore" \
       "$(_assessment_data wire true)" 1 INTERNAL_ERROR
-  # Wire on the writable primary only. After restore the operator may briefly
-  # report a local replica as currentPrimary; that member still has the
-  # mariadb-operator slave connection and must not receive CHANGE MASTER.
-  _wire_wait=0
-  while :; do
-    _ro="$(mariadb_sql "$PRIMARY_POD" "$ROOT_PASSWORD" \
-      'SELECT @@GLOBAL.read_only' 2>/dev/null || true)"
-    [[ "$_ro" == "0" ]] && break
-    if (( _wire_wait >= WAIT_TIMEOUT )); then
-      mdbt_fail "$OP" "database has no writable primary after restore" \
-        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
-    fi
-    sleep 5
-    _wire_wait=$((_wire_wait + 5))
-    CR_JSON="$(_kubectl get "$MARIADB_RESOURCE" "$MDB" -o json 2>/dev/null)" || \
-      mdbt_fail "$OP" "database is unavailable after restore" \
-        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
-    PRIMARY_POD="$(jq -r '.status.currentPrimary // empty' <<<"$CR_JSON")"
-    [[ -n "$PRIMARY_POD" ]] || \
-      mdbt_fail "$OP" "database has no current primary after restore" \
-        "$(_assessment_data wire true)" 1 DATABASE_NOT_READY
-    mapfile -t PODS < <(mariadb_list_pods "$(mariadb_cr_replicas || true)")
-    ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
-      mdbt_fail "$OP" "database credentials are unavailable after restore" \
-        "$(_assessment_data wire true)" 1 INTERNAL_ERROR
-  done
-  if [[ -n "$MDBR_SERVER_ID_START_INDEX" ]] \
-    && ! mdbr_configure_server_ids "$ROOT_PASSWORD" "${PODS[@]}"; then
-    mdbt_fail "$OP" "restored standby server ids could not be configured" \
-      "$(_assessment_data wire true)" 1 SERVER_ID_CONFIGURATION_UNAVAILABLE
+  # A replica-origin backup carries its operator-managed named replication
+  # connection into the restored datadir. On this new primary that connection
+  # is stale source metadata and must be removed before CHANGE MASTER creates
+  # the cross-cluster link.
+  if ! mdbr_replica_reset_restored_source "$PRIMARY_POD" "$ROOT_PASSWORD"; then
+    mdbt_fail "$OP" "restored replication metadata could not be cleared" \
+      "$(_assessment_data wire true)" 1 RESTORED_REPLICATION_STATE_UNAVAILABLE
   fi
 fi
 
 GTID_MODE=slave_pos
 [[ "$REBUILT" == "true" ]] && GTID_MODE=current_pos
+CONFIGURE_OLD_CONNECTION="$LINK_CONNECTION"
+[[ "$REBUILT" == "true" ]] && CONFIGURE_OLD_CONNECTION=""
 if ! mdbr_replica_configure "$PRIMARY_POD" "$ROOT_PASSWORD" \
-  "$PEER_HOST" "$MDBR_PEER_PORT" "$GTID_MODE"; then
+  "$PEER_HOST" "$MDBR_PEER_PORT" "$GTID_MODE" \
+  "$CONFIGURE_OLD_CONNECTION"; then
   # Refresh before failing: _assessment_data otherwise embeds the pre-rebuild
   # LINK_STATUS and hides the real Last_IO_Error / configured flags.
   LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD" 2>/dev/null)" \

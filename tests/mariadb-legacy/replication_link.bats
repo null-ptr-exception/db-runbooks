@@ -187,7 +187,7 @@ wait_for_marker_rows() {
   echo "standby can reach the primary through the mesh stand-in" >&3
   # Proves the data path before any task depends on it: a failure here is
   # infrastructure, not task logic.
-  local host="${DB_NS}-rw.${DB_NS}.svc.cluster.local"
+  local host="${DB_NS}-rw"
   run kubectl --context "$CTX_B" -n "$DB_NS" exec mariadb-0 -c mariadb -- \
     sh -c "mariadb -h ${host} -P 30091 --connect-timeout=10 -u root -p\"\$MARIADB_ROOT_PASSWORD\" -N -B -e 'SELECT 1' 2>&1"
   assert_success
@@ -282,7 +282,7 @@ wait_for_marker_rows() {
   assert_equal "$(echo "$data" | jq -r '.local.linkRunning')" "true"
   assert_equal "$(echo "$data" | jq -r '.local.sourceMatchesPeer')" "true"
   assert_equal "$(echo "$data" | jq -r '.local.sourceHost')" \
-    "${DB_NS}-rw.${DB_NS}.svc.cluster.local"
+    "${DB_NS}-rw"
 
   run kubectl --context "$CTX_B" -n "$DB_NS" get mariadb mariadb \
     -o jsonpath='{.spec.multiCluster}'

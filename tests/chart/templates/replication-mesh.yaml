@@ -9,7 +9,7 @@ shared gateway, port 3306 → nodePort 30091, plus the CoreDNS *.kind-a.test
 mapping):
 
   standby pod
-    → <namespace>-rw.<namespace>.svc.cluster.local   (peer.enabled, cluster-b)
+    → <namespace>-rw                               (same namespace, cluster-b)
     → CNAME  <externalName>                          e.g. mariadb.kind-a.test
     → CoreDNS → cluster-a node IP : REPL_PEER_PORT   30091
     → shared gateway TCP listener                    (expose.enabled, cluster-a)

@@ -52,7 +52,6 @@ ROOT_PASSWORD="$(mariadb_read_root_password "$PRIMARY_POD" "${PODS[@]}")" || \
   mdbt_fail "$OP" "database credentials are unavailable" \
     '{"stage":"target"}' 1 INTERNAL_ERROR
 
-PEER_HOST="$(mdbr_peer_host "$NAMESPACE")"
 LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD")" || \
   mdbt_fail "$OP" "replication state could not be read" \
     '{"stage":"detach"}' 1 DATABASE_NOT_READY
@@ -78,7 +77,7 @@ if [[ "$LINK_CONFIGURED" != "true" ]]; then
     "$(_data detached false)")"
   exit 0
 fi
-if [[ "$LINK_SOURCE" != "$PEER_HOST" ]]; then
+if ! mdbr_peer_host_matches "$LINK_SOURCE" "$NAMESPACE"; then
   mdbt_fail "$OP" "standby is configured for a different replication source" \
     "$(_data detach false)" 1 REPLICATION_SOURCE_MISMATCH
 fi

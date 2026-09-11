@@ -27,8 +27,16 @@ B standby Pod -- CHANGE MASTER / START SLAVE --> A mesh service
 The peer hostname is derived from the namespace:
 
 ```text
-<namespace>-rw.<namespace>.svc.cluster.local:<configured port>
+<namespace>-rw:<configured port>
 ```
+
+Peer SQL probes and replication connections originate in the MariaDB Pod, so
+short Service names resolve in the database namespace. New links use the short
+name and do not hard-code the cluster DNS domain. Source guards also accept the
+exact historical `<namespace>-rw.<namespace>.svc.cluster.local` name (with the
+configured suffix), allowing existing links to remain attached or be detached.
+Other namespaces, services, and domains are not treated as equivalent. Status
+continues to report the actual stored `Master_Host`.
 
 Both clusters use the same platform-managed root credential and object-storage
 policy. Callers cannot provide an arbitrary replication host, bucket, prefix,

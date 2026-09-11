@@ -92,14 +92,14 @@ LINK_SOURCE="$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")"
 LINK_CONNECTION="$(jq -r '.connectionName // empty' <<<"$LINK_STATUS")"
 
 # Never overwrite an unrelated replication source. Detach has the same guard.
-if [[ "$LINK_CONFIGURED" == "true" && "$LINK_SOURCE" != "$PEER_HOST" ]]; then
+if [[ "$LINK_CONFIGURED" == "true" ]] && ! mdbr_peer_host_matches "$LINK_SOURCE" "$NAMESPACE"; then
   mdbt_fail "$OP" "standby is configured for a different replication source" \
     "$(jq -nc --arg source "$LINK_SOURCE" '{stage:"assess",sourceHost:$source}')" \
     1 REPLICATION_SOURCE_MISMATCH
 fi
 
 ALREADY_LINKED=false
-if [[ "$LINK_CONFIGURED" == "true" && "$LINK_SOURCE" == "$PEER_HOST" ]]; then
+if [[ "$LINK_CONFIGURED" == "true" ]] && mdbr_peer_host_matches "$LINK_SOURCE" "$NAMESPACE"; then
   ALREADY_LINKED=true
 fi
 
@@ -271,7 +271,7 @@ ELAPSED=0
 while :; do
   if LINK_STATUS="$(mdbr_replica_status "$PRIMARY_POD" "$ROOT_PASSWORD" 2>/dev/null)" \
     && [[ "$(jq -r '.running // false' <<<"$LINK_STATUS")" == "true" ]] \
-    && [[ "$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")" == "$PEER_HOST" ]]; then
+    && mdbr_peer_host_matches "$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")" "$NAMESPACE"; then
     break
   fi
   if (( ELAPSED >= WAIT_TIMEOUT )); then

@@ -117,11 +117,19 @@ mdbr_primary_pod() {
 # --- Peer address ------------------------------------------------------------
 
 # mdbr_peer_host [namespace]
-# The mesh Service FQDN this cluster uses to reach the primary. Derived from the
+# The same-namespace mesh Service this cluster uses to reach the primary. Derived from the
 # namespace alone — there is no per-site catalog to keep in sync.
 mdbr_peer_host() {
   local ns="${1:-$DB_NAMESPACE}"
-  printf '%s%s.%s.svc.cluster.local' "$ns" "$MDBR_PEER_SUFFIX" "$ns"
+  printf '%s%s' "$ns" "$MDBR_PEER_SUFFIX"
+}
+
+# Accept the exact historical FQDN without treating other namespaces or DNS
+# aliases as the same source. Preserve the actual Master_Host in status output.
+mdbr_peer_host_matches() {
+  local host="${1:-}" ns="${2:?namespace is required}" peer
+  peer="$(mdbr_peer_host "$ns")"
+  [[ "$host" == "$peer" || "$host" == "$peer.$ns.svc.cluster.local" ]]
 }
 
 # mdbr_service_account_name <projected-token-file>

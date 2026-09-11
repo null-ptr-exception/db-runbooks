@@ -57,11 +57,17 @@ if [[ -n "$PRIMARY_POD" ]]; then
   fi
 fi
 
+SOURCE_MATCHES=false
+if [[ "$(jq -r '.configured // false' <<<"$LINK_STATUS")" == "true" ]] &&
+    mdbr_peer_host_matches "$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")" "$NAMESPACE"; then
+  SOURCE_MATCHES=true
+fi
+
 LOCAL_VIEW="$(jq -nc \
   --argjson cr "$CR_JSON" \
   --argjson link "$LINK_STATUS" \
   --arg primary "$PRIMARY_POD" \
-  --arg peerHost "$PEER_HOST" '
+  --argjson sourceMatches "$SOURCE_MATCHES" '
   (if $primary == "" then null else $primary end) as $cp
   | ($cr.status.replication.replicas // {}) as $replicas
   | {
@@ -74,7 +80,7 @@ LOCAL_VIEW="$(jq -nc \
       sourceHost: $link.sourceHost,
       sourcePort: $link.sourcePort,
       sourceMatchesPeer: (
-        if $link.configured == true then $link.sourceHost == $peerHost else false end
+        $sourceMatches
       ),
       secondsBehind: $link.secondsBehind,
       usingGtid: $link.usingGtid,
@@ -92,8 +98,7 @@ PEER_VIEW='{"probed":false}'
 if [[ "$(mdbt_bool_json "$INCLUDE_PEER")" == "true" && \
       -n "$PRIMARY_POD" && -n "$ROOT_PASSWORD" ]]; then
   ALREADY_LINKED=false
-  if [[ "$(jq -r '.configured // false' <<<"$LINK_STATUS")" == "true" && \
-        "$(jq -r '.sourceHost // empty' <<<"$LINK_STATUS")" == "$PEER_HOST" ]]; then
+  if [[ "$SOURCE_MATCHES" == "true" ]]; then
     ALREADY_LINKED=true
   fi
   if ASSESSMENT="$(mdbr_assess "$PRIMARY_POD" "$ROOT_PASSWORD" \

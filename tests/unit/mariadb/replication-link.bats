@@ -106,13 +106,30 @@ _assess_linked() {
 @test "peer host is derived from the namespace alone" {
   run mdbr_peer_host "mariadb-1"
   [ "$status" -eq 0 ]
-  [ "$output" = "mariadb-1-rw.mariadb-1.svc.cluster.local" ]
+  [ "$output" = "mariadb-1-rw" ]
 }
 
 @test "peer service suffix is deploy-time configurable" {
   MDBR_PEER_SUFFIX="-write"
   run mdbr_peer_host "db-ops"
-  [ "$output" = "db-ops-write.db-ops.svc.cluster.local" ]
+  [ "$output" = "db-ops-write" ]
+}
+
+@test "peer source accepts short names and the exact historical FQDN" {
+  mdbr_peer_host_matches mariadb-1-rw mariadb-1
+  mdbr_peer_host_matches mariadb-1-rw.mariadb-1.svc.cluster.local mariadb-1
+  MDBR_PEER_SUFFIX=-write
+  mdbr_peer_host_matches mariadb-1-write mariadb-1
+  mdbr_peer_host_matches mariadb-1-write.mariadb-1.svc.cluster.local mariadb-1
+}
+
+@test "peer source rejects other namespaces services and domains" {
+  local host
+  for host in '' mariadb-2-rw mariadb-1-rw.other.svc.cluster.local \
+    mariadb-1-rw.mariadb-1.svc.example mariadb-1-rw.evil.example; do
+    run mdbr_peer_host_matches "$host" mariadb-1
+    [ "$status" -ne 0 ]
+  done
 }
 
 # --- GTID coverage -----------------------------------------------------------
@@ -248,7 +265,7 @@ EOF
     printf '%s|%s|%s\n' \"\$MDBR_PEER_PORT\" \"\$MDBR_MAX_EXTERNAL_CONNECTIONS\" \"\$(mdbr_peer_host db-ops)\"
   "
   [ "$status" -eq 0 ]
-  [ "$output" = "30091|5|db-ops-write.db-ops.svc.cluster.local" ]
+  [ "$output" = "30091|5|db-ops-write" ]
 }
 
 @test "an explicit environment override still beats the config file" {

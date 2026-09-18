@@ -64,20 +64,35 @@ mdbt_pb_handrolled_plan() {
 }
 
 # mdbt_pb_handrolled_run <pod> <container> <bucket> <object>
-# Stream a physical backup from <pod> to s3://<bucket>/<object>. Returns 0 on
-# success; on failure writes nothing (caller renders the error). Echoes nothing.
+# Stream a physical backup from <pod> to s3://<bucket>/<object>. On failure,
+# MDBT_PB_ERR identifies the failed stage without retaining command output.
+# Echoes nothing.
+# shellcheck disable=SC2034
+MDBT_PB_ERR=""
+
 mdbt_pb_handrolled_run() {
   local pod="$1" container="$2" bucket="$3" object="$4"
-  local stream_timeout="${MDBT_PB_STREAM_TIMEOUT:-3600}"
-  [[ "$stream_timeout" =~ ^[1-9][0-9]*$ ]] || return 2
-  setup_minio_client >/dev/null 2>&1 || return 4
-  ensure_bucket "$bucket" >/dev/null 2>&1 || return 4
+  local stream_timeout="${MDBT_PB_STREAM_TIMEOUT:-3600}" rc=0
+  MDBT_PB_ERR=""
+  if [[ ! "$stream_timeout" =~ ^[1-9][0-9]*$ ]]; then
+    MDBT_PB_ERR="configuration"
+    return 2
+  fi
+  if ! setup_minio_client >/dev/null 2>&1; then
+    MDBT_PB_ERR="storage-client"
+    return 4
+  fi
+  if ! ensure_bucket "$bucket" >/dev/null 2>&1; then
+    MDBT_PB_ERR="storage-bucket"
+    return 4
+  fi
 
   # Resolve the password inside the database container from the operator-injected
   # env. The secret value never appears in kubectl exec arguments/API audit data.
   # A subshell keeps pipefail local while preserving either producer/upload error.
   (
     set -o pipefail
+    set +e
     _kubectl exec "$pod" -c "$container" -- env "MDBT_PB_STREAM_TIMEOUT=${stream_timeout}" sh -ceu '
       if [ -z "${MARIADB_ROOT_PASSWORD:-}" ]; then
         echo "MARIADB_ROOT_PASSWORD is empty" >&2
@@ -86,5 +101,23 @@ mdbt_pb_handrolled_run() {
       export MYSQL_PWD="$MARIADB_ROOT_PASSWORD"
       exec timeout "$MDBT_PB_STREAM_TIMEOUT" mariabackup --backup --stream=xbstream --user=root --host=127.0.0.1
     ' | s5 pipe "s3://${bucket}/${object}"
-  )
+    pipeline_rc=("${PIPESTATUS[@]}")
+    producer_rc="${pipeline_rc[0]}"
+    upload_rc="${pipeline_rc[1]}"
+    if (( producer_rc != 0 && upload_rc != 0 )); then exit 13; fi
+    if (( producer_rc != 0 )); then exit 11; fi
+    if (( upload_rc != 0 )); then exit 12; fi
+    exit 0
+  ) || rc=$?
+
+  # Read by physical-backup.sh after this helper returns.
+  # shellcheck disable=SC2034
+  case "$rc" in
+    0) return 0 ;;
+    11) MDBT_PB_ERR="backup-stream" ;;
+    12) MDBT_PB_ERR="storage-upload" ;;
+    13) MDBT_PB_ERR="backup-stream-and-upload" ;;
+    *) MDBT_PB_ERR="backup-stream" ;;
+  esac
+  return 1
 }

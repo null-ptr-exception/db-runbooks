@@ -86,8 +86,11 @@ result_field() { jq -r "$1" "${RESULT}"; }
 
 assert_public_backup_data() {
   jq -e '
-    (.data | keys) ==
-    ["backupName", "contentType", "created", "dryRun", "namespace", "state"]
+    ((.data | keys) ==
+      ["backupName", "contentType", "created", "dryRun", "namespace", "state"])
+    or
+    ((.data | keys) ==
+      ["backupName", "contentType", "created", "dryRun", "namespace", "stage", "state"])
   ' "${RESULT}" >/dev/null
 }
 
@@ -169,6 +172,7 @@ assert_response_hides() {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_EXEC_FAIL=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.reason')" = "BACKUP_FAILED" ]
+  [ "$(result_field '.data.stage')" = "backup-stream" ]
   assert_public_backup_data
   assert_response_hides hand-rolled mariabackup sourcePod object
 }
@@ -177,6 +181,7 @@ assert_response_hides() {
   run_backup DRY_RUN=false CONFIRM=true MARIADB_NAME=mariadb MOCK_PIPE_FAIL=1
   [ "$status" -ne 0 ]
   [ "$(result_field '.reason')" = "BACKUP_FAILED" ]
+  [ "$(result_field '.data.stage')" = "storage-upload" ]
   assert_public_backup_data
   assert_response_hides hand-rolled s5cmd bucket endpoint sourcePod object
 }

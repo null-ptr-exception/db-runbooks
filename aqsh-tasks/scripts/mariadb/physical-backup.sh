@@ -204,8 +204,10 @@ if [[ "$PHYSICAL_MODE" == "hand-rolled" ]]; then
     mdbt_write_result "$(response_ok "$OP" "physical backup completed" "$(hr_result true false COMPLETED)")"
     exit 0
   fi
+  log_error "$OP" "physical backup failed at stage=${MDBT_PB_ERR:-unknown}"
   mdbt_fail "$OP" "physical backup failed" \
-    "$(hr_result false false FAILED)" 1 "BACKUP_FAILED"
+    "$(jq -c --arg stage "${MDBT_PB_ERR:-unknown}" '. + {stage:$stage}' \
+      <<<"$(hr_result false false FAILED)")" 1 "BACKUP_FAILED"
 fi
 
 if [[ "$(mdbt_bool_json "$DRY_RUN")" == "true" ]]; then

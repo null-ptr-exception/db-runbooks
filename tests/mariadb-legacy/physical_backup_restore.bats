@@ -20,10 +20,34 @@ setup() {
   load '../test_helper/bats-assert/load'
 }
 
-teardown_file() {
-  kubectl --context "$CTX_A" -n "$DB_NS" delete mariadb "${RESTORE_TARGET:-legacy-restore}" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  kubectl --context "$CTX_A" -n "$DB_NS" delete job,secret,pvc "${RESTORE_TARGET:-legacy-restore}-prepare" "${RESTORE_TARGET:-legacy-restore}-prepare-s3" "storage-${RESTORE_TARGET:-legacy-restore}-0" \
+# restore provisions a second MariaDB CR in the shared namespace. physical-backup
+# (and peer attach rebuild) autodetection requires exactly one CR, so deletion
+# must finish before the next *.bats file starts — --wait=false left
+# mariadb-1-restore-* around and made replication/attach fail with
+# DATABASE_CONFIGURATION_AMBIGUOUS.
+_delete_mariadb_and_wait() {
+  local target="$1"
+  [[ -n "$target" ]] || return 0
+  kubectl --context "$CTX_A" -n "$DB_NS" delete mariadb "$target" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl --context "$CTX_A" -n "$DB_NS" delete job,secret,pvc \
+    "${target}-prepare" "${target}-prepare-s3" "storage-${target}-0" \
     --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl --context "$CTX_A" -n "$DB_NS" wait --for=delete "mariadb/${target}" --timeout=180s >/dev/null 2>&1 || true
+}
+
+_cleanup_restore_targets() {
+  local targets target
+  targets=$(kubectl --context "$CTX_A" -n "$DB_NS" get mariadb \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null \
+    | sed -n '/^mariadb-1-restore-[0-9]\{14\}$/p')
+  while IFS= read -r target; do
+    _delete_mariadb_and_wait "$target"
+  done <<< "$targets"
+}
+
+teardown_file() {
+  _delete_mariadb_and_wait "${RESTORE_TARGET:-}"
+  _cleanup_restore_targets
 }
 
 kexec() { kubectl --context "$CTX_B" -n "$CONTROL_NS" exec "$TEST_POD" -- sh -c "$1"; }

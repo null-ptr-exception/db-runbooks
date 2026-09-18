@@ -88,3 +88,13 @@ non-numeric params (`slow_query_log`, `read_only`, …).
   suffix — that's a my.cnf-only convenience).
 - Batch (several params atomically) is a possible v2; today it's one param/call so
   each change gets its own tier-appropriate confirm and a clean audit trail.
+
+## Optional execution reporting
+
+Real `max_connections` requests can record their start and outcome in an existing
+MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
+`mariadb.env`; no new task inputs are required. The job name is `max_connections`
+and the recorded host is the actual primary pod, regardless of operation scope.
+Dry-runs, listing, and other parameters do not report. Reporting errors leave the
+original task result unchanged. See [job reporting](../lib/job-report.md) for the
+table contract, opt-in API, and incomplete-record limitations.

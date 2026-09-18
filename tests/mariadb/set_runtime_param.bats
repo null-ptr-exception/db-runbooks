@@ -62,7 +62,18 @@ YAML
   kubectl --context "$CTX_A" -n mariadb-1 wait pod \
     -l issue-84-auxiliary=true --for=condition=Ready --timeout=120s
 
-  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN ORIG_FILE
+  REPORT_PRIMARY=$(kubectl --context "$CTX_A" -n mariadb-1 get mariadb mariadb \
+    -o jsonpath='{.status.currentPrimary}')
+  [[ -n "$REPORT_PRIMARY" ]] || { echo 'No primary for report fixture' >&2; return 1; }
+  export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN ORIG_FILE REPORT_PRIMARY
+  _report_sql "CREATE DATABASE job_report_e2e CHARACTER SET utf8mb4;
+    CREATE TABLE job_report_e2e.executions (
+      job_name VARCHAR(80) NOT NULL, start_time DATETIME NOT NULL,
+      end_time DATETIME NULL, status VARCHAR(16) NOT NULL, flag INT NOT NULL,
+      host VARCHAR(80) NOT NULL, message VARCHAR(255) NOT NULL
+    );"
+  # Capture before any test executes, so filtered standalone tests restore too.
+  _pod_max_conn "$REPORT_PRIMARY" > "$ORIG_FILE"
 }
 
 setup() {
@@ -71,6 +82,9 @@ setup() {
 }
 
 teardown_file() {
+  if [[ -n "${REPORT_PRIMARY:-}" ]]; then
+    _report_sql 'DROP DATABASE IF EXISTS job_report_e2e' || return 1
+  fi
   # ephemeral change — put max_connections back to the captured original
   local orig; orig="$(cat "${ORIG_FILE}" 2>/dev/null || true)"
   [[ -n "$orig" ]] || return 0
@@ -133,6 +147,13 @@ _pod_max_conn() {
     mariadb -u root -p"$pw" -N -B -e "SELECT @@GLOBAL.max_connections"
 }
 
+_report_sql() {
+  local pw
+  pw=$(kubectl --context "$CTX_A" -n mariadb-1 get secret mariadb -o jsonpath='{.data.password}' | base64 -d)
+  kubectl --context "$CTX_A" -n mariadb-1 exec "$REPORT_PRIMARY" -c mariadb -- \
+    mariadb -u root -p"$pw" --default-character-set=utf8mb4 -N -B -e "$1"
+}
+
 # --- Tests ---
 
 @test "set-runtime-param is registered" {
@@ -152,15 +173,20 @@ _pod_max_conn() {
 }
 
 @test "set-runtime-param dry_run does not change the value" {
-  local before; before="$(_pod_max_conn mariadb-0)"
+  local before count_before
+  before="$(_pod_max_conn mariadb-0)"
+  count_before="$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')"
   _submit "set-runtime-param" '{"namespace":"mariadb-1","param":"max_connections","value":"512"}'
   local data; data="$(_task_result_data)"
   assert_equal "$(echo "$data" | jq -r '.reason_code')" "SRP_DRY_RUN"
   assert_equal "$(echo "$data" | jq -r '.ephemeral')" "true"
   assert_equal "$(_pod_max_conn mariadb-0)" "$before"   # unchanged
+  assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$count_before"
 }
 
 @test "set-runtime-param applies max_connections on all pods (verified live)" {
+  local count_before
+  count_before="$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')"
   _submit "set-runtime-param" \
     '{"namespace":"mariadb-1","param":"max_connections","value":"512","dry_run":"false","confirm":"true"}'
   local data; data="$(_task_result_data)"
@@ -172,6 +198,11 @@ _pod_max_conn() {
   assert_equal "$(_pod_max_conn mariadb-0)" "512"
   assert_equal "$(_pod_max_conn mariadb-1)" "512"
   assert_equal "$(_pod_max_conn mariadb-2)" "512"
+  assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$((count_before + 1))"
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
+    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Finish'
+      AND flag=1 AND end_time >= start_time AND end_time <= NOW()
+      AND message LIKE 'SET GLOBAL max_connections=512%'")" 1
 }
 
 @test "set-runtime-param applies a relative value (+100) computed from live" {
@@ -182,4 +213,29 @@ _pod_max_conn() {
   assert_equal "$(echo "$data" | jq -r '.status')" "CHANGED"
   assert_equal "$(echo "$data" | jq -r '.value_expr != null')" "true"
   assert_equal "$(_pod_max_conn mariadb-0)" "$((before + 100))"
+}
+
+
+@test "set-runtime-param blocked request writes Failed even with completed execution" {
+  local before
+  before="$(_pod_max_conn "$REPORT_PRIMARY")"
+  _submit "set-runtime-param" \
+    '{"namespace":"mariadb-1","param":"max_connections","value":"invalid","dry_run":"false","confirm":"true"}'
+  local data; data="$(_task_result_data)"
+  assert_equal "$(echo "$data" | jq -r '.status')" BLOCKED
+  assert_equal "$(echo "$data" | jq -r '.reason_code')" VALUE_INVALID
+  assert_equal "$(_pod_max_conn "$REPORT_PRIMARY")" "$before"
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
+    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Failed'
+      AND flag=4 AND end_time >= start_time AND message LIKE '%invalid%'")" 1
+}
+
+@test "set-runtime-param succeeds when report destination is unavailable" {
+  _report_sql 'RENAME TABLE job_report_e2e.executions TO job_report_e2e.saved_executions'
+  _submit "set-runtime-param" \
+    '{"namespace":"mariadb-1","param":"max_connections","value":"513","dry_run":"false","confirm":"true"}'
+  local data; data="$(_task_result_data)"
+  assert_equal "$(echo "$data" | jq -r '.reason_code')" SRP_APPLIED
+  assert_equal "$(_pod_max_conn "$REPORT_PRIMARY")" 513
+  _report_sql 'RENAME TABLE job_report_e2e.saved_executions TO job_report_e2e.executions'
 }

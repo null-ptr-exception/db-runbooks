@@ -33,6 +33,9 @@ source "${LIB_DIR}/response.sh"
 source "${LIB_DIR}/k8s.sh"
 # shellcheck source=../../lib/mariadb.sh
 source "${LIB_DIR}/mariadb.sh"
+# shellcheck source=../../lib/job-report.sh
+source "${LIB_DIR}/job-report.sh"
+trap 'job_report_exit "$?"' EXIT
 
 bool() { case "${1:-}" in 1 | true | TRUE | yes | YES | on | ON) return 0 ;; *) return 1 ;; esac; }
 
@@ -120,6 +123,11 @@ emit() {
     } + $extra')
   [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$out" > "$RESULT_FILE"
   printf '%s\n' "$out"
+  if [[ "$status" == CHANGED ]]; then
+    job_report_finish success "$summary"
+  else
+    job_report_finish failure "$summary"
+  fi
 }
 
 # Fail closed: an unrecognized dry_run/confirm must NOT silently become "false"
@@ -153,6 +161,15 @@ CURRENT_PRIMARY="$(mariadb_jsonpath "$RESOURCE" "$MDB" '{.status.currentPrimary}
 QUERY_POD="${CURRENT_PRIMARY:-${ALL_PODS[0]}}"
 ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
   || { emit BLOCKED ROOT_PASSWORD_UNAVAILABLE "cannot read MARIADB_ROOT_PASSWORD from any ready pod" false; exit 0; }
+
+# Opt this task family in only for real max_connections requests. Deployment
+# database/table settings enable persistence; no settings means no SQL writes.
+if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
+  job_report_enable "max_connections"
+  REPORT_PRIMARY="$CURRENT_PRIMARY"
+  if [[ -z "$REPORT_PRIMARY" && ${#ALL_PODS[@]} -eq 1 ]]; then REPORT_PRIMARY="${ALL_PODS[0]}"; fi
+  job_report_start "$REPORT_PRIMARY" "$ROOT_PW"
+fi
 
 # --- discovery / list mode (empty param) -------------------------------------
 if [[ -z "$PARAM" ]]; then

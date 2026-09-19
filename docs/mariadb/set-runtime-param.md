@@ -93,8 +93,10 @@ non-numeric params (`slow_query_log`, `read_only`, …).
 
 Real `max_connections` requests can record their start and outcome in an existing
 MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
-`mariadb.env`; no new task inputs are required. The job name is `max_connections`
-and the recorded host is the actual primary pod, regardless of operation scope.
-Dry-runs, listing, and other parameters do not report. Reporting errors leave the
-original task result unchanged. See [job reporting](../lib/job-report.md) for the
-table contract, opt-in API, and incomplete-record limitations.
+`mariadb.env` to enable reporting. Optional task input `job_name` (`JOB_REPORT_NAME`)
+overrides the recorded name; when omitted it defaults to the parameter name
+(`max_connections` on this opt-in path). The recorded host is the actual primary
+pod, regardless of operation scope. Dry-runs, listing, and other parameters do not
+report. Reporting errors leave the original task result unchanged. See
+[job reporting](../lib/job-report.md) for the table contract, opt-in API, and
+incomplete-record limitations.

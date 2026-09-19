@@ -279,6 +279,26 @@ field() { jq -r "$1" "${RESULT}"; }
   grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
 }
 
+@test "JOB_REPORT_NAME overrides the recorded job_name" {
+  # incident-bump -> 696e636964656e742d62756d70
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    JOB_REPORT_NAME=incident-bump \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  grep -q "CONVERT(X'696e636964656e742d62756d70' USING utf8mb4)" "$MOCK_SQL_LOG"
+  # default max_connections hex must NOT appear as job_name identity
+  if grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"; then return 1; fi
+}
+
+@test "empty JOB_REPORT_NAME falls back to the parameter name" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    JOB_REPORT_NAME= \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
+  [ "$status" -eq 0 ]
+  grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"
+}
+
 @test "dry-run and other params never report even with deployment settings" {
   run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
     DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500

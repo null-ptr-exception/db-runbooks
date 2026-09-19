@@ -47,7 +47,7 @@ failures are still subject to the surrounding task's execution timeout.
 
 Source this library after `mariadb.sh`. Each task opts in explicitly; leaving out
 `job_report_enable` disables reporting even when the deployment is configured.
-The name argument is optional (defaults to the script filename).
+The name argument is optional (defaults to the script filename). Tasks may expose an optional `job_name` input that overrides it; `set-runtime-param` falls back to the parameter name.
 
 ```bash
 source "${LIB_DIR}/job-report.sh"
@@ -68,8 +68,10 @@ finish calls do not write again, and reporting SQL output is kept out of task
 JSON. SQL failures produce a generic warning without credentials or query text;
 they do not change the task's original result or retry its operation.
 
-`set-runtime-param` opts in with the name `max_connections` for real requests,
-including decreases. Listing, dry-run, and other parameters do not report.
+`set-runtime-param` opts in for real `max_connections` requests (including
+decreases). The recorded `job_name` is optional input `job_name` /
+`JOB_REPORT_NAME`, or the parameter name when omitted. Listing, dry-run, and
+other parameters do not report.
 Once credentials are resolved, invalid values or missing confirmation can be
 recorded as Failed even when the task returns exit code 0. Failures before target
 or credential resolution cannot be reported. Unknown primary on a multi-pod

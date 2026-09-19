@@ -164,8 +164,12 @@ ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
 
 # Opt this task family in only for real max_connections requests. Deployment
 # database/table settings enable persistence; no settings means no SQL writes.
+# Optional JOB_REPORT_NAME overrides the recorded job_name; empty falls back to $PARAM.
+# Ignored whenever reporting is off (no JOB_REPORT_DATABASE/TABLE or enable skipped).
 if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
-  job_report_enable "max_connections"
+  _job_name="${JOB_REPORT_NAME:-}"
+  [[ -n "$_job_name" ]] || _job_name="$PARAM"
+  job_report_enable "$_job_name"
   REPORT_PRIMARY="$CURRENT_PRIMARY"
   if [[ -z "$REPORT_PRIMARY" && ${#ALL_PODS[@]} -eq 1 ]]; then REPORT_PRIMARY="${ALL_PODS[0]}"; fi
   job_report_start "$REPORT_PRIMARY" "$ROOT_PW"

@@ -40,8 +40,11 @@ The helper reads varchar lengths, refuses to truncate identity fields, and
 truncates messages to their column length. SQL values use hex literals, including
 names and messages containing quotes, newlines, or backslashes. The session uses
 strict SQL mode so incompatible schemas fail visibly rather than storing a
-truncated identity or status. Query/lock waits have session limits; transport
-failures are still subject to the surrounding task's execution timeout.
+truncated identity or status. Query/lock waits have session limits. In addition,
+job-report applies its own bounded wall-clock timeout per SQL hop (default 8s,
+overridable via `JOB_REPORT_SQL_TIMEOUT`) so a hung kubectl/transport path cannot
+block the task indefinitely. A timeout only means the helper stopped waiting; it
+does not prove the statement did not commit on the server.
 
 ## Task integration
 

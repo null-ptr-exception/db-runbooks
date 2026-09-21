@@ -14,13 +14,16 @@ mariadb_sql() {
   printf '%s\n' "$3" >> "$REPORT_SQL_LOG"
   case "$3" in
     *information_schema.COLUMNS*)
+      [[ "${HANG_STAGE:-}" != metadata ]] || sleep 30
       [[ "${FAIL_STAGE:-}" != metadata ]] || return 1
       printf '%s\n' "${LENGTHS:-80 80 255 16}" ;;
     *INSERT\ INTO*)
+      [[ "${HANG_STAGE:-}" != insert ]] || sleep 30
       [[ "${FAIL_STAGE:-}" != insert ]] || return 1
       [[ "${FAIL_STAGE:-}" != collision ]] || return 0
       printf '%s\n' '2026-01-02 03:04:05' ;;
     *UPDATE*)
+      [[ "${HANG_STAGE:-}" != update ]] || sleep 30
       [[ "${FAIL_STAGE:-}" != update ]] || return 1
       printf '%s\n' "${UPDATE_COUNT:-1}" ;;
     *) printf 'unexpected SQL\n' >&2; exit 97 ;;
@@ -142,4 +145,70 @@ DRIVER
   run env ACTION=default_name bash "$REPORT_DRIVER"
   [ "$status" -eq 0 ]
   grep -q "CONVERT(X'6472697665722e7368' USING utf8mb4)" "$REPORT_SQL_LOG"
+}
+
+@test "hang on metadata is wall-clock bounded and preserves success path" {
+  start="$(date +%s)"
+  run env HANG_STAGE=metadata JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *job-report:*task-result*cleaned* ]]
+  (( elapsed < 15 ))
+  if grep -q 'INSERT INTO' "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "hang on insert/start is wall-clock bounded and preserves success path" {
+  start="$(date +%s)"
+  run env HANG_STAGE=insert JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *job-report:*task-result*cleaned* ]]
+  (( elapsed < 15 ))
+  [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 1 ]
+  if grep -q 'UPDATE' "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "hang on update/finish is wall-clock bounded and preserves success path" {
+  start="$(date +%s)"
+  run env HANG_STAGE=update JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *job-report:*task-result*cleaned* ]]
+  (( elapsed < 15 ))
+  [ "$(grep -c 'UPDATE' "$REPORT_SQL_LOG")" -eq 1 ]
+}
+
+@test "hang on update/finish preserves semantic failure path and EXIT cleanup" {
+  start="$(date +%s)"
+  run env OUTCOME=failure HANG_STAGE=update JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *job-report:*task-result*cleaned* ]]
+  (( elapsed < 15 ))
+}
+
+@test "hang on update during EXIT preserves original exit code and still cleans up" {
+  start="$(date +%s)"
+  run env ACTION=exit EXIT_CODE=7 HANG_STAGE=update JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 7 ]
+  [[ "$output" == *job-report:*cleaned* ]]
+  (( elapsed < 15 ))
+}
+
+@test "hang on metadata during EXIT preserves exit code without blocking cleanup" {
+  start="$(date +%s)"
+  run env ACTION=exit EXIT_CODE=7 HANG_STAGE=metadata JOB_REPORT_SQL_TIMEOUT=2 bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 7 ]
+  [[ "$output" == *job-report:*cleaned* ]]
+  (( elapsed < 15 ))
+  if grep -q 'INSERT INTO' "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "invalid JOB_REPORT_SQL_TIMEOUT falls back to default and still completes" {
+  run env JOB_REPORT_SQL_TIMEOUT=not-a-number bash "$REPORT_DRIVER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *task-result*cleaned* ]]
+  grep -q 'INSERT INTO' "$REPORT_SQL_LOG"
 }

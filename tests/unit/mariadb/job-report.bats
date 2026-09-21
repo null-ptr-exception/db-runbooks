@@ -24,6 +24,20 @@ mariadb_sql() {
       printf '%s\n' '2026-01-02 03:04:05' ;;
     *UPDATE*)
       [[ "${HANG_STAGE:-}" != update ]] || sleep 30
+      if [[ "${HANG_STAGE:-}" == orphan_tree ]]; then
+        # Multi-level TERM-immune descendants; deepest PID asserted gone after timeout.
+        (
+          trap '' TERM
+          (
+            trap '' TERM
+            printf '%s\n' "$BASHPID" > "$ORPHAN_PID_FILE"
+            while true; do sleep 1; done
+          ) &
+          while true; do sleep 1; done
+        ) &
+        sleep 0.3 2>/dev/null || sleep 1
+        sleep 30
+      fi
       [[ "${FAIL_STAGE:-}" != update ]] || return 1
       printf '%s\n' "${UPDATE_COUNT:-1}" ;;
     *) printf 'unexpected SQL\n' >&2; exit 97 ;;
@@ -212,3 +226,41 @@ DRIVER
   [[ "$output" == *task-result*cleaned* ]]
   grep -q 'INSERT INTO' "$REPORT_SQL_LOG"
 }
+
+@test "timeout reaps TERM-immune multi-level descendants and preserves success path" {
+  orphan_file="$BATS_TEST_TMPDIR/orphan.pid"
+  start="$(date +%s)"
+  run env HANG_STAGE=orphan_tree JOB_REPORT_SQL_TIMEOUT=1 ORPHAN_PID_FILE="$orphan_file" bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 0 ]
+  [[ "$output" == *job-report:*task-result*cleaned* ]]
+  (( elapsed < 15 ))
+  [ -f "$orphan_file" ]
+  orphan_pid="$(cat "$orphan_file")"
+  [[ "$orphan_pid" =~ ^[1-9][0-9]*$ ]]
+  # Surviving past ~3s with PPID=1 was the bug; require the deepest child gone.
+  sleep 1
+  if kill -0 "$orphan_pid" 2>/dev/null; then
+    kill -KILL "$orphan_pid" 2>/dev/null || true
+    return 1
+  fi
+}
+
+@test "timeout reaps TERM-immune descendants and preserves EXIT exit code" {
+  orphan_file="$BATS_TEST_TMPDIR/orphan-exit.pid"
+  start="$(date +%s)"
+  run env ACTION=exit EXIT_CODE=7 HANG_STAGE=orphan_tree JOB_REPORT_SQL_TIMEOUT=1 ORPHAN_PID_FILE="$orphan_file" bash "$REPORT_DRIVER"
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 7 ]
+  [[ "$output" == *job-report:*cleaned* ]]
+  (( elapsed < 15 ))
+  [ -f "$orphan_file" ]
+  orphan_pid="$(cat "$orphan_file")"
+  [[ "$orphan_pid" =~ ^[1-9][0-9]*$ ]]
+  sleep 1
+  if kill -0 "$orphan_pid" 2>/dev/null; then
+    kill -KILL "$orphan_pid" 2>/dev/null || true
+    return 1
+  fi
+}
+

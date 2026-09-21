@@ -18,13 +18,33 @@ _job_report_literal() {
   if [[ -n "$hex" ]]; then printf "CONVERT(X'%s' USING utf8mb4)" "$hex"; else printf "''"; fi
 }
 
+# Print every descendant of $1 (recursive pgrep -P). Does not include $1.
+# Snapshot while the root is alive; later KILL must use this list, not a live parent.
+_job_report_descendant_pids() {
+  local root="$1" cur child
+  local -a queue=("$root")
+  while ((${#queue[@]} > 0)); do
+    cur="${queue[0]}"
+    queue=("${queue[@]:1}")
+    if ! command -v pgrep >/dev/null 2>&1; then
+      return 0
+    fi
+    while IFS= read -r child; do
+      [[ -n "$child" ]] || continue
+      printf '%s\n' "$child"
+      queue+=("$child")
+    done < <(pgrep -P "$cur" 2>/dev/null || true)
+  done
+}
+
 # Run mariadb_sql in the current shell with a wall-clock bound.
 # Session SQL timeouts do not cover kubectl/transport hangs; this does.
 # A timeout (exit 124) is not proof the statement did not commit.
 _job_report_sql() {
   local pod="$1" password="$2" sql="$3"
   local timeout="${JOB_REPORT_SQL_TIMEOUT:-8}"
-  local out_file pid deadline now child rc=0
+  local out_file pid deadline now child desc rc=0
+  local -a tree=() more=()
 
   [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || timeout=8
   out_file="$(mktemp "${TMPDIR:-/tmp}/job-report-sql.XXXXXX")" || return 1
@@ -35,18 +55,33 @@ _job_report_sql() {
   while kill -0 "$pid" 2>/dev/null; do
     now="$(date +%s)"
     if (( now >= deadline )); then
+      # Capture the full descendant tree before any signal. TERM-ignoring
+      # children can reparent to PPID=1 once $pid exits; a later pgrep -P
+      # "$pid" would miss them.
+      tree=()
+      more=()
       if command -v pgrep >/dev/null 2>&1; then
-        for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-          kill -TERM "$child" 2>/dev/null || true
-        done
+        mapfile -t tree < <(_job_report_descendant_pids "$pid")
       fi
+      for child in "${tree[@]}"; do
+        kill -TERM "$child" 2>/dev/null || true
+      done
       kill -TERM "$pid" 2>/dev/null || true
       sleep 0.2 2>/dev/null || sleep 1
+      # Optional re-walk of survivors by saved PID (not by living parent).
       if command -v pgrep >/dev/null 2>&1; then
-        for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-          kill -KILL "$child" 2>/dev/null || true
+        for child in "$pid" "${tree[@]}"; do
+          if kill -0 "$child" 2>/dev/null; then
+            while IFS= read -r desc; do
+              [[ -n "$desc" ]] || continue
+              more+=("$desc")
+            done < <(_job_report_descendant_pids "$child")
+          fi
         done
       fi
+      for child in "${tree[@]}" "${more[@]}"; do
+        kill -KILL "$child" 2>/dev/null || true
+      done
       kill -KILL "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
       rm -f "$out_file"

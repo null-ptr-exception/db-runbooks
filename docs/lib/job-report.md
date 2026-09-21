@@ -43,8 +43,11 @@ strict SQL mode so incompatible schemas fail visibly rather than storing a
 truncated identity or status. Query/lock waits have session limits. In addition,
 job-report applies its own bounded wall-clock timeout per SQL hop (default 8s,
 overridable via `JOB_REPORT_SQL_TIMEOUT`) so a hung kubectl/transport path cannot
-block the task indefinitely. A timeout only means the helper stopped waiting; it
-does not prove the statement did not commit on the server.
+block the task indefinitely. On timeout the helper snapshots the SQL hop's
+descendant PID tree before signaling, then reaps that saved tree (TERM then KILL)
+so TERM-ignoring children cannot escape by reparenting to PID 1. A timeout only
+means the helper stopped waiting; it does not prove the statement did not commit
+on the server.
 
 ## Task integration
 

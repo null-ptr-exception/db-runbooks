@@ -66,7 +66,8 @@ YAML
     -o jsonpath='{.status.currentPrimary}')
   [[ -n "$REPORT_PRIMARY" ]] || { echo 'No primary for report fixture' >&2; return 1; }
   export CTX_A CTX_B NS AQSH_URL TEST_POD TOKEN ORIG_FILE REPORT_PRIMARY
-  _report_sql "CREATE DATABASE job_report_e2e CHARACTER SET utf8mb4;
+  _report_sql "DROP DATABASE IF EXISTS job_report_e2e;
+    CREATE DATABASE job_report_e2e CHARACTER SET utf8mb4;
     CREATE TABLE job_report_e2e.executions (
       job_name VARCHAR(80) NOT NULL, start_time DATETIME NOT NULL,
       end_time DATETIME NULL, status VARCHAR(16) NOT NULL, flag INT NOT NULL,
@@ -82,20 +83,21 @@ setup() {
 }
 
 teardown_file() {
-  if [[ -n "${REPORT_PRIMARY:-}" ]]; then
-    _report_sql 'DROP DATABASE IF EXISTS job_report_e2e' || return 1
+  # Restore before report cleanup so a failed DROP cannot skip restoration.
+  local orig; orig="$(cat "${ORIG_FILE:-}" 2>/dev/null || true)"
+  if [[ -n "$orig" ]]; then
+    local pods pod
+    pods=$(kubectl --context "kind-cluster-a" -n mariadb-1 get pods \
+      -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep '^mariadb-[0-9]' || true)
+    local pw; pw=$(kubectl --context "kind-cluster-a" -n mariadb-1 get secret mariadb -o jsonpath='{.data.password}' | base64 -d)
+    for pod in $pods; do
+      kubectl --context "kind-cluster-a" -n mariadb-1 exec "$pod" -c mariadb -- \
+        mariadb -u root -p"$pw" -e "SET GLOBAL max_connections = ${orig}" >/dev/null 2>&1 || true
+    done
   fi
-  # ephemeral change — put max_connections back to the captured original
-  local orig; orig="$(cat "${ORIG_FILE}" 2>/dev/null || true)"
-  [[ -n "$orig" ]] || return 0
-  local pods pod
-  pods=$(kubectl --context "kind-cluster-a" -n mariadb-1 get pods \
-    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep '^mariadb-[0-9]' || true)
-  local pw; pw=$(kubectl --context "kind-cluster-a" -n mariadb-1 get secret mariadb -o jsonpath='{.data.password}' | base64 -d)
-  for pod in $pods; do
-    kubectl --context "kind-cluster-a" -n mariadb-1 exec "$pod" -c mariadb -- \
-      mariadb -u root -p"$pw" -e "SET GLOBAL max_connections = ${orig}" >/dev/null 2>&1 || true
-  done
+  if [[ -n "${REPORT_PRIMARY:-}" ]]; then
+    _report_sql 'DROP DATABASE IF EXISTS job_report_e2e' >/dev/null 2>&1 || true
+  fi
 }
 
 kexec() { kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"; }

@@ -12,6 +12,9 @@ setup() {
   RESULT="${MOCK_DIR}/result.json"
   STATE="${MOCK_DIR}/state"; mkdir -p "$STATE"
   EXEC_LOG="${MOCK_DIR}/exec.log"
+  export MOCK_SQL_LOG="${MOCK_DIR}/sql.log"
+  export JOB_REPORT_CONFIG_FILE="${MOCK_DIR}/absent.env"
+  unset JOB_REPORT_DATABASE JOB_REPORT_TABLE
 
   cat > "${MOCK_DIR}/kubectl" <<'MOCK'
 #!/usr/bin/env bash
@@ -42,7 +45,15 @@ if [[ " ${args} " == *" exec "* ]]; then
   printf '%s\n' "$pod" >> "${MOCK_EXEC_LOG}"
   q=""; prev=""
   for a in "$@"; do [[ "$prev" == "-e" ]] && { q="$a"; break; }; prev="$a"; done
+  printf '%s\n' "$q" >> "$MOCK_SQL_LOG"
   case "$q" in
+    *information_schema.COLUMNS*) printf '80\t80\t255\t16\n'; exit 0 ;;
+    *INSERT\ INTO*)
+      [[ "${MOCK_REPORT_FAIL:-}" != insert ]] || exit 1
+      printf '2026-01-02 03:04:05\n'; exit 0 ;;
+    *UPDATE*)
+      [[ "${MOCK_REPORT_FAIL:-}" != update ]] || exit 1
+      printf '1\n'; exit 0 ;;
     "SET GLOBAL "*)
       [[ -n "${MOCK_FAIL_POD:-}" && "$pod" == "${MOCK_FAIL_POD}" ]] && exit 1
       rest="${q#SET GLOBAL }"; p="${rest%% =*}"; v="${rest##*= }"
@@ -54,7 +65,7 @@ if [[ " ${args} " == *" exec "* ]]; then
     "SELECT READ_ONLY FROM"*)
       vn="${q##*VARIABLE_NAME=\'}"; vn="${vn%%\'*}"
       if [[ " ${MOCK_STATIC:-} " == *" ${vn} "* ]]; then printf 'YES'; else printf 'NO'; fi; exit 0 ;;
-    *) printf '1'; exit 0 ;;
+    *) printf 'unexpected SQL: %s\n' "$q" >&2; exit 97 ;;
   esac
 fi
 exit 0
@@ -119,14 +130,14 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.results | length')" = "3" ]
   [ "$(field '.results | all(.applied == true)')" = "true" ]
   [ "$(field '.results[0].value')" = "500" ]
-  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+  if grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"; then return 1; fi
 }
 
 @test "set-runtime-param scope=all excludes auxiliary pods sharing the instance label" {
   run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
   [ "$status" -eq 0 ]
   [ "$(field '.results | map(.pod) | sort | join(",")')" = "mariadb-0,mariadb-1,mariadb-2" ]
-  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+  if grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"; then return 1; fi
 }
 
 @test "set-runtime-param fails closed when exact workload members cannot be resolved" {
@@ -237,4 +248,90 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.reason_code')" = "SRP_APPLY_FAILED" ]
   [ "$(field '.changed')" = "true" ]
   [ "$(field '.partial')" = "true" ]
+}
+
+@test "max_connections reports verified success on the primary even with all scope" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+  # First SQL call (metadata for reporting) must target the actual primary.
+  [ "$(head -1 "$EXEC_LOG")" = mariadb-1 ]
+  grep -q "CONVERT(X'6d6172696164622d31' USING utf8mb4)" "$MOCK_SQL_LOG"
+  [ "$(grep -c 'UPDATE' "$MOCK_SQL_LOG")" -eq 1 ]
+}
+
+@test "reporting records BLOCKED as Failed despite zero exit status" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=bad
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = VALUE_INVALID ]
+  grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+}
+
+@test "reporting records partial apply as Failed and preserves partial result" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_FAIL_POD=mariadb-2
+  [ "$status" -eq 1 ]
+  [ "$(field '.reason_code')" = SRP_APPLY_FAILED ]
+  [ "$(field '.partial')" = true ]
+  grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+}
+
+@test "JOB_REPORT_NAME overrides the recorded job_name" {
+  # incident-bump -> 696e636964656e742d62756d70
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    JOB_REPORT_NAME=incident-bump \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  grep -q "CONVERT(X'696e636964656e742d62756d70' USING utf8mb4)" "$MOCK_SQL_LOG"
+  # default max_connections hex must NOT appear as job_name identity
+  if grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"; then return 1; fi
+}
+
+@test "empty JOB_REPORT_NAME falls back to the parameter name" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    JOB_REPORT_NAME= \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
+  [ "$status" -eq 0 ]
+  grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"
+}
+
+@test "dry-run and other params never report even with deployment settings" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  if grep -q 'INSERT INTO' "$MOCK_SQL_LOG"; then return 1; fi
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_statement_time RUNTIME_VALUE=10
+  [ "$status" -eq 0 ]
+  if grep -q 'INSERT INTO' "$MOCK_SQL_LOG"; then return 1; fi
+}
+
+@test "reporting SQL failures leave parameter changes successful" {
+  for stage in insert update; do
+    run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+      DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_REPORT_FAIL="$stage"
+    [ "$status" -eq 0 ]
+    [ "$(field '.reason_code')" = SRP_APPLIED ]
+    [[ "$output" == *job-report:* ]]
+  done
+}
+
+@test "unknown multi-pod primary skips reporting without changing the operation scope" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  if grep -q 'INSERT INTO' "$MOCK_SQL_LOG"; then return 1; fi
+  [[ "$output" == *job-report:* ]]
+}
+
+@test "single member is the report primary when operator status is absent" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY= MOCK_CR_REPLICAS=1
+  [ "$status" -eq 0 ]
+  grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
 }

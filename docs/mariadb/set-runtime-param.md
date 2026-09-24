@@ -31,6 +31,7 @@ during connection exhaustion). AWS RDS analogue: `ModifyDBParameterGroup` for a
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply |
+| `job_name` | `JOB_REPORT_NAME` | | (param name) | Name recorded for this execution. Only used for real `max_connections` requests when reporting is configured; ignored otherwise |
 
 ## Allow-list & risk tiers
 
@@ -88,3 +89,21 @@ non-numeric params (`slow_query_log`, `read_only`, …).
   suffix — that's a my.cnf-only convenience).
 - Batch (several params atomically) is a possible v2; today it's one param/call so
   each change gets its own tier-appropriate confirm and a clean audit trail.
+
+## Optional execution reporting
+
+Real `max_connections` requests can record their start and outcome in an existing
+MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
+`mariadb.env` to enable reporting. Optional task input `job_name` (`JOB_REPORT_NAME`)
+overrides the recorded name; when omitted it defaults to the parameter name
+(`max_connections` on this opt-in path). The recorded host is the actual primary
+pod, regardless of operation scope. Dry-runs, listing, and other parameters do not
+report. Reporting errors leave the original task result unchanged. See
+[job reporting](../lib/job-report.md) for the table contract, opt-in API, and
+incomplete-record limitations.
+
+`job_name` is per-call user intent: callers in the same deployment can label an
+incident mitigation `incident-1234` and a later capacity adjustment
+`capacity-change-5678`. It changes only the recorded name, not the target or
+operation. Callers needing no custom label can omit it. The reporting database
+and table remain deployment configuration in `mariadb.env`.

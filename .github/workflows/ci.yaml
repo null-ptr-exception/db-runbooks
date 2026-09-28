@@ -93,6 +93,15 @@ jobs:
             exit 1
           fi
           printf '%s\0' "${files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
+          # Bats files at the same level as above (#108): catches SC2314
+          # (`! cmd` mid-test never fails the test) and any new warning.
+          # Same fail-closed shape as above.
+          mapfile -d '' bats_files < <(git ls-files -z -- '*.bats')
+          if [ "${#bats_files[@]}" -eq 0 ]; then
+            echo "no *.bats files matched — refusing to report a vacuous pass" >&2
+            exit 1
+          fi
+          printf '%s\0' "${bats_files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
 
       - name: Run yamllint
         run: |

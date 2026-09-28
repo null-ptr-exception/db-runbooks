@@ -91,7 +91,7 @@ run_restore_in_place() {
   [ "$(jq -r '.data.changed' "$RESULT")" = "false" ]
   run ! grep -q 'scale statefulset' "$CALLS"
   run ! grep -q 'patch statefulset' "$CALLS"
-  ! grep -q 'delete pod' "$CALLS"
+  run ! grep -q 'delete pod' "$CALLS"
 }
 
 @test "restore-in-place apply requires confirm before Pod replacement" {
@@ -99,7 +99,7 @@ run_restore_in_place() {
   [ "$status" -ne 0 ]
   [ "$(jq -r '.reason' "$RESULT")" = "INVALID_REQUEST" ]
   run ! grep -q 'scale statefulset' "$CALLS"
-  ! grep -q 'delete pod' "$CALLS"
+  run ! grep -q 'delete pod' "$CALLS"
 }
 
 @test "restore-in-place preserves objects and restores the existing PVC" {

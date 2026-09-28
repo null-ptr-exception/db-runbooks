@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   SCRIPT="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/connection-usage.sh"
@@ -163,7 +165,7 @@ field() {
   [ "$(field '.reason_code')" = "CONNECTION_USAGE_READY" ]
   [ "$(field '.requested_pods')" = "3" ]
   [ "$(field '.pods | map(.pod) | sort | join(",")')" = "mariadb-0,mariadb-1,mariadb-2" ]
-  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+  run ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
 }
 
 @test "connection-usage fails closed when exact workload members cannot be resolved" {

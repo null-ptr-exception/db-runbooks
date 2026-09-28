@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   RUNNER="$BATS_TEST_DIRNAME/../../../scripts/local-e2e/run.sh"
   export MOCK_DOCKER_LOG="$BATS_TEST_TMPDIR/docker.calls"

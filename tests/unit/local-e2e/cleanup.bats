@@ -1,4 +1,7 @@
 #!/usr/bin/env bats
+
+bats_require_minimum_version 1.5.0
+
 setup() {
   export CALLS="$BATS_TEST_TMPDIR/calls"
   mkdir -p "$BATS_TEST_TMPDIR/bin"
@@ -19,7 +22,7 @@ MOCK
   [ "$status" -eq 0 ]
   grep -Fx 'ps -aq --filter label=db-runbooks.local-e2e=true --filter status=exited --filter status=dead' "$CALLS"
   grep -Fx 'rm -v owned-stopped-id' "$CALLS"
-  ! grep -q -- '-f ' "$CALLS"
+  run ! grep -q -- '-f ' "$CALLS"
 }
 @test "orphan cleanup reports failure if a container cannot be removed" {
   run env REMOVE_RC=1 bash "$BATS_TEST_DIRNAME/../../../scripts/local-e2e/cleanup-stopped.sh"

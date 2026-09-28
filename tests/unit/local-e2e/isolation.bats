@@ -67,7 +67,7 @@ MOCK
 @test "local E2E never removes a container if its creation failed" {
   run env MOCK_CREATE_FAIL=1 bash "$RUNNER"
   [ "$status" -eq 17 ]
-  ! grep -q '^rm ' "$MOCK_DOCKER_LOG"
+  run ! grep -q '^rm ' "$MOCK_DOCKER_LOG"
 }
 
 @test "local E2E does not report success when its daemon cannot be removed" {

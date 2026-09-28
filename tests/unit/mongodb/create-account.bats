@@ -12,6 +12,8 @@
 
 FIXED_PASSWORD='FixedServicePass123!'
 
+# Per test: fresh PATH with the kubectl/mongosh stubs below, and the env the
+# task reads (namespace, username, apply mode, protected-Secret list).
 setup() {
   export TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
@@ -71,6 +73,7 @@ EOF
   chmod +x "${TEST_TMPDIR}/bin/kubectl" "${TEST_TMPDIR}/bin/mongosh"
 }
 
+# Print one jq path from the task result captured in $output.
 json_field() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "caller-provided Secret: password is used but never returned" {

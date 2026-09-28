@@ -93,6 +93,15 @@ jobs:
             exit 1
           fi
           printf '%s\0' "${files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
+          # Bats files, errors only for now (#108): SC2314 (`! cmd` mid-test
+          # never fails the test) is error-level; the warning-level backlog
+          # in *.bats is not gated yet. Same fail-closed shape as above.
+          mapfile -d '' bats_files < <(git ls-files -z -- '*.bats')
+          if [ "${#bats_files[@]}" -eq 0 ]; then
+            echo "no *.bats files matched — refusing to report a vacuous pass" >&2
+            exit 1
+          fi
+          printf '%s\0' "${bats_files[@]}" | xargs -0 "$shellcheck" --severity=error -x
 
       - name: Run yamllint
         run: |

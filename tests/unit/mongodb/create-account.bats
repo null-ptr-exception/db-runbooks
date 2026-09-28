@@ -107,5 +107,6 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
   run env PASSWORD_SECRET_NAME=missing "$SCRIPT"
   [ "$status" -eq 1 ]
   [ "$(json_field '.reason_code')" = PASSWORD_SECRET_UNAVAILABLE ]
+  [[ "$output" != *root-pass* ]]
   [ ! -e "${TEST_TMPDIR}/user-created" ]
 }

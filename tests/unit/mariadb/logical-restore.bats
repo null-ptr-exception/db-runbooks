@@ -16,6 +16,8 @@
 #   - wait_timeout doubles as the wait switch ("0" = don't wait); a Ready-wait
 #     timeout still returns a partial result
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   RESTORE_SH="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/logical-restore.sh"

@@ -87,8 +87,8 @@ run_restore_in_place() {
   [ "$(jq -r '.data.inPlace' "$RESULT")" = "true" ]
   [ "$(jq -r '.data.backup' "$RESULT")" = "physical-1" ]
   [ "$(jq -r '.data.changed' "$RESULT")" = "false" ]
-  ! grep -q 'scale statefulset' "$CALLS"
-  ! grep -q 'patch statefulset' "$CALLS"
+  run ! grep -q 'scale statefulset' "$CALLS"
+  run ! grep -q 'patch statefulset' "$CALLS"
   ! grep -q 'delete pod' "$CALLS"
 }
 
@@ -96,7 +96,7 @@ run_restore_in_place() {
   run_restore_in_place DRY_RUN=false CONFIRM=false
   [ "$status" -ne 0 ]
   [ "$(jq -r '.reason' "$RESULT")" = "INVALID_REQUEST" ]
-  ! grep -q 'scale statefulset' "$CALLS"
+  run ! grep -q 'scale statefulset' "$CALLS"
   ! grep -q 'delete pod' "$CALLS"
 }
 
@@ -105,13 +105,13 @@ run_restore_in_place() {
   [ "$status" -eq 0 ]
   [ "$(jq -r '.data.state' "$RESULT")" = "COMPLETED" ]
   [ "$(jq -r '.data.changed' "$RESULT")" = "true" ]
-  ! grep -q 'scale statefulset' "$CALLS"
+  run ! grep -q 'scale statefulset' "$CALLS"
   [ "$(grep -c 'delete pod mariadb-0 --wait=false' "$CALLS")" -eq 2 ]
   grep -q 'patch statefulset mariadb --type merge' "$CALLS"
   grep -q 'OnDelete' "$CALLS"
   [ "$(grep -c 'patch mariadb mariadb --type merge' "$CALLS")" -eq 2 ]
-  ! grep -q 'delete mariadb' "$CALLS"
-  ! grep -q 'delete pvc' "$CALLS"
+  run ! grep -q 'delete mariadb' "$CALLS"
+  run ! grep -q 'delete pvc' "$CALLS"
   [ "$(cat "$INIT_COUNT")" = "0" ]
   [ "$(cat "$UID_GENERATION")" = "2" ]
 }

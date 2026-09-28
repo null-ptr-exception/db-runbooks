@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# Per test: kubectl and gpg PATH stubs that log to $TEST_TMPDIR,
+# plus the env create-account.sh reads.
 setup() {
   export TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
@@ -104,11 +106,13 @@ EOF
   chmod +x "${TEST_TMPDIR}/bin/gpg" "${TEST_TMPDIR}/bin/kubectl"
 }
 
+# Common apply-mode arguments; tests append the options they exercise.
 ACTUAL_ARGS=(
   --namespace mariadb-1 --mdb mariadb --username svc
   --dry-run false --confirm true --json
 )
 
+# Print one jq path from the task result captured in $output.
 json_field() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "dry-run defaults to all-database SELECT and first-login expiry" {

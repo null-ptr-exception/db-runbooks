@@ -102,6 +102,11 @@ jobs:
             exit 1
           fi
           printf '%s\0' "${bats_files[@]}" | xargs -0 "$shellcheck" --severity=error -x
+          # SC2314 at any severity: a test-final `! cmd` is only a note, but it
+          # stops failing the test as soon as a line is added after it. Use
+          # `run ! cmd` everywhere.
+          printf '%s\0' "${bats_files[@]}" \
+            | xargs -0 "$shellcheck" --severity=style --include=SC2314 -x
 
       - name: Run yamllint
         run: |

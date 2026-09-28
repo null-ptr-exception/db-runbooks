@@ -155,7 +155,7 @@ assert_error_reason() {
   assert_public_result_contract
   assert_result_hides_internals
   [ "$(jq -r '.spec.bootstrapFrom.backupRef.name' "${CAPTURE}")" = "mariadb-logical-pick" ]
-  ! grep -Fq 'mariadb-logical-pick' "${RESULT}"
+  run ! grep -Fq 'mariadb-logical-pick' "${RESULT}"
 }
 
 @test "logical-restore fails when no Backup exists to restore from" {
@@ -171,7 +171,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason BACKUP_NOT_FOUND
   assert_result_hides_internals
-  ! grep -Fq 'ghost' "${RESULT}"
+  run ! grep -Fq 'ghost' "${RESULT}"
 }
 
 @test "logical-restore refuses to overwrite an existing target" {
@@ -180,14 +180,14 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_FAILED
   assert_result_hides_internals
-  ! grep -Fq 'mariadb-clone' "${RESULT}"
+  run ! grep -Fq 'mariadb-clone' "${RESULT}"
 }
 
 @test "logical-restore fails fast when the Backup CRD is absent" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_NO_CRD=1
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_CAPABILITY_UNAVAILABLE
-  ! grep -Eqi 'crd|k8s\.mariadb|mmontes|api.?group' "${RESULT}"
+  run ! grep -Eqi 'crd|k8s\.mariadb|mmontes|api.?group' "${RESULT}"
 }
 
 @test "logical-restore fails on mixed versions without a source/image override" {
@@ -196,7 +196,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason DATABASE_CONFIGURATION_AMBIGUOUS
   run ! grep -Fq 'mariadb:10.6' "${RESULT}"
-  ! grep -Fq 'mariadb:11.4' "${RESULT}"
+  run ! grep -Fq 'mariadb:11.4' "${RESULT}"
 }
 
 @test "logical-restore hides an invalid internal context" {
@@ -205,7 +205,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason INTERNAL_ERROR
   [ "$(result_field '.message')" = "database service is unavailable" ]
-  ! grep -Fq 'private/context-marker' "${RESULT}"
+  run ! grep -Fq 'private/context-marker' "${RESULT}"
 }
 
 @test "logical-restore validates the optional public backup name" {
@@ -243,7 +243,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_FAILED
   assert_result_hides_internals
-  ! grep -Fq 'private-backend-diagnostic' "${RESULT}"
+  run ! grep -Fq 'private-backend-diagnostic' "${RESULT}"
 }
 
 @test "logical-restore returns a partial result (not lost) when the Ready wait times out" {

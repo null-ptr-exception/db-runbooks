@@ -17,6 +17,8 @@
 #                             whether confirm:true was included
 # =============================================================================
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   export TEST_TMPDIR="${BATS_TEST_TMPDIR}"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
@@ -283,7 +285,7 @@ KUBECTL_EOF
   export MOCK_EXEC_RECORD_FILE="${TEST_TMPDIR}/argv-6"
   run fcv_execute_set "mongodb-0" "mongodb-0:27017" "root" "pass" "5.0" "6"
   [ "$status" -eq 0 ]
-  ! grep -q "confirm" "${MOCK_EXEC_RECORD_FILE}"
+  run ! grep -q "confirm" "${MOCK_EXEC_RECORD_FILE}"
 }
 
 @test "execute_set fails on ok:0 server response" {

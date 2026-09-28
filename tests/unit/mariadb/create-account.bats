@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   export TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
@@ -209,7 +211,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
   export GPG_FAIL_IMPORT=1
   run "$SCRIPT" $(actual_args) --password-delivery-mode encrypted_payload --recipient-pgp-pubkey invalid-key
   [ "$(json_field '.reason_code')" = DELIVERY_ENCRYPT_FAILED ]
-  ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
+  run ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "generator failure returns PASSWORD_GENERATION_FAILED without mutation" {
@@ -220,7 +222,7 @@ EOF
   chmod +x "${TEST_TMPDIR}/bin/python3"
   run "$SCRIPT" $(actual_args)
   [ "$(json_field '.reason_code')" = PASSWORD_GENERATION_FAILED ]
-  ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
+  run ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "caller-provided Secret is read-only and returned by reference" {
@@ -231,7 +233,7 @@ EOF
   [ "$(json_field '.delivery_payload.secret_key')" = password ]
   [[ "$output" != *FixedServicePass123* ]]
   grep -q '^get secret svc-password ' "${TEST_TMPDIR}/kubectl.log"
-  ! grep -qE '^(create|apply|patch|replace|delete|annotate|label) secret ' "${TEST_TMPDIR}/kubectl.log"
+  run ! grep -qE '^(create|apply|patch|replace|delete|annotate|label) secret ' "${TEST_TMPDIR}/kubectl.log"
 }
 
 @test "caller-provided Secret supports a dotted data key" {
@@ -259,7 +261,7 @@ EOF
   run "$SCRIPT" $(actual_args)
   [ "$(json_field '.status')" = ERROR ]
   [ "$(json_field '.reason_code')" = ACCOUNT_ALREADY_EXISTS ]
-  ! grep -qE '^(ALTER|GRANT|REVOKE)' "${TEST_TMPDIR}/sql.log"
+  run ! grep -qE '^(ALTER|GRANT|REVOKE)' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "allow_existing recreates credential and replaces grants" {

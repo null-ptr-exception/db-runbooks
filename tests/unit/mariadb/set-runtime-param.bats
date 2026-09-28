@@ -4,6 +4,8 @@
 # cluster). Covers discovery/list, allow-list + value validation, static->BLOCK,
 # dry_run, confirm gate, apply + read-back, and scope resolution.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../.." && pwd)"
   SCRIPT="${REPO_ROOT}/aqsh-tasks/scripts/mariadb/set-runtime-param.sh"
@@ -119,14 +121,14 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.results | length')" = "3" ]
   [ "$(field '.results | all(.applied == true)')" = "true" ]
   [ "$(field '.results[0].value')" = "500" ]
-  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+  run ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
 }
 
 @test "set-runtime-param scope=all excludes auxiliary pods sharing the instance label" {
   run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
   [ "$status" -eq 0 ]
   [ "$(field '.results | map(.pod) | sort | join(",")')" = "mariadb-0,mariadb-1,mariadb-2" ]
-  ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
+  run ! grep -Eq 'mariadb-(metrics|query-exporter)' "$EXEC_LOG"
 }
 
 @test "set-runtime-param fails closed when exact workload members cannot be resolved" {

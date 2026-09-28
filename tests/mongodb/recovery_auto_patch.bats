@@ -513,7 +513,9 @@ _sts_auto_patched_annotation() {
 @test "recovery/wipe self-heals the missing init container without restarting the other pods" {
   local target others_uids
   target=$(_wipe_target "$ANS" "$CTX_A")
-  others_uids=$(_capture_uids "$ANS" $(_other_pods "$target"))
+  local -a others
+  mapfile -t others < <(_other_pods "$target")
+  others_uids=$(_capture_uids "$ANS" "${others[@]}")
   echo "target=${target} others=$(_other_pods "$target" | tr '\n' ' ')" >&2
 
   local target_uid_before
@@ -582,7 +584,9 @@ _sts_auto_patched_annotation() {
   target=$(kubectl --context "$CTX_A" -n "$ANS" \
     get configmap mongodb-recovery-config -o jsonpath='{.data.wipe-targets}')
   [ -n "$target" ] || skip "no active wipe-target left by the previous test"
-  others_uids=$(_capture_uids "$ANS" $(_other_pods "$target"))
+  local -a others
+  mapfile -t others < <(_other_pods "$target")
+  others_uids=$(_capture_uids "$ANS" "${others[@]}")
 
   http_post "${AQSH_URL}/tasks/recovery%2Freset" "{\"namespace\":\"${ANS}\"}"
   assert_equal "$HTTP_CODE" "202"
@@ -631,7 +635,9 @@ _sts_auto_patched_annotation() {
   local target others_uids
   target=$(_wipe_target "$ANS" "$CTX_A")
   _wait_for_rs_healthy "$ANS" "$target" "$CTX_A" 120
-  others_uids=$(_capture_uids "$ANS" $(_other_pods "$target"))
+  local -a others
+  mapfile -t others < <(_other_pods "$target")
+  others_uids=$(_capture_uids "$ANS" "${others[@]}")
   echo "target=${target} others=$(_other_pods "$target" | tr '\n' ' ')" >&2
 
   local target_uid_before
@@ -695,7 +701,9 @@ _sts_auto_patched_annotation() {
   local target others_uids
   target=$(_wipe_target "$ANS" "$CTX_A")
   _wait_for_rs_healthy "$ANS" "$target" "$CTX_A" 120
-  others_uids=$(_capture_uids "$ANS" $(_other_pods "$target"))
+  local -a others
+  mapfile -t others < <(_other_pods "$target")
+  others_uids=$(_capture_uids "$ANS" "${others[@]}")
 
   local target_uid_before
   target_uid_before=$(kubectl --context "$CTX_A" -n "$ANS" \

@@ -101,9 +101,11 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "protected or missing caller Secrets fail without exposing credentials" {
   run env PASSWORD_SECRET_NAME=mongodb-credentials PASSWORD_SECRET_KEY=MONGO_ROOT_PASS "$SCRIPT"
+  [ "$status" -eq 1 ]
   [ "$(json_field '.reason_code')" = PROTECTED_SECRET ]
   [[ "$output" != *root-pass* ]]
   run env PASSWORD_SECRET_NAME=missing "$SCRIPT"
+  [ "$status" -eq 1 ]
   [ "$(json_field '.reason_code')" = PASSWORD_SECRET_UNAVAILABLE ]
   [ ! -e "${TEST_TMPDIR}/user-created" ]
 }

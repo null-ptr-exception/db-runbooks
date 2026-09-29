@@ -150,7 +150,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 }
 
 @test "all native expiry modes produce their MariaDB SQL" {
-  local mode expected days
+  local mode expected
   for mode in first_login never default; do
     case "$mode" in
       first_login) expected='PASSWORD EXPIRE' ;;

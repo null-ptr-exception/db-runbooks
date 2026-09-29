@@ -10,6 +10,7 @@
 #                            restored, and the instance comes back inconsistent
 # =============================================================================
 
+# Per test: source the library under test and set the default MariaDB CR name.
 setup() {
   LIB_DIR="$(cd "$BATS_TEST_DIRNAME/../../../aqsh-tasks/lib" && pwd)"
   export LIB_DIR DB_NAMESPACE="mariadb-1"

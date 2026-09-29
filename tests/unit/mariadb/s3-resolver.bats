@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# Per test: source the resolver, clear every BACKUP_*/MINIO_* input so each
+# test sets only what it exercises, and reset the kubectl mock fixtures.
 setup() {
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   # shellcheck source=../../../aqsh-tasks/lib/mariadb-s3-resolver.sh

@@ -110,3 +110,10 @@ PY
   [ "$status" -eq 0 ]
   [ "$output" = $'namespace\ndry_run\nconfirm' ]
 }
+
+@test "set-runtime-param exposes runtime decisions and a per-call report name" {
+  run task_inputs set-runtime-param
+  [ "$status" -eq 0 ]
+  # job_name labels this execution; report database/table stay deploy-time config.
+  [ "$output" = $'namespace\nparam\nvalue\nscope\nmdb\ndry_run\nconfirm\njob_name' ]
+}

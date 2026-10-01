@@ -157,6 +157,9 @@ releases:
           config:
             mariadb.env: |
               MINIO_ENDPOINT=http://minio.kind-b.test:30080
+              # Disposable fixture created by set_runtime_param.bats.
+              JOB_REPORT_DATABASE=job_report_e2e
+              JOB_REPORT_TABLE=executions
               SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
               SECRETS_AUTODETECT_DEFAULT=false
               # Cross-cluster replication. Necessarily per-cluster: each AQSH's

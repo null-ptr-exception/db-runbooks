@@ -142,6 +142,10 @@ tasks:
         required: false
         type: string
         default: "false"
+      - name: job_name
+        env: JOB_REPORT_NAME
+        required: false
+        type: string
   status:
     script: mariadb/status.sh
     description: "Read-only MariaDB status summary for operator and native StatefulSet targets"

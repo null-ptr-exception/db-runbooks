@@ -92,7 +92,7 @@ non-numeric params (`slow_query_log`, `read_only`, …).
 
 ## Optional execution reporting
 
-Real `max_connections` requests can record their start and outcome in an existing
+Real `max_connections` requests can record their outcome in an existing
 MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
 `mariadb.env` to enable reporting. Optional task input `job_name` (`JOB_REPORT_NAME`)
 overrides the recorded name; when omitted it defaults to the parameter name
@@ -101,6 +101,15 @@ pod, regardless of operation scope. Dry-runs, listing, and other parameters do n
 report. Reporting errors leave the original task result unchanged. See
 [job reporting](../lib/job-report.md) for the table contract, opt-in API, and
 incomplete-record limitations.
+
+Reporting SQL runs only after the parameter changes and read-back verification
+have finished, or the request has been rejected. It cannot delay the emergency
+`SET GLOBAL` operation. The bounded reporting attempts finish before the JSON
+result is published; they can still delay the final response (approximately 24
+seconds plus cleanup overhead with the default timeout). The recorded
+`start_time` is the database time when reporting begins, not when the parameter
+operation began. Interruption before reporting can leave no record; interruption
+or SQL failure during reporting can leave an unfinished record.
 
 `job_name` is per-call user intent: callers in the same deployment can label an
 incident mitigation `incident-1234` and a later capacity adjustment

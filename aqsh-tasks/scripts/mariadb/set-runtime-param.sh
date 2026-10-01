@@ -121,13 +121,19 @@ emit() {
       ephemeral: true, ephemeral_note: $note,
       dry_run: $dry_run, confirm: $confirm, changed: $changed
     } + $extra')
-  [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$out" > "$RESULT_FILE"
-  printf '%s\n' "$out"
+  # Reporting must not delay the break-glass mutation. Start only after the
+  # operation has completed or been rejected, then attempt completion before
+  # publishing the result. SQL failures/timeouts still preserve that result.
+  if [[ "${JOB_REPORT_ENABLED:-false}" == true ]]; then
+    job_report_start "$REPORT_PRIMARY" "$ROOT_PW"
+  fi
   if [[ "$status" == CHANGED ]]; then
     job_report_finish success "$summary"
   else
     job_report_finish failure "$summary"
   fi
+  [[ -n "$RESULT_FILE" ]] && printf '%s\n' "$out" > "$RESULT_FILE"
+  printf '%s\n' "$out"
 }
 
 # Fail closed: an unrecognized dry_run/confirm must NOT silently become "false"
@@ -164,6 +170,8 @@ ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
 
 # Opt this task family in only for real max_connections requests. Deployment
 # database/table settings enable persistence; no settings means no SQL writes.
+# Capture the destination here; emit() defers all reporting SQL until the outcome
+# is known, so reporting cannot delay SET GLOBAL or its read-back verification.
 # Optional JOB_REPORT_NAME overrides the recorded job_name; empty falls back to $PARAM.
 # Ignored whenever reporting is off (no JOB_REPORT_DATABASE/TABLE or enable skipped).
 if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
@@ -172,7 +180,6 @@ if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
   job_report_enable "$_job_name"
   REPORT_PRIMARY="$CURRENT_PRIMARY"
   if [[ -z "$REPORT_PRIMARY" && ${#ALL_PODS[@]} -eq 1 ]]; then REPORT_PRIMARY="${ALL_PODS[0]}"; fi
-  job_report_start "$REPORT_PRIMARY" "$ROOT_PW"
 fi
 
 # --- discovery / list mode (empty param) -------------------------------------

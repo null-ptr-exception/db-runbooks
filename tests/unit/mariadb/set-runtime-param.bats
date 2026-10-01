@@ -13,6 +13,8 @@ setup() {
   STATE="${MOCK_DIR}/state"; mkdir -p "$STATE"
   EXEC_LOG="${MOCK_DIR}/exec.log"
   export MOCK_SQL_LOG="${MOCK_DIR}/sql.log"
+  export MOCK_REPORT_LOG="${MOCK_DIR}/report.log"
+  export MOCK_STDOUT_FILE="${MOCK_DIR}/stdout.json"
   export JOB_REPORT_CONFIG_FILE="${MOCK_DIR}/absent.env"
   unset JOB_REPORT_DATABASE JOB_REPORT_TABLE
 
@@ -46,12 +48,23 @@ if [[ " ${args} " == *" exec "* ]]; then
   q=""; prev=""
   for a in "$@"; do [[ "$prev" == "-e" ]] && { q="$a"; break; }; prev="$a"; done
   printf '%s\n' "$q" >> "$MOCK_SQL_LOG"
+  report_step() {
+    local stage="$1" result_file=absent stdout=absent
+    [[ ! -e "$AQSH_RESULT_FILE" ]] || result_file=present
+    [[ ! -s "$MOCK_STDOUT_FILE" ]] || stdout=present
+    printf '%s\t%s\t%s\t%s\n' "$stage" "$pod" "$result_file" "$stdout" >> "$MOCK_REPORT_LOG"
+    if [[ "${MOCK_REPORT_HANG:-}" == "$stage" ]]; then sleep 30; fi
+  }
   case "$q" in
-    *information_schema.COLUMNS*) printf '80\t80\t255\t16\n'; exit 0 ;;
+    *information_schema.COLUMNS*)
+      report_step metadata
+      printf '80\t80\t255\t16\n'; exit 0 ;;
     *INSERT\ INTO*)
+      report_step insert
       [[ "${MOCK_REPORT_FAIL:-}" != insert ]] || exit 1
       printf '2026-01-02 03:04:05\n'; exit 0 ;;
     *UPDATE*)
+      report_step update
       [[ "${MOCK_REPORT_FAIL:-}" != update ]] || exit 1
       printf '1\n'; exit 0 ;;
     "SET GLOBAL "*)
@@ -80,6 +93,35 @@ teardown() { rm -rf "${MOCK_DIR}"; }
 run_srp() {
   run env "PATH=${MOCK_DIR}:${PATH}" "LIB_DIR=${LIB_DIR_REAL}" \
     "AQSH_RESULT_FILE=${RESULT}" "MOCK_STATE=${STATE}" "$@" bash "${SCRIPT}"
+}
+
+# Capture stdout in a real file so the SQL mock can observe whether JSON has
+# already been published while the report is still being written.
+run_srp_captured() {
+  run env "PATH=${MOCK_DIR}:${PATH}" "LIB_DIR=${LIB_DIR_REAL}" \
+    "AQSH_RESULT_FILE=${RESULT}" "MOCK_STATE=${STATE}" "$@" \
+    bash -c 'bash "$1" > "$2"' _ "$SCRIPT" "$MOCK_STDOUT_FILE"
+}
+
+assert_reporting_after_apply() {
+  awk '
+    /^SET GLOBAL max_connections =/ { applies++ }
+    /^SELECT @@GLOBAL.max_connections$/ { verifies++ }
+    /information_schema.COLUMNS/ {
+      reporting=1
+      if (applies != 3 || verifies != 3) exit 1
+    }
+    reporting && /^(SET GLOBAL |SELECT @@GLOBAL\.)/ { exit 1 }
+    END { if (!reporting) exit 1 }
+  ' "$MOCK_SQL_LOG"
+}
+
+assert_report_precedes_result() {
+  # Require that the UPDATE was attempted and neither result destination was
+  # visible during any of the report SQL calls.
+  grep -q '^update' "$MOCK_REPORT_LOG"
+  awk -F '\t' '$3 != "absent" || $4 != "absent" { exit 1 }' "$MOCK_REPORT_LOG"
+  [ "$(jq -c . "$RESULT")" = "$(jq -c . "$MOCK_STDOUT_FILE")" ]
 }
 field() { jq -r "$1" "${RESULT}"; }
 
@@ -256,8 +298,9 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(field '.reason_code')" = SRP_APPLIED ]
   grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
-  # First SQL call (metadata for reporting) must target the actual primary.
-  [ "$(head -1 "$EXEC_LOG")" = mariadb-1 ]
+  # Reporting uses the actual primary, after every targeted pod has verified.
+  [ "$(awk -F '\t' '$1 == "metadata" { print $2 }' "$MOCK_REPORT_LOG")" = mariadb-1 ]
+  assert_reporting_after_apply
   grep -q "CONVERT(X'6d6172696164622d31' USING utf8mb4)" "$MOCK_SQL_LOG"
   [ "$(grep -c 'UPDATE' "$MOCK_SQL_LOG")" -eq 1 ]
 }
@@ -318,6 +361,69 @@ field() { jq -r "$1" "${RESULT}"; }
     [ "$(field '.reason_code')" = SRP_APPLIED ]
     [[ "$output" == *job-report:* ]]
   done
+}
+
+@test "report-start timeouts happen after all parameter changes are verified" {
+  for stage in metadata insert; do
+    rm -f "$MOCK_SQL_LOG" "$MOCK_REPORT_LOG" "$RESULT"
+    local start elapsed
+    start="$(date +%s)"
+    run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+      JOB_REPORT_SQL_TIMEOUT=1 MOCK_REPORT_HANG="$stage" \
+      DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+    elapsed=$(( $(date +%s) - start ))
+    [ "$status" -eq 0 ]
+    [ "$(field '.reason_code')" = SRP_APPLIED ]
+    [ "$(field '.results | all(.applied == true)')" = true ]
+    assert_reporting_after_apply
+    [[ "$output" == *job-report:* ]]
+    (( elapsed < 15 ))
+  done
+}
+
+@test "successful report completion precedes both result file and stdout" {
+  run_srp_captured JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+  assert_report_precedes_result
+}
+
+@test "failed report completion precedes a BLOCKED result without mutating" {
+  run_srp_captured JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=false RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = CONFIRM_REQUIRED ]
+  grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+  if grep -q '^SET GLOBAL ' "$MOCK_SQL_LOG"; then return 1; fi
+  assert_report_precedes_result
+}
+
+@test "report-finish SQL failure precedes and preserves the successful result" {
+  run_srp_captured JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    MOCK_REPORT_FAIL=update \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_APPLIED ]
+  [[ "$output" == *job-report:* ]]
+  assert_report_precedes_result
+}
+
+@test "report-finish timeout precedes and preserves the partial failure result" {
+  local start elapsed
+  start="$(date +%s)"
+  run_srp_captured JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    JOB_REPORT_SQL_TIMEOUT=1 MOCK_REPORT_HANG=update MOCK_FAIL_POD=mariadb-2 \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  elapsed=$(( $(date +%s) - start ))
+  [ "$status" -eq 1 ]
+  [ "$(field '.reason_code')" = SRP_APPLY_FAILED ]
+  [ "$(field '.partial')" = true ]
+  grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+  [[ "$output" == *job-report:* ]]
+  assert_report_precedes_result
+  (( elapsed < 15 ))
 }
 
 @test "unknown multi-pod primary skips reporting without changing the operation scope" {

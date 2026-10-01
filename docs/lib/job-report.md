@@ -27,11 +27,11 @@ The table must have this contract (additional columns need defaults):
 | Column | Type | Meaning |
 |---|---|---|
 | job_name | varchar | Caller-selected name |
-| start_time | datetime | DB `NOW()` at start |
-| end_time | nullable datetime | DB `NOW()` at completion |
+| start_time | datetime | DB `NOW()` when the report row is created |
+| end_time | nullable datetime | DB `NOW()` when the report outcome is written |
 | status | varchar (at least 6 characters) | `Start`, `Finish`, `Failed` |
 | flag | int | `2`, `1`, `4`, respectively |
-| host | varchar | Actual primary pod name captured at start |
+| host | varchar | Actual primary pod resolved for the request |
 | message | varchar | Result summary, initially empty |
 
 Use the exact `status` spelling. A differently named existing column must be
@@ -58,12 +58,13 @@ The name argument is optional (defaults to the script filename). Tasks may expos
 ```bash
 source "${LIB_DIR}/job-report.sh"
 job_report_enable "example_task"
-# After resolving the actual primary and root password; before doing real work:
+# After resolving the actual primary/password and completing or rejecting work:
 job_report_start "$CURRENT_PRIMARY" "$ROOT_PW"
 # On semantic success:
 job_report_finish success "Operation completed and verified"
 # Or on failure/blocked operation:
 # job_report_finish failure "Operation could not be completed"
+# Emit the original task result after the bounded reporting attempts.
 ```
 
 Invoke these functions in the parent shell, not command substitutions. Integrate
@@ -78,11 +79,22 @@ they do not change the task's original result or retry its operation.
 decreases). The recorded `job_name` is optional input `job_name` /
 `JOB_REPORT_NAME`, or the parameter name when omitted. Listing, dry-run, and
 other parameters do not report.
-Once credentials are resolved, invalid values or missing confirmation can be
-recorded as Failed even when the task returns exit code 0. Failures before target
-or credential resolution cannot be reported. Unknown primary on a multi-pod
-instance skips reporting; a single member is treated as its primary. Reporting
-never changes which pods receive the original parameter operation.
+It defers both Start and Finish until the parameter operation and its read-back
+attempts have completed, or the request has been rejected. No report SQL runs
+before the mutation or between its per-pod apply/read-back steps. Once credentials are
+resolved, invalid values or missing confirmation can be recorded as Failed even
+when the task returns exit code 0. Failures before target or credential resolution
+cannot be reported. Unknown primary on a multi-pod instance skips reporting; a
+single member is treated as its primary. Reporting never changes which pods
+receive the original parameter operation.
+
+The bounded reporting attempts finish before either stdout JSON or
+`AQSH_RESULT_FILE` is published, including when a report write fails or times out.
+With the default timeout, the three SQL hops can add approximately 24 seconds
+plus process cleanup overhead to the final response, after the database operation
+has completed. Reporting failure still preserves the original result and exit
+status. `start_time` and `end_time` cover this reporting phase, not the duration of
+the parameter operation.
 
 ## Identity and incomplete records
 
@@ -95,6 +107,8 @@ record with a warning instead of updating the previous attempt. This is not a
 cross-process locking mechanism and does not support concurrent identical jobs.
 
 Start and Finish use the database session's clock/timezone, not the task host.
+Because `set-runtime-param` reports after the outcome is known, interruption
+before reporting can leave no row even if some or all parameter changes landed.
 The original primary pod remains the destination for that execution. Failover,
 SIGKILL, container loss, or a lost SQL response can leave `Start` with NULL
 `end_time`; this helper does not reconcile such records or retry ambiguous writes.

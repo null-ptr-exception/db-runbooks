@@ -1,9 +1,12 @@
 #!/usr/bin/env bats
 
+# Per test: source the resolver, clear every BACKUP_*/MINIO_* input so each
+# test sets only what it exercises, and reset the kubectl mock fixtures.
 setup() {
   export LIB_DIR="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/lib"
   # shellcheck source=../../../aqsh-tasks/lib/mariadb-s3-resolver.sh
   source "${LIB_DIR}/mariadb-s3-resolver.sh"
+  # shellcheck disable=SC2034  # read by aqsh-tasks/lib/mariadb-s3-resolver.sh under test
   MARIADB_CONTAINER=mariadb
   unset BACKUP_ENDPOINT BACKUP_BUCKET BACKUP_PREFIX BACKUP_REGION
   unset BACKUP_ACCESS_SECRET BACKUP_ACCESS_KEY BACKUP_SECRET_ACCESS_SECRET BACKUP_SECRET_KEY
@@ -142,6 +145,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   [[ "$MDBT_S3_ERROR" != *"other-bucket"* ]]
 }
 
+# shellcheck disable=SC2034  # MINIO_* are read by aqsh-tasks/lib/mariadb-s3-resolver.sh under test
 @test "workload fields override deployment fallback while explicit advanced values win" {
   MOCK_SECRET_PRIMARY="$(jq -cn \
     --arg endpoint "$(b64 'https://object.example.invalid')" \
@@ -299,6 +303,7 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
   [ "$MINIO_ROOT_PASSWORD" = "$secret_marker" ]
 }
 
+# shellcheck disable=SC2034  # BACKUP_* are read by aqsh-tasks/lib/mariadb-task-common.sh under test
 @test "operator manifest preserves separate Secret references and contains no credential values" {
   # shellcheck source=../../../aqsh-tasks/lib/mariadb-task-common.sh
   source "${LIB_DIR}/mariadb-task-common.sh"

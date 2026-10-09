@@ -330,7 +330,8 @@ EOF
     BACKUP_SECRET_ACCESS_SECRET="private-secret-access-secret" BACKUP_SECRET_KEY="private-secret-key"
   [ "$status" -eq 0 ]
   assert_restore_contract
-  local public_output="$(cat "${RESULT}")${output}"
+  local public_output
+  public_output="$(cat "${RESULT}")${output}"
   local marker
   for marker in \
     internal-restore-target storage.internal.invalid private-backup-bucket \

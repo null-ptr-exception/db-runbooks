@@ -225,7 +225,8 @@ assert_error_reason() {
     BACKUP_SECRET_ACCESS_SECRET="legacy-secret-access" BACKUP_SECRET_KEY="legacy-secret-key"
   [ "$status" -eq 0 ]
   assert_restore_contract
-  local public_output="$(cat "${RESULT}")${output}"
+  local public_output
+  public_output="$(cat "${RESULT}")${output}"
   local marker
   for marker in \
     internal-legacy-target legacy-storage.internal.invalid private-legacy-bucket \

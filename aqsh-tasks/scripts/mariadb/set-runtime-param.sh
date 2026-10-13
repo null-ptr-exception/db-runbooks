@@ -174,7 +174,7 @@ ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
 # is known, so reporting cannot delay SET GLOBAL or its read-back verification.
 # Optional JOB_REPORT_NAME overrides the recorded job_name; empty falls back to $PARAM.
 # Ignored whenever reporting is off (no JOB_REPORT_DATABASE/TABLE or enable skipped).
-if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
+if [[ "${JOB_REPORT_WRAPPED:-false}" != true && "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
   _job_name="${JOB_REPORT_NAME:-}"
   [[ -n "$_job_name" ]] || _job_name="$PARAM"
   job_report_enable "$_job_name"

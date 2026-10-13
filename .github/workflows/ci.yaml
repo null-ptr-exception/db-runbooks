@@ -51,10 +51,32 @@ jobs:
 
       - name: Run ShellCheck
         run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y shellcheck
-          fi
+          # Run the version .mise.toml pins, read from there so the declared
+          # and the used version cannot drift apart. Not via mise: preflight.sh
+          # keeps ShellCheck out of its tool set on purpose (#106). Not via apt:
+          # the runners are Ubuntu 24.04, whose archive carries 0.9.0 only.
+          # Same shape as the actionlint step below: job-local, no sudo, no
+          # `command -v` short-circuit, download and extract as separate
+          # commands.
+          version="$(sed -n 's/^shellcheck = "\([0-9.]*\)"$/\1/p' .mise.toml)"
+          # Upstream publishes no checksums file, so the digest is pinned here
+          # per version, the way the Dockerfile pins s5cmd. Bumping .mise.toml
+          # without adding a line here fails the step instead of running an
+          # unverified build.
+          case "$version" in
+            0.10.0) sha256="6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87" ;;
+            *) echo "no sha256 pinned for shellcheck '${version}' from .mise.toml" >&2; exit 1 ;;
+          esac
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          asset="shellcheck-v${version}.linux.x86_64.tar.xz"
+          curl -fsSL -o "$tmp/$asset" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${version}/${asset}"
+          echo "${sha256}  $tmp/$asset" | sha256sum -c -
+          tar -xJf "$tmp/$asset" -C "$tmp" "shellcheck-v${version}/shellcheck"
+          shellcheck="$tmp/shellcheck-v${version}/shellcheck"
+          "$shellcheck" --version | grep -qxF "version: ${version}"
+          echo "shellcheck ${version} ($shellcheck)"
           # Lint the tracked set, not the working tree. `find` also walks
           # whatever else the tree holds by this point in the job:
           # tests/test_helper/bats-* is cloned by preflight.sh and gitignored,
@@ -70,7 +92,7 @@ jobs:
             echo "no shell sources matched — refusing to report a vacuous pass" >&2
             exit 1
           fi
-          printf '%s\0' "${files[@]}" | xargs -0 shellcheck --severity=warning -x
+          printf '%s\0' "${files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
 
       - name: Run yamllint
         run: |

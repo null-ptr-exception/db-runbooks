@@ -7,7 +7,7 @@ ARG S5CMD_VERSION=2.3.0
 RUN apt-get update \
     && apt-get upgrade -y \
     && apt-get install -y --no-install-recommends \
-       jq python3 curl ca-certificates gnupg libgnutls30 \
+       jq python3 python3-yaml curl ca-certificates gnupg libgnutls30 \
        mariadb-client \
     # mongosh (MongoDB official apt repo for Debian)
     && curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
@@ -42,3 +42,5 @@ RUN apt-get update \
 COPY aqsh-tasks/task*.yaml /etc/aqsh/
 COPY --chmod=0755 aqsh-tasks/lib/ /tasks/lib/
 COPY --chmod=0755 aqsh-tasks/scripts/ /tasks/
+
+ENTRYPOINT ["/tasks/aqsh-entrypoint.sh"]

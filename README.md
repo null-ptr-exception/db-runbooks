@@ -83,6 +83,11 @@ auto-detection) used by the MongoDB account/recovery tasks.
 4. **kube-auth-proxy** receives the validated identity, injects `X-Forwarded-User`/`X-Forwarded-Groups` headers, and proxies to **aqsh**
 5. **aqsh** checks `allowed_groups` and runs the task script asynchronously, polled via `GET /executions/<id>`
 
+The runbook image's entrypoint compiles optional task YAML `job_report` metadata
+into common reporting wrappers. Existing scripts can opt in without individual
+reporting code; database/table settings remain private deployment configuration.
+See [job reporting](docs/lib/job-report.md#yaml-integration).
+
 ---
 
 ## 🧩 Components

@@ -4,6 +4,11 @@
 MariaDB primary. The first consumer is `set-runtime-param` for
 `max_connections`. No schema migration or table creation is performed.
 
+The runbook image also supports deploy-time `job_report` metadata in task YAML.
+This lets an existing task use the common reporting wrapper without editing its
+script. The destination must be a resolvable MariaDB in the request's namespace;
+this is not a MongoDB reporting backend.
+
 ## Deployment
 
 Set just these two values in the private deployment's existing
@@ -49,7 +54,100 @@ so TERM-ignoring children cannot escape by reparenting to PID 1. A timeout only
 means the helper stopped waiting; it does not prove the statement did not commit
 on the server.
 
-## Task integration
+## YAML integration
+
+Keep the original task's `script`, inputs, authorization, queue, retry and timeout
+settings, and add this block alongside them:
+
+```yaml
+tasks:
+  restart:
+    script: mariadb/restart.sh
+    job_report:
+      enabled: true
+      name: mariadb-restart
+      timeout: 30s
+    # Keep this task's existing input/allowed_groups/timeout fields here.
+```
+
+`enabled` defaults to false. `name` defaults to the YAML task key. `timeout`
+defaults to `30s` and bounds the **whole reporting phase**, including target and
+credential resolution, SQL and process cleanup (allow a small cleanup overhead).
+It accepts positive durations in `ms`, `s` or `m`. The original task timeout must
+leave room for this phase. These fields are deployment configuration, not public
+task inputs. Database/table names stay in `mariadb.env`.
+
+An enabled task automatically gets the optional string input `job_name`, mapped
+to `JOB_REPORT_NAME`. An existing compatible declaration is reused, never
+duplicated. A nonempty per-call name overrides the YAML name; omitted/empty names
+fall back to it. If the existing input has a nonempty `default`, aqsh supplies
+that value and it takes precedence too; prefer `job_report.name` for the static
+fallback and leave the input default empty. This is caller intent (e.g. different incident/change labels
+within the same deployment), rather than a deployment location or credential.
+
+Optional `when` filters match declared input names against **string** values:
+
+```yaml
+job_report:
+  enabled: true
+  name: max_connections
+  when:
+    param: max_connections
+  timeout: 30s
+```
+
+This is the `set-runtime-param` configuration shipped in this image. Listing and
+other parameters do not report. The wrapper also skips declared `dry_run=true`
+requests and results with top-level/nested `dry_run` or `dryRun` set to true.
+Rejected real requests can still report Failed, including exit-code-zero BLOCKED
+results. `enabled: false` disables even this task's legacy native reporting when
+invoked through the compiled wrapper.
+
+At startup, `aqsh-entrypoint.sh` compiles `AQSH_TASKS_CONFIG` and its relative
+includes into a private temporary configuration. It generates launchers for
+tasks with `job_report` metadata, removes that metadata before aqsh reads it, and
+keeps unrelated definitions/defaults intact. The source ConfigMap is never
+rewritten. A malformed definition stops startup with an error; the compiler does
+not guess a script or destination. Configuration changes require restarting the
+aqsh process to compile them again.
+
+This requires the updated **runbook image**, whose entrypoint and `python3-yaml`
+dependency are included here; stock aqsh 0.5.0 alone cannot interpret the block.
+If a deployment overrides the image entrypoint, explicitly run
+`python3 /tasks/lib/job-report-config.py "$AQSH_TASKS_CONFIG" "$AQSH_TASKS_DIR" <private-output-dir>`
+and set `AQSH_TASKS_CONFIG` to the path it prints before starting aqsh.
+
+The wrapper runs the original executable as a child process, preserving its EXIT
+cleanup and exit status. It holds stdout and `AQSH_RESULT_FILE` until the bounded
+reporting attempt ends; stderr remains live. Exact result bytes and stdout are
+then published unchanged, including missing or malformed results. Stdout progress
+logs are consequently delayed and occupy temporary disk space during execution.
+
+Reporting runs **after** the task and cleanup, so it never adds database reads or
+writes ahead of a break-glass mutation. It resolves the current primary with the
+shared MariaDB helpers; an unknown multi-member primary skips reporting rather
+than selecting an arbitrary pod. Unlike the direct integration below, the YAML
+wrapper resolves the reporting primary after the task, so a failover during the
+task may change the reported host/destination.
+
+Nonzero exits and explicit ERROR/FAILED/BLOCK/BLOCKED/CRITICAL/PARTIAL results
+report Failed. Known success statuses (success/CHANGED/OK/READY/PASS/WARN/COMPLETED)
+report Finish; WARN means the diagnostic task completed with warnings. Nested
+failure state, partial results, false success or nonzero result codes override
+success. Missing/unrecognized JSON does not become success solely because the
+process exited zero. Reports use only the result summary/message, never the full
+data object that can contain a password or secret. Resolution/write failures and
+report timeouts warn and preserve the original operation result.
+
+TERM/INT stops the task/report process group and its descendants. On Linux, a
+parent-death signal also kills the child task/report leader if aqsh kills the
+wrapper at its executor deadline, so the original task cannot continue its
+workflow after the wrapper dies. SIGKILL or container loss can still interrupt
+cleanup/reporting and leave descendant calls in flight; this is not a durable
+exactly-once audit service. The serialization and incomplete-record limitations
+below still apply.
+
+## Direct script integration (legacy/custom callers)
 
 Source this library after `mariadb.sh`. Each task opts in explicitly; leaving out
 `job_report_enable` disables reporting even when the deployment is configured.
@@ -95,6 +193,10 @@ plus process cleanup overhead to the final response, after the database operatio
 has completed. Reporting failure still preserves the original result and exit
 status. `start_time` and `end_time` cover this reporting phase, not the duration of
 the parameter operation.
+
+Direct invocations retain this behavior. Under the YAML wrapper,
+`JOB_REPORT_WRAPPED=true` suppresses the script's native reporting to avoid a
+second row; the common wrapper owns the reporting phase and result publication.
 
 ## Identity and incomplete records
 

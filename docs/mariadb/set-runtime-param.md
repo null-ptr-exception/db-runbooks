@@ -116,3 +116,12 @@ incident mitigation `incident-1234` and a later capacity adjustment
 `capacity-change-5678`. It changes only the recorded name, not the target or
 operation. Callers needing no custom label can omit it. The reporting database
 and table remain deployment configuration in `mariadb.env`.
+
+The updated runbook image also enables this path with `job_report` metadata in
+task YAML (`enabled: true`, `name: max_connections`, `when.param: max_connections`).
+Its common wrapper owns reporting after the task, automatically reuses the
+existing `job_name` input, and prevents duplicate native reports. The complete
+reporting phase defaults to a 30-second budget, including target resolution;
+the direct script path above keeps its per-SQL-hop timeout. See
+[YAML integration](../lib/job-report.md#yaml-integration) for deployment
+instructions.

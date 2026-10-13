@@ -1068,7 +1068,7 @@ _wait_for_rs_healthy() {
   echo "G7 before stepdown (pod-0 is primary): ${g7_pre}" >&2
   if [[ "$g7_pre" == "?" ]]; then
     echo "DEBUG task status: $(echo "$TASK_RESPONSE" | jq -r '.status // "?"')" >&2
-    echo "DEBUG task data: $(echo "$_precheck_data" | jq -c . 2>/dev/null || echo "${_precheck_data:0:400}")" >&2
+    echo "DEBUG task data: $(echo "$g7_pre_result" | jq -c . 2>/dev/null || echo "${g7_pre_result:0:400}")" >&2
   fi
   assert_equal "$g7_pre" "false"
 

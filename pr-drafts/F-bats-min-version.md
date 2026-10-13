@@ -1,6 +1,6 @@
 <!-- branch: claude/tender-pascal-n9fh1d-f-bats-min-version
      title:  test: declare bats 1.5.0 where run flags are used
-     merge first: #115, #116; then rebase onto main -->
+     merge first: nothing (based on main 7039bd3) -->
 
 Part of #107.
 
@@ -20,12 +20,14 @@ tests/unit/mariadb/logical-restore.bats
 tests/unit/mariadb/restore-in-place.bats
 ```
 
-`bats --recursive tests/unit` (1.13.0):
+`bats --recursive tests/unit` (1.13.0), 627 tests:
 
-| | tests | not ok | BW02 |
-|---|---|---|---|
-| before | 589 | 0 | 19 |
-| after | 589 | 0 | 0 |
+| | BW02 |
+|---|---|
+| main | 19 (logging 7, logical-restore 4, restore-in-place 6, isolation 2) |
+| this branch | 0 |
+
+Pass/fail is identical to main.
 
 Raising the call to `99.0.0` in `isolation.bats` stops the file: `BATS_VERSION=1.13.0 does not meet required minimum 99.0.0`.
 

@@ -784,7 +784,7 @@ _submit_task_allow_failure() {
   secret_key=$(echo "$result" | jq -r '.delivery_payload.secret_key // empty')
   [ "$secret_key" = "password" ]
   # the password value itself must never appear anywhere in the task result
-  ! echo "$result" | grep -q 'Fixed-Pw-123!'
+  [[ "$result" != *'Fixed-Pw-123!'* ]]
 
   ping_ok=$(_mongo_exec_as "admin" "qa_fixed_pw_user" "Fixed-Pw-123!" "db.adminCommand({ping:1}).ok" | tail -1)
   [ "$ping_ok" = "1" ]

@@ -118,6 +118,7 @@ _assess_linked() {
 @test "peer source accepts short names and the exact historical FQDN" {
   mdbr_peer_host_matches mariadb-1-rw mariadb-1
   mdbr_peer_host_matches mariadb-1-rw.mariadb-1.svc.cluster.local mariadb-1
+  # shellcheck disable=SC2034  # read by aqsh-tasks/lib/mariadb-replication-link.sh under test
   MDBR_PEER_SUFFIX=-write
   mdbr_peer_host_matches mariadb-1-write mariadb-1
   mdbr_peer_host_matches mariadb-1-write.mariadb-1.svc.cluster.local mariadb-1
@@ -290,6 +291,7 @@ EOF
 }
 
 @test "standalone target falls back to pod zero when status has no primary" {
+  # shellcheck disable=SC2034  # read by aqsh-tasks/lib/mariadb.sh (via mdbr_primary_pod) under test
   MARIADB_NAME=mariadb
   run mdbr_primary_pod '{"spec":{"replicas":1},"status":{}}'
   [ "$status" -eq 0 ]

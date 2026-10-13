@@ -10,11 +10,13 @@
 #                            restored, and the instance comes back inconsistent
 # =============================================================================
 
+# Per test: source the library under test and set the default MariaDB CR name.
 setup() {
   LIB_DIR="$(cd "$BATS_TEST_DIRNAME/../../../aqsh-tasks/lib" && pwd)"
   export LIB_DIR DB_NAMESPACE="mariadb-1"
   # shellcheck disable=SC1091
   source "$LIB_DIR/mariadb-replication-rebuild.sh"
+  # shellcheck disable=SC2034  # read by aqsh-tasks/lib/mariadb-replication-rebuild.sh under test
   MDB="mariadb"
 }
 
@@ -77,6 +79,7 @@ persistentvolumeclaim/storage-mariadb-1"
 }
 
 @test "a non-default volumeClaimTemplate name is honoured" {
+  # shellcheck disable=SC2034  # read by aqsh-tasks/lib/mariadb-replication-rebuild.sh under test
   MDBR_PVC_TEMPLATE="data"
   LABEL_LIST=""
   PVC_LIST="persistentvolumeclaim/data-mariadb-0
@@ -115,6 +118,7 @@ persistentvolumeclaim/storage-mariadb-0"
 
 # --- exact backup selection --------------------------------------------------
 
+# shellcheck disable=SC2034  # BACKUP_* are read by aqsh-tasks/lib/mariadb-replication-rebuild.sh under test
 _mock_storage_client() {
   BACKUP_BUCKET="db-backups"
   BACKUP_PREFIX="mariadb/mariadb-1"
@@ -143,11 +147,9 @@ _mock_storage_client() {
   [ "$status" -eq 3 ]
 }
 
+# shellcheck disable=SC2034  # BACKUP_* are read by aqsh-tasks/lib/mariadb-replication-rebuild.sh under test
 @test "in-place restore hook downloads the preflighted object exactly" {
-  NAMESPACE="mariadb-1"
   BACKUP_ENDPOINT="http://minio:9000"
-  BACKUP_BUCKET="db-backups"
-  BACKUP_PREFIX="mariadb/mariadb-1"
   BACKUP_ACCESS_SECRET="minio"
   BACKUP_ACCESS_KEY="access-key-id"
   BACKUP_SECRET_ACCESS_SECRET="minio"

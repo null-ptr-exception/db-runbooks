@@ -51,7 +51,7 @@ MOCK
     grep -Fx "rm -f -v $name" "$MOCK_DOCKER_LOG"
   done <<<"$names"
   # No host mounts, published ports, host network, or broad prune operation.
-  ! grep -E -- '(^| )(--volume|-v|--mount|--publish|-p|--network=host|prune)( |$)' <(grep '^run ' "$MOCK_DOCKER_LOG")
+  run ! grep -E -- '(^| )(--volume|-v|--mount|--publish|-p|--network=host|prune)( |$)' <(grep '^run ' "$MOCK_DOCKER_LOG")
   grep -F -- 'dockerd --host=unix:///var/run/docker.sock' "$MOCK_DOCKER_LOG"
 }
 
@@ -78,6 +78,6 @@ MOCK
   run env MOCK_DAEMON_FAIL=1 bash "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" == *'Isolated Docker daemon failed to become ready'* ]]
-  ! grep -q '^exec -i ' "$MOCK_DOCKER_LOG"
+  run ! grep -q '^exec -i ' "$MOCK_DOCKER_LOG"
   grep -E '^rm -f -v db-runbooks-e2e-' "$MOCK_DOCKER_LOG"
 }

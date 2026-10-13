@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+# Per test: kubectl and gpg PATH stubs that log to $TEST_TMPDIR,
+# plus the env create-account.sh reads.
 setup() {
   export TEST_TMPDIR="$BATS_TEST_TMPDIR"
   export PATH="${TEST_TMPDIR}/bin:${PATH}"
@@ -104,12 +106,13 @@ EOF
   chmod +x "${TEST_TMPDIR}/bin/gpg" "${TEST_TMPDIR}/bin/kubectl"
 }
 
-actual_args() {
-  printf '%s\n' \
-    --namespace mariadb-1 --mdb mariadb --username svc \
-    --dry-run false --confirm true --json
-}
+# Common apply-mode arguments; tests append the options they exercise.
+ACTUAL_ARGS=(
+  --namespace mariadb-1 --mdb mariadb --username svc
+  --dry-run false --confirm true --json
+)
 
+# Print one jq path from the task result captured in $output.
 json_field() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "dry-run defaults to all-database SELECT and first-login expiry" {
@@ -184,7 +187,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 }
 
 @test "generated plaintext delivery follows the MongoDB payload shape and policy" {
-  run "$SCRIPT" $(actual_args)
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}"
   [ "$(json_field '.status')" = CREATED ]
   [ "$(json_field '.reason_code')" = ACCOUNT_CREATED ]
   [ "$(json_field '.delivery_payload.mode')" = one_time_plaintext ]
@@ -196,7 +199,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 }
 
 @test "encrypted delivery returns the MongoDB-compatible payload" {
-  run "$SCRIPT" $(actual_args) --password-delivery-mode encrypted_payload --recipient-pgp-pubkey test-key
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-delivery-mode encrypted_payload --recipient-pgp-pubkey test-key
   [ "$(json_field '.status')" = CREATED ]
   [ "$(json_field '.delivery_payload.mode')" = encrypted_payload ]
   [ "$(json_field '.delivery_payload.recipient_key_fingerprint')" = 0123456789ABCDEF0123456789ABCDEF01234567 ]
@@ -207,7 +210,7 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 
 @test "encryption failure returns DELIVERY_ENCRYPT_FAILED without mutation" {
   export GPG_FAIL_IMPORT=1
-  run "$SCRIPT" $(actual_args) --password-delivery-mode encrypted_payload --recipient-pgp-pubkey invalid-key
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-delivery-mode encrypted_payload --recipient-pgp-pubkey invalid-key
   [ "$(json_field '.reason_code')" = DELIVERY_ENCRYPT_FAILED ]
   ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
@@ -218,13 +221,13 @@ json_field() { printf '%s' "$output" | jq -r "$1"; }
 exit 1
 EOF
   chmod +x "${TEST_TMPDIR}/bin/python3"
-  run "$SCRIPT" $(actual_args)
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}"
   [ "$(json_field '.reason_code')" = PASSWORD_GENERATION_FAILED ]
   ! grep -qE '^(CREATE|ALTER|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "caller-provided Secret is read-only and returned by reference" {
-  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name svc-password
   [ "$(json_field '.status')" = CREATED ]
   [ "$(json_field '.delivery_payload.mode')" = caller_provided_secret ]
   [ "$(json_field '.delivery_payload.secret_name')" = svc-password ]
@@ -235,7 +238,7 @@ EOF
 }
 
 @test "caller-provided Secret supports a dotted data key" {
-  run "$SCRIPT" $(actual_args) --password-secret-name svc-password --password-secret-key db.password
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name svc-password --password-secret-key db.password
   [ "$(json_field '.status')" = CREATED ]
   [ "$(json_field '.delivery_payload.secret_key')" = db.password ]
   grep -Fq "jsonpath={.data['db.password']}" "${TEST_TMPDIR}/kubectl.log"
@@ -247,16 +250,16 @@ EOF
 }
 
 @test "protected and missing caller Secrets fail without exposing credentials" {
-  run "$SCRIPT" $(actual_args) --password-secret-name mariadb
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name mariadb
   [ "$(json_field '.reason_code')" = PROTECTED_SECRET ]
-  run "$SCRIPT" $(actual_args) --password-secret-name missing
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name missing
   [ "$(json_field '.reason_code')" = PASSWORD_SECRET_UNAVAILABLE ]
   [[ "$output" != *root-pass* ]]
 }
 
 @test "existing account fails by default" {
   export ACCOUNT_COUNT=1
-  run "$SCRIPT" $(actual_args)
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}"
   [ "$(json_field '.status')" = ERROR ]
   [ "$(json_field '.reason_code')" = ACCOUNT_ALREADY_EXISTS ]
   ! grep -qE '^(ALTER|GRANT|REVOKE)' "${TEST_TMPDIR}/sql.log"
@@ -264,7 +267,7 @@ EOF
 
 @test "allow_existing recreates credential and replaces grants" {
   export ACCOUNT_COUNT=1 EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='INSERT, SELECT'
-  run "$SCRIPT" $(actual_args) --database app_db --privileges SELECT,INSERT --allow-existing true --password-expire-mode never
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --database app_db --privileges SELECT,INSERT --allow-existing true --password-expire-mode never
   [ "$(json_field '.status')" = RECREATED ]
   [ "$(json_field '.reason_code')" = ACCOUNT_RECREATED ]
   grep -q '^ALTER USER .*PASSWORD EXPIRE NEVER;' "${TEST_TMPDIR}/sql.log"
@@ -274,20 +277,20 @@ EOF
 
 @test "SHOW GRANTS verification accepts canonical ALL PRIVILEGES" {
   export EXPECTED_DATABASE=app_db EXPECTED_PRIVILEGES='ALL PRIVILEGES'
-  run "$SCRIPT" $(actual_args) --database app_db --privileges ALL --allow-admin-privileges true
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --database app_db --privileges ALL --allow-admin-privileges true
   [ "$(json_field '.status')" = CREATED ]
 }
 
 @test "SHOW GRANTS must contain the effective requested grant" {
   export VERIFY_MISMATCH=1
-  run "$SCRIPT" $(actual_args)
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}"
   [ "$(json_field '.reason_code')" = SQL_VERIFY_FAILED ]
   [ "$(json_field '.mutation_applied')" = true ]
 }
 
 @test "grant failure reports an explicit partial mutation" {
   export SQL_FAIL_GRANT=1
-  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name svc-password
   [ "$(json_field '.reason_code')" = SQL_FAILED ]
   [ "$(json_field '.mutation_applied')" = true ]
   [[ "$(json_field '.summary')" == *'credential changed'* ]]
@@ -296,7 +299,7 @@ EOF
 
 @test "revoke failure after ALTER reports an explicit partial mutation" {
   export ACCOUNT_COUNT=1 SQL_FAIL_REVOKE=1
-  run "$SCRIPT" $(actual_args) --allow-existing true --password-secret-name svc-password
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --allow-existing true --password-secret-name svc-password
   [ "$(json_field '.reason_code')" = SQL_FAILED ]
   [ "$(json_field '.mutation_applied')" = true ]
   [[ "$(json_field '.summary')" == *'revoking the prior grants failed'* ]]
@@ -304,7 +307,7 @@ EOF
 
 @test "SQL mutation failures are redacted" {
   export SQL_FAIL_MUTATION=1
-  run "$SCRIPT" $(actual_args) --password-secret-name svc-password
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --password-secret-name svc-password
   [ "$(json_field '.reason_code')" = ACCOUNT_MUTATION_FAILED ]
   [[ "$output" != *FixedServicePass123* ]]
   [[ "$output" != *root-pass* ]]

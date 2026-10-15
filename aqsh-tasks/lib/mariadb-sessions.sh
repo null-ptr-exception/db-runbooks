@@ -83,7 +83,7 @@ SELECT /* sessions:inspect */ JSON_OBJECT(
  'command_seconds', p.TIME, 'state', p.STATE, 'sql', LEFT(p.INFO, $n),
  'sql_truncated', COALESCE(CHAR_LENGTH(p.INFO) > $n, 0),
  'transaction_id', t.TRX_ID, 'rows_modified', t.TRX_ROWS_MODIFIED,
- 'self', p.ID=CONNECTION_ID(),
+ 'self', CAST(p.ID=CONNECTION_ID() AS UNSIGNED),
  'fingerprint', SHA2(CONCAT('$POD_EPOCH:$ACTION', JSON_OBJECT(
    'server', @@hostname, 'connection_id', p.ID, 'user', p.USER,
    'host', p.HOST, 'query_id', p.QUERY_ID, 'sql', p.INFO,
@@ -96,12 +96,13 @@ SQL
     verify)
       cat <<SQL
 SELECT /* sessions:verify */ JSON_OBJECT(
- 'connection_present', EXISTS(SELECT 1 FROM information_schema.PROCESSLIST
-   WHERE ID=$CONNECTION_ID),
- 'original_query_present', EXISTS(SELECT 1 FROM information_schema.PROCESSLIST
-   WHERE ID=$CONNECTION_ID AND QUERY_ID=$ORIGINAL_QUERY_ID),
- 'original_transaction_present', EXISTS(SELECT 1 FROM information_schema.INNODB_TRX
-   WHERE TRX_ID='$ORIGINAL_TRX_ID'),
+ 'connection_present', CAST(EXISTS(SELECT 1 FROM information_schema.PROCESSLIST
+   WHERE ID=$CONNECTION_ID) AS UNSIGNED),
+ 'original_query_present', CAST(EXISTS(SELECT 1 FROM information_schema.PROCESSLIST
+   WHERE ID=$CONNECTION_ID AND QUERY_ID=$ORIGINAL_QUERY_ID
+     AND COMMAND IN ('Query','Execute') AND INFO IS NOT NULL) AS UNSIGNED),
+ 'original_transaction_present', CAST(EXISTS(SELECT 1 FROM information_schema.INNODB_TRX
+   WHERE TRX_ID='$ORIGINAL_TRX_ID') AS UNSIGNED),
  'original_transaction_waiters', (SELECT COUNT(*)
    FROM information_schema.INNODB_LOCK_WAITS WHERE BLOCKING_TRX_ID='$ORIGINAL_TRX_ID'));
 SQL

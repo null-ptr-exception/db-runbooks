@@ -103,7 +103,7 @@ payload() {
     .sections.transactions.rows | any(.connection_id==$blocker and .command=="Sleep")' <<< "$TASK_RESULT"
   jq -e --arg blocker "$BLOCKER" '
     .sections.lock_waits.rows | any(.blocking_connection_id==$blocker)' <<< "$TASK_RESULT"
-  jq -e '.sections.processlist.rows | any(.sql | contains("lock_probe"))' <<< "$TASK_RESULT"
+  jq -e '.sections.processlist.rows | any((.sql // "") | contains("lock_probe"))' <<< "$TASK_RESULT"
   assert_equal "$(jq -r .changed <<< "$TASK_RESULT")" false
 }
 

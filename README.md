@@ -114,6 +114,7 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `common/hello` | Smoke test | — |
 | `restart` | Operator-driven restart via the MariaDB CR's restart annotation | [docs/mariadb/restart.md](docs/mariadb/restart.md) |
 | `status` | Read-only operator/StatefulSet/pod/SQL status summary | [docs/mariadb/status.md](docs/mariadb/status.md) |
+| `sessions` | Exact-pod session diagnostics and gated query/connection termination | [docs/mariadb/sessions.md](docs/mariadb/sessions.md) |
 | `sanity-check` | Operator → service/pods → SQL → replication → semi-sync health check | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
 | `create-account` | Create/recreate an account with database-scoped grants or guarded all-database read-only grants | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
 | `blue-green/status`, `/create`, `/switchover`, `/delete` | Blue/green deployment lifecycle on top of mariadb-operator | [docs/mariadb/blue-green.md](docs/mariadb/blue-green.md) |

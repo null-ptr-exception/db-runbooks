@@ -36,14 +36,14 @@ http_post() {
 }
 
 wait_for_task() {
-  local task_id="$1" elapsed=0 status
+  local task_id="$1" expected="${2:-completed}" elapsed=0 status
   while (( elapsed < 540 )); do
     TASK_RESPONSE=$(kexec "curl -s --connect-timeout 5 -m 10 \
       -H 'Authorization: Bearer ${TOKEN}' '${AQSH_URL}/executions/${task_id}'")
     export TASK_RESPONSE
     status=$(echo "$TASK_RESPONSE" | jq -r '.status // empty' 2>/dev/null || true)
-    [[ "$status" == completed ]] && return 0
-    [[ "$status" != failed ]] || { echo "$TASK_RESPONSE" >&2; return 1; }
+    [[ "$status" == "$expected" ]] && return 0
+    [[ "$status" != failed && "$status" != completed ]] || { echo "$TASK_RESPONSE" >&2; return 1; }
     sleep 5; elapsed=$((elapsed + 5))
   done
   return 1
@@ -61,7 +61,7 @@ submit_create_account() {
   assert_equal "$HTTP_CODE" 202
   task_id=$(echo "$HTTP_BODY" | jq -r '.id // empty')
   [[ -n "$task_id" ]]
-  wait_for_task "$task_id"
+  wait_for_task "$task_id" "${2:-completed}"
 }
 
 primary_pod() {
@@ -89,12 +89,12 @@ sql_as_account() {
 }
 
 prepare_database() {
-  sql_as_root "DROP USER IF EXISTS 'app_user'@'%'; DROP USER IF EXISTS 'global_reader'@'%'; DROP USER IF EXISTS 'expiry_user'@'%'; DROP DATABASE IF EXISTS app_db; CREATE DATABASE app_db; CREATE TABLE app_db.allowed_probe (id INT PRIMARY KEY); INSERT INTO app_db.allowed_probe VALUES (1);"
+  sql_as_root "DROP USER IF EXISTS 'admin'@'%'; DROP USER IF EXISTS 'monitor_user'@'%'; DROP USER IF EXISTS 'none_user'@'%'; DROP USER IF EXISTS 'app_user'@'%'; DROP USER IF EXISTS 'global_reader'@'%'; DROP USER IF EXISTS 'expiry_user'@'%'; DROP DATABASE IF EXISTS app_db; CREATE DATABASE app_db; CREATE TABLE app_db.allowed_probe (id INT PRIMARY KEY); INSERT INTO app_db.allowed_probe VALUES (1);"
 }
 
-@test "dry-run reports all-database read-only scope without creating a user" {
+@test "dry-run reports a database profile without creating a user or returning credentials" {
   prepare_database
-  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",username:"global_reader"}')
+  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"global_reader"}')
   # Keep one route invocation in the case body so review tooling can bind this
   # standalone E2E file directly to the public task capability.
   http_post "${AQSH_URL}/tasks/create-account" "$payload"
@@ -104,14 +104,15 @@ prepare_database() {
   wait_for_task "$task_id"
   result=$(task_result)
   [ "$(echo "$result" | jq -r '.status')" = READY ]
-  [ "$(echo "$result" | jq -r '.scope.kind')" = all_databases_read_only ]
-  [ "$(echo "$result" | jq -r '.scope.grant')" = '*.*' ]
+  [ "$(echo "$result" | jq -r '.scope.kind')" = database ]
+  [ "$(echo "$result" | jq -r '.delivery_payload')" = null ]
+  [ "$(echo "$result" | jq -r '.mutation_applied')" = false ]
   [ "$(sql_as_root "SELECT COUNT(*) FROM mysql.user WHERE User='global_reader' AND Host='%'")" = 0 ]
 }
 
 @test "database-scoped account uses one-time delivery and enforced grants" {
   prepare_database
-  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"app_user",privileges:"SELECT",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"app_user",account_type:"ro",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
   submit_create_account "$payload"
   result=$(task_result)
   [ "$(echo "$result" | jq -r '.status')" = CREATED ]
@@ -121,35 +122,77 @@ prepare_database() {
   run sql_as_account app_user "$password" app_db 'CREATE TABLE denied_probe (id INT)'
   [ "$status" -ne 0 ]
   grants=$(sql_as_root "SHOW GRANTS FOR 'app_user'@'%'")
-  [[ "$grants" == *'GRANT SELECT ON `app_db`.*'* ]]
+  [[ "$grants" == *'GRANT SELECT ON `app\_db`.*'* ]]
 }
 
-@test "omitted database creates only an all-database read-only account" {
+@test "admin profile can manage the selected database and stays isolated from another database" {
   prepare_database
-  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",username:"global_reader",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  sql_as_root "DROP DATABASE IF EXISTS appXdb; CREATE DATABASE appXdb; CREATE TABLE appXdb.private_probe (id INT);"
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"admin",account_type:"admin",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
   submit_create_account "$payload"
   result=$(task_result)
-  password=$(echo "$result" | jq -r '.delivery_payload.password')
   [ "$(echo "$result" | jq -r '.status')" = CREATED ]
-  sql_as_account global_reader "$password" app_db 'SELECT COUNT(*) FROM allowed_probe' >/dev/null
-  sql_as_account global_reader "$password" information_schema 'SELECT COUNT(*) FROM tables' >/dev/null
-  run sql_as_account global_reader "$password" app_db 'INSERT INTO allowed_probe VALUES (2)'
+  password=$(echo "$result" | jq -r '.delivery_payload.password')
+  sql_as_account admin "$password" app_db 'CREATE TABLE admin_probe (id INT); INSERT INTO admin_probe VALUES (1); DROP TABLE admin_probe;' >/dev/null
+  run sql_as_account admin "$password" appXdb 'SELECT * FROM private_probe'
   [ "$status" -ne 0 ]
-  grants=$(sql_as_root "SHOW GRANTS FOR 'global_reader'@'%'")
-  [[ "$grants" == *'GRANT SELECT ON *.*'* ]]
-  [[ "$grants" != *'INSERT'* ]]
 }
 
-@test "allow_existing rotates credentials and removes prior broader grants" {
+@test "monitor and none profiles create usable logins without granting application data access" {
+  prepare_database
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",username:"monitor_user",account_type:"monitor",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  result=$(task_result)
+  [ "$(echo "$result" | jq -r '.status')" = CREATED ]
+  password=$(echo "$result" | jq -r '.delivery_payload.password')
+  sql_as_account monitor_user "$password" information_schema 'SHOW PROCESSLIST' >/dev/null
+  run sql_as_account monitor_user "$password" app_db 'SELECT * FROM allowed_probe'
+  [ "$status" -ne 0 ]
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",username:"none_user",account_type:"none",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  result=$(task_result)
+  [ "$(echo "$result" | jq -r '.status')" = CREATED ]
+  password=$(echo "$result" | jq -r '.delivery_payload.password')
+  sql_as_account none_user "$password" information_schema 'SELECT 1' >/dev/null
+  run sql_as_account none_user "$password" app_db 'SELECT * FROM allowed_probe'
+  [ "$status" -ne 0 ]
+  grants=$(sql_as_root "SHOW GRANTS FOR 'none_user'@'%'")
+  [[ "$grants" == *'GRANT USAGE ON *.*'* && "$grants" != *'GRANT SELECT'* ]]
+}
+
+@test "existing accounts skip without changing password or grants" {
+  prepare_database
+  sql_as_root "CREATE USER 'app_user'@'%' IDENTIFIED BY 'OldPass123!'; GRANT SELECT ON app_db.* TO 'app_user'@'%';"
+  before=$(sql_as_root "SHOW GRANTS FOR 'app_user'@'%'")
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"app_user",account_type:"admin",password_secret_name:"missing-account-secret",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  result=$(task_result)
+  [ "$(echo "$result" | jq -r '.status')" = SKIPPED ]
+  [ "$(echo "$result" | jq -r '.mutation_applied')" = false ]
+  [ "$(echo "$result" | jq -r '.delivery_payload')" = null ]
+  [ "$(sql_as_root "SHOW GRANTS FOR 'app_user'@'%'")" = "$before" ]
+  sql_as_account app_user 'OldPass123!' app_db 'SELECT * FROM allowed_probe' >/dev/null
+}
+
+@test "invalid input produces a failed execution with a structured error" {
+  prepare_database
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",username:"root",account_type:"none",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload" failed
+  [ "$(echo "$TASK_RESPONSE" | jq -r '.status')" = failed ]
+  [ "$(task_result | jq -r '.reason_code')" = INVALID_INPUT ]
+  [ "$(task_result | jq -r '.mutation_applied')" = false ]
+}
+
+@test "if_exists recreate rotates credentials and removes prior broader grants" {
   prepare_database
   sql_as_root "CREATE USER 'global_reader'@'%' IDENTIFIED BY 'OldPass123!'; GRANT ALL PRIVILEGES ON app_db.* TO 'global_reader'@'%';"
-  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",username:"global_reader",allow_existing:"true",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"global_reader",if_exists:"recreate",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
   submit_create_account "$payload"
   result=$(task_result)
   [ "$(echo "$result" | jq -r '.status')" = RECREATED ]
   [ "$(echo "$result" | jq -r '.reason_code')" = ACCOUNT_RECREATED ]
   grants=$(sql_as_root "SHOW GRANTS FOR 'global_reader'@'%'")
-  [[ "$grants" == *'GRANT SELECT ON *.*'* ]]
+  [[ "$grants" == *'GRANT SELECT ON `app\_db`.*'* ]]
   [[ "$grants" != *'ALL PRIVILEGES ON `app_db`.*'* ]]
 }
 
@@ -161,7 +204,7 @@ prepare_database() {
   create_sql=$(sql_as_root "SHOW CREATE USER 'expiry_user'@'%'")
   [[ "$create_sql" == *'PASSWORD EXPIRE'* ]]
 
-  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"expiry_user",allow_existing:"true",password_expire_mode:"interval",validity_days:"7",dry_run:"false",confirm:"true"}')
+  payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"expiry_user",if_exists:"recreate",password_expire_mode:"interval",validity_days:"7",dry_run:"false",confirm:"true"}')
   submit_create_account "$payload"
   [ "$(task_result | jq -r '.status')" = RECREATED ]
   create_sql=$(sql_as_root "SHOW CREATE USER 'expiry_user'@'%'")

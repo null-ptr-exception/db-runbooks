@@ -151,13 +151,32 @@ teardown() {
   # in this file.
   if [[ "${STS_SCALED_DOWN:-false}" == "true" ]]; then
     kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=2
-    kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+    wait_for_ready_member
   fi
 }
 
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as ops.bats / sts_orphan_delete.bats)
 # ---------------------------------------------------------------------------
+
+wait_for_ready_member() {
+  local previous_uid="${1:-}" current_uid="" elapsed=0
+  # A named `kubectl wait Ready` returns NotFound before the controller creates
+  # the replacement. Also avoid accepting the still-Ready, terminating old Pod.
+  while (( elapsed < 180 )); do
+    current_uid=$(kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 \
+      --ignore-not-found -o jsonpath='{.metadata.uid}') || return 1
+    if [[ -n "$current_uid" && "$current_uid" != "$previous_uid" ]]; then
+      kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 \
+        --for=condition=Ready --timeout="$((180 - elapsed))s"
+      return
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  echo "mongodb-1 did not appear with a new UID within 180s" >&2
+  return 1
+}
 
 kexec() {
   kubectl --context "$CTX_B" -n "$NS" exec "$TEST_POD" -- sh -c "$1"
@@ -300,7 +319,10 @@ run_pods_task() {
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.reason_code')" "POD_DELETED"
   assert_equal "$(echo "$RESULT_DATA" | jq -r '.deleted')" "true"
 
-  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+  wait_for_ready_member "$pod_uid"
+  local replacement_uid
+  replacement_uid=$(kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 -o jsonpath='{.metadata.uid}')
+  assert_not_equal "$replacement_uid" "$pod_uid"
 
   run_pods_task "list" "{\"namespace\":\"${PNS}\"}"
   assert_equal "$TASK_STATUS" "completed"
@@ -325,7 +347,7 @@ run_pods_task() {
 
   kubectl --context "$CTX_A" -n "$PNS" scale statefulset/mongodb --replicas=2
   STS_SCALED_DOWN=false
-  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+  wait_for_ready_member
 }
 
 @test "pods/delete rejects a confirm whose pod_uid no longer matches a same-name replacement" {
@@ -339,7 +361,7 @@ run_pods_task() {
   # of the task under test, so its live UID no longer matches stale_uid —
   # simulating a retry issued after the StatefulSet already replaced it.
   kubectl --context "$CTX_A" -n "$PNS" delete pod mongodb-1 --wait=true --timeout=60s
-  kubectl --context "$CTX_A" -n "$PNS" wait pod mongodb-1 --for=condition=Ready --timeout=180s
+  wait_for_ready_member "$stale_uid"
   local new_uid
   new_uid=$(kubectl --context "$CTX_A" -n "$PNS" get pod mongodb-1 -o jsonpath='{.metadata.uid}')
   assert_not_equal "$new_uid" "$stale_uid"

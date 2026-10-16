@@ -271,7 +271,7 @@ tasks:
   mariadb_sanity_check: *mariadb_sanity_check_task
   create-account:
     script: mariadb/create-account.sh
-    description: "Create or recreate a MariaDB account with scoped or all-database read-only grants"
+    description: "Create, skip, or recreate a MariaDB account using deployment-defined profiles"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -308,16 +308,18 @@ tasks:
         required: false
         type: string
         default: "%"
-      - name: privileges
-        env: ACCOUNT_PRIVILEGES
+      - name: account_type
+        env: ACCOUNT_TYPE
         required: false
         type: string
-        default: SELECT
-      - name: allow_existing
-        env: ALLOW_EXISTING
+        default: ro
+        pattern: '^(admin|ro|monitor|none)$'
+      - name: if_exists
+        env: IF_EXISTS
         required: false
         type: string
-        default: "false"
+        default: skip
+        pattern: '^(error|skip|recreate)$'
       - name: password_length
         env: PASSWORD_LENGTH
         required: false
@@ -370,11 +372,6 @@ tasks:
         default: "true"
       - name: confirm
         env: CONFIRM
-        required: false
-        type: string
-        default: "false"
-      - name: allow_admin_privileges
-        env: ALLOW_ADMIN_PRIVILEGES
         required: false
         type: string
         default: "false"

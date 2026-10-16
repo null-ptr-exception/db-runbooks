@@ -117,3 +117,9 @@ PY
   # job_name labels this execution; report database/table stay deploy-time config.
   [ "$output" = $'namespace\nparam\nvalue\nscope\nmdb\ndry_run\nconfirm\njob_name' ]
 }
+
+@test "create-account exposes profile and existence decisions without privilege policy inputs" {
+  run task_inputs create-account
+  [ "$status" -eq 0 ]
+  [ "$output" = $'namespace\nresource\nmdb\ncontainer\ndatabase\nusername\nhost\naccount_type\nif_exists\npassword_length\npassword_special_chars\npassword_special_max\npassword_delivery_mode\nrecipient_pgp_pubkey\npassword_secret_name\npassword_secret_key\npassword_expire_mode\nvalidity_days\ndry_run\nconfirm' ]
+}

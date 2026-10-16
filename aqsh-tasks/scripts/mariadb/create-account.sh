@@ -289,7 +289,7 @@ while IFS= read -r GRANT_SQL; do
     mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
   fi
 done < <(mariadb_account_grant_statements "$ACCOUNT_REF")
-if ! SHOW_GRANTS="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SHOW GRANTS FOR ${ACCOUNT_REF}")"; then
+if ! SHOW_GRANTS="$(mariadb_account_read_grants "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_REF")"; then
   SUMMARY="Account was changed but SHOW GRANTS verification failed"
   mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi

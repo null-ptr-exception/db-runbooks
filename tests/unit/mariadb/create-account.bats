@@ -131,15 +131,24 @@ PRIVILEGES
     GRANT*) [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1 ;;
     SHOW\ GRANTS*)
       [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
-      if [[ -n "${EXPECTED_GRANTS:-}" ]]; then
-        printf '%s\n' "$EXPECTED_GRANTS"
-      elif [[ "${VERIFY_MISMATCH:-0}" == 1 ]]; then
-        printf "GRANT INSERT ON *.* TO 'svc'@'%%'\n"
-      elif [[ -n "${EXPECTED_DATABASE:-}" ]]; then
-        printf "GRANT %s ON \`%s\`.* TO 'svc'@'%%'\n" "${EXPECTED_PRIVILEGES:-SELECT}" "${EXPECTED_DATABASE//_/\\_}"
+      grants="$(
+        if [[ -n "${EXPECTED_GRANTS:-}" ]]; then
+          printf '%s\n' "$EXPECTED_GRANTS"
+        elif [[ "${VERIFY_MISMATCH:-0}" == 1 ]]; then
+          printf "GRANT INSERT ON *.* TO 'svc'@'%%'\n"
+        elif [[ -n "${EXPECTED_DATABASE:-}" ]]; then
+          printf "GRANT %s ON \`%s\`.* TO 'svc'@'%%'\n" "${EXPECTED_PRIVILEGES:-SELECT}" "${EXPECTED_DATABASE//_/\\_}"
+        else
+          printf "GRANT SELECT ON *.* TO 'svc'@'%%'\n"
+        fi
+      )"
+      if [[ " ${command[*]} " == *" --raw "* ]]; then
+        printf 'raw-show-grants\n' >> "${TEST_TMPDIR}/client-flags.log"
       else
-        printf "GRANT SELECT ON *.* TO 'svc'@'%%'\n"
+        # Model mariadb --batch transport escaping instead of raw SQL output.
+        grants="${grants//\\/\\\\}"
       fi
+      printf '%s\n' "$grants"
       ;;
     *) echo "unexpected SQL: $query" >&2; exit 1 ;;
   esac
@@ -537,4 +546,12 @@ STUB
 @test "SHOW GRANTS verifier handles native canonicalization and rejects scope expansion" {
   run python3 -B -m unittest discover -s "${BATS_TEST_DIRNAME}" -p test_account_grants.py
   [ "$status" -eq 0 ]
+}
+
+@test "grant verification reads literal escaped database scopes in raw client mode" {
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}"
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.grants[0].scope')" = '`app\_db`.*' ]
+  grep -Fxq raw-show-grants "${TEST_TMPDIR}/client-flags.log"
 }

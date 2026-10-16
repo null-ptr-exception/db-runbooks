@@ -78,7 +78,7 @@ root_password() {
 
 sql_as_root() {
   kubectl --context "$CTX_A" -n mariadb-1 exec "$(primary_pod)" -c mariadb -- \
-    mariadb -u root -p"$(root_password)" -N -B -e "$1"
+    mariadb -u root -p"$(root_password)" -N -B --raw -e "$1"
 }
 
 sql_as_account() {
@@ -116,6 +116,7 @@ prepare_database() {
   submit_create_account "$payload"
   result=$(task_result)
   [ "$(echo "$result" | jq -r '.status')" = CREATED ]
+  [ "$(echo "$result" | jq -r '.grants[0].scope')" = '`app\_db`.*' ]
   [ "$(echo "$result" | jq -r '.delivery_payload.mode')" = one_time_plaintext ]
   password=$(echo "$result" | jq -r '.delivery_payload.password')
   sql_as_account app_user "$password" app_db 'SELECT COUNT(*) FROM allowed_probe' >/dev/null

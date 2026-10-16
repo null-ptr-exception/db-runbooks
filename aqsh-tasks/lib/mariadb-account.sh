@@ -321,3 +321,9 @@ mariadb_account_password_source_allowed() {
 mariadb_account_grants_match() {
   printf '%s\n' "$1" | python3 "${LIB_DIR}/mariadb-account-grants.py" "$GRANTS_JSON" "$SERVER_PRIVILEGES"
 }
+
+mariadb_account_read_grants() {
+  # Batch mode otherwise doubles the backslashes in escaped database patterns.
+  # Keep the SQL representation intact for exact scope verification.
+  mariadb_exec "$1" mariadb -u root -p"$2" -N -B --raw -e "SHOW GRANTS FOR $3" 2>/dev/null
+}

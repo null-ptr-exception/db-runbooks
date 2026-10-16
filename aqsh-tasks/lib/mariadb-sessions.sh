@@ -44,7 +44,7 @@ SQL
     transactions)
       cat <<SQL
 SELECT /* sessions:transactions */ JSON_OBJECT(
- 'transaction_id', t.TRX_ID, 'connection_id', CAST(t.TRX_MYSQL_THREAD_ID AS CHAR),
+ 'transaction_id', CAST(t.TRX_ID AS CHAR), 'connection_id', CAST(t.TRX_MYSQL_THREAD_ID AS CHAR),
  'user', p.USER, 'host', p.HOST, 'database', p.DB, 'command', p.COMMAND,
  'state', t.TRX_STATE, 'started_at', t.TRX_STARTED,
  'transaction_seconds', TIMESTAMPDIFF(SECOND, t.TRX_STARTED, NOW()),
@@ -60,12 +60,12 @@ SQL
       cat <<SQL
 SELECT /* sessions:lock_waits */ JSON_OBJECT(
  'waiting_connection_id', CAST(r.TRX_MYSQL_THREAD_ID AS CHAR),
- 'waiting_transaction_id', r.TRX_ID,
+ 'waiting_transaction_id', CAST(r.TRX_ID AS CHAR),
  'wait_seconds', TIMESTAMPDIFF(SECOND, r.TRX_WAIT_STARTED, NOW()),
  'waiting_sql', LEFT(r.TRX_QUERY, $n),
  'waiting_sql_truncated', COALESCE(CHAR_LENGTH(r.TRX_QUERY) > $n, 0),
  'blocking_connection_id', CAST(b.TRX_MYSQL_THREAD_ID AS CHAR),
- 'blocking_transaction_id', b.TRX_ID,
+ 'blocking_transaction_id', CAST(b.TRX_ID AS CHAR),
  'blocking_transaction_seconds', TIMESTAMPDIFF(SECOND, b.TRX_STARTED, NOW()),
  'blocking_sql', LEFT(b.TRX_QUERY, $n),
  'blocking_sql_truncated', COALESCE(CHAR_LENGTH(b.TRX_QUERY) > $n, 0))
@@ -82,12 +82,11 @@ SELECT /* sessions:inspect */ JSON_OBJECT(
  'user', p.USER, 'host', p.HOST, 'database', p.DB, 'command', p.COMMAND,
  'command_seconds', p.TIME, 'state', p.STATE, 'sql', LEFT(p.INFO, $n),
  'sql_truncated', COALESCE(CHAR_LENGTH(p.INFO) > $n, 0),
- 'transaction_id', t.TRX_ID, 'rows_modified', t.TRX_ROWS_MODIFIED,
- 'self', CAST(p.ID=CONNECTION_ID() AS UNSIGNED),
+ 'transaction_id', CAST(t.TRX_ID AS CHAR), 'rows_modified', t.TRX_ROWS_MODIFIED,
  'fingerprint', SHA2(CONCAT('$POD_EPOCH:$ACTION', JSON_OBJECT(
    'server', @@hostname, 'connection_id', p.ID, 'user', p.USER,
    'host', p.HOST, 'query_id', p.QUERY_ID, 'sql', p.INFO,
-   'transaction_id', t.TRX_ID)), 256))
+   'transaction_id', CAST(t.TRX_ID AS CHAR))), 256))
 FROM information_schema.PROCESSLIST p
 LEFT JOIN information_schema.INNODB_TRX t ON t.TRX_MYSQL_THREAD_ID=p.ID
 WHERE p.ID=$CONNECTION_ID;

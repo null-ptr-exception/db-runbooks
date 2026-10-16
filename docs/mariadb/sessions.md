@@ -66,15 +66,19 @@ session and a 64-character `before.fingerprint`. For execution, submit the same
 target/action/ID, the fingerprint as `expected_session`, `dry_run:"false"`,
 and `confirm:"true"`.
 `dry_run=true,confirm=true` and `dry_run=false,confirm=false` are rejected.
+Missing `expected_session` is `SESSION_EXPECTED_SESSION_REQUIRED`; malformed
+values are invalid input. `SESSION_TARGET_CHANGED` means a valid fingerprint
+was compared with the inspected session and no longer matched.
 
 The task re-reads the target before execution. Its fingerprint binds the pod UID
 and container restart count, selected action, server, connection/user/host, query ID/text and
 transaction ID. If these changed since preview, obtain a new preview. The fingerprint
 is an identity acknowledgement, not an authentication credential or permission.
 
-Built-in root/system accounts, replication/background commands, and the current
-inspection connection are protected. Deployment configuration can add protected
-accounts. `kill-query` requires a running statement and issues `KILL QUERY ID`
+Built-in root/system accounts and replication/background commands are protected.
+Deployment configuration can add protected accounts. Each inspection uses a
+short-lived connection; it is not a persistent session identity guard.
+`kill-query` requires a running statement and issues `KILL QUERY ID`
 for the inspected query ID, avoiding interruption of a later statement on the
 same connection. `kill-connection` issues `KILL CONNECTION` for that connection.
 
@@ -94,17 +98,23 @@ before bounded verification. An interrupted transport must not imply no change. 
 | State/reason | Meaning |
 |---|---|
 | `NO_ACTION / SESSION_NOT_FOUND` | Target absent before execution; no KILL issued. |
+| `NO_ACTION / SESSION_TARGET_ALREADY_GONE` | KILL returned a definite missing-ID error and a bounded post-read confirmed the original target gone; `changed:false`, `command_accepted:false`. |
 | `UNKNOWN / SESSION_KILL_ATTEMPTING` | Request attempt recorded; server acknowledgement not yet observed. |
 | `ACCEPTED / SESSION_KILL_ACCEPTED` | Server accepted KILL; completion not yet established. |
-| `VERIFIED / SESSION_TERMINATION_VERIFIED` | Original query absent, or connection and original InnoDB transaction absent. |
+| `VERIFIED / SESSION_TERMINATION_VERIFIED` | Original query absent, or connection and original InnoDB transaction absent. If the KILL reply was lost, `changed:null` and `command_accepted:null` retain uncertainty about which operation ended it. |
 | `PENDING / SESSION_TERMINATION_PENDING` | KILL accepted, but termination/rollback still visible within the verification budget. |
-| `UNKNOWN / SESSION_VERIFICATION_UNAVAILABLE` | KILL accepted; a post-read failed. |
-| `ERROR / SESSION_KILL_FAILED` | Command failed/transport was lost; `changed:null` and `command_accepted:null` preserve uncertainty. |
+| `UNKNOWN / SESSION_VERIFICATION_UNAVAILABLE` | A post-read failed; the result retains any known acceptance/rejection evidence. |
+| `ERROR / SESSION_KILL_FAILED` | KILL failed and post-read still sees the original target. A definite missing-ID error gives `changed:false`; other failures retain `changed:null` and `command_accepted:null`. |
 
 Verification reports remaining original transaction/waiter evidence. VERIFIED
 for query termination **does not** mean transaction completion, released locks,
 or recovered application health. The original transaction is tracked separately
 from connection visibility. No automatic retry is configured by the task defaults.
+On KILL failure, verification runs once without repeating the mutation.
+Only MariaDB's [missing-ID errors](https://mariadb.com/docs/server/reference/sql-statements/administrative-sql-statements/kill)
+1094 (`KILL CONNECTION`) and 1957 (`KILL QUERY ID`) establish a definite rejection;
+raw client errors are captured privately and discarded. Transaction IDs are JSON
+strings, including the IDs used to bind previews and verify rollback.
 
 ## Deployment and one Rundeck job
 
@@ -115,6 +125,12 @@ Bash, curl and jq, reads `RD_OPTION_*` environment values, submits only
 `/tasks/sessions`, and polls the returned execution ID. Configure `AQSH_URL` and
 `AQSH_TOKEN` privately on that executor. Pin the reviewed repository version.
 Adapt existing site/pod selectors to these namespace/pod inputs in deployment.
+The client retries failed polling GETs within its deadline, never the submission
+POST. `AQSH_POLL_TIMEOUT_SECONDS` is executor configuration (1–180, default 180).
+Every exit after a submission attempt prints the execution ID when available
+and guidance to inspect it before resubmitting termination. `UNKNOWN`, `PENDING`,
+`ACCEPTED` and unrecognized results fail the Rundeck job; a green job requires a
+completed positive result (`READY`, `PARTIAL`, `NO_ACTION`, `DRY_RUN_READY`, `VERIFIED`).
 
 Use one invocation for diagnosis, another with a termination action for preview,
 and another to apply. All remain the same Rundeck job. The UI has fixed actions,

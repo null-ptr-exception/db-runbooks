@@ -48,7 +48,10 @@ if 'exec' in args:
         checkpoint=json.loads(Path(env('RESULT')).read_text())
         assert checkpoint['reason_code']=='SESSION_KILL_ATTEMPTING'
         assert checkpoint['changed'] is None
-        if env('MOCK_KILL_FAIL'): die()
+        if env('MOCK_KILL_FAIL'):
+            if env('MOCK_KILL_ERROR_CODE'):
+                print(f"ERROR {env('MOCK_KILL_ERROR_CODE')} (HY000) at line 1: Unknown id unit-only-password",file=sys.stderr)
+            die()
         sys.exit(0)
     if not query.startswith('SET STATEMENT max_statement_time='):
         raise SystemExit('unbounded read')
@@ -80,13 +83,19 @@ if 'exec' in args:
         if env('MOCK_NOT_FOUND'): sys.exit(0)
         out({'connection_id':env('MOCK_ROW_ID','42'),'query_id':env('MOCK_QUERY_ID','73'),
              'user':env('MOCK_USER','app'),'host':'client:123','database':'example',
-             'command':env('MOCK_COMMAND','Query'),'self':int(env('MOCK_SELF','0')),
-             'sql':'SELECT SLEEP(60)','transaction_id':'100','rows_modified':10,
+             'command':env('MOCK_COMMAND','Query'),
+             'sql':'SELECT SLEEP(60)',
+             'transaction_id':int(env('MOCK_TRX_ID','100')) if env('MOCK_NUMERIC_TRX_ID') else env('MOCK_TRX_ID','100'),
+             'rows_modified':10,
              'fingerprint':env('MOCK_FINGERPRINT')})
     elif section=='verify':
         checkpoint=json.loads(Path(env('RESULT')).read_text())
-        assert checkpoint['reason_code']=='SESSION_KILL_ACCEPTED'
-        assert checkpoint['command_accepted'] is True
+        if env('MOCK_KILL_FAIL'):
+            assert checkpoint['reason_code']=='SESSION_KILL_ATTEMPTING'
+            assert checkpoint['command_accepted'] is None
+        else:
+            assert checkpoint['reason_code']=='SESSION_KILL_ACCEPTED'
+            assert checkpoint['command_accepted'] is True
         pending=bool(env('MOCK_PENDING'))
         if env('MOCK_EMPTY_VERIFY'):
             out({}); sys.exit(0)
@@ -203,7 +212,11 @@ mariadb-b'
 @test "sessions requires a matching preview token before mutation" {
   run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true
   [ "$status" -ne 0 ]
-  [ "$(field '.reason_code')" = SESSION_TARGET_CHANGED ]
+  [ "$(field '.reason_code')" = SESSION_EXPECTED_SESSION_REQUIRED ]
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    EXPECTED_SESSION=malformed
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = SESSION_INVALID_INPUT ]
   run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
     "EXPECTED_SESSION=$(printf '%064d' 2)"
   [ "$status" -ne 0 ]
@@ -228,8 +241,8 @@ mariadb-b'
   assert_no_kill
 }
 
-@test "sessions protects root self replication and extra deployment accounts" {
-  for setting in MOCK_USER=root MOCK_SELF=1 'MOCK_COMMAND=Binlog Dump' MOCK_USER=platform; do
+@test "sessions protects root replication and extra deployment accounts" {
+  for setting in MOCK_USER=root 'MOCK_COMMAND=Binlog Dump' MOCK_USER=platform; do
     run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 \
       SESSION_PROTECTED_USERS_DEFAULT=platform "$setting"
     [ "$status" -ne 0 ]
@@ -296,11 +309,73 @@ mariadb-b'
 
 @test "sessions reports uncertain execution after KILL transport failure" {
   run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
-    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1 MOCK_PENDING=1
   [ "$status" -ne 0 ]
   [ "$(field '.reason_code')" = SESSION_KILL_FAILED ]
   [ "$(field '.changed')" = null ]
   [ "$(field '.command_accepted')" = null ]
+}
+
+@test "sessions fails KILL preparation before recording or issuing a mutation" {
+  printf '#!/usr/bin/env bash\nexit 1\n' > "${MOCK_DIR}/mktemp"
+  chmod +x "${MOCK_DIR}/mktemp"
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT"
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = SESSION_KILL_PREPARATION_FAILED ]
+  [ "$(field '.changed')" = false ]
+  assert_no_kill
+}
+
+@test "sessions reconciles an already-ended target after a definite missing-ID error" {
+  for pair in kill-query:1957 kill-connection:1094; do
+    run_sessions "SESSION_ACTION=${pair%:*}" CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+      "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1 "MOCK_KILL_ERROR_CODE=${pair#*:}"
+    [ "$status" -eq 0 ]
+    [ "$(field '.reason_code')" = SESSION_TARGET_ALREADY_GONE ]
+    [ "$(field '.changed')" = false ]
+    [ "$(field '.command_accepted')" = false ]
+    [ "$(field '.verification.state')" = verified ]
+    [ "$(grep -c '^KILL ' "$MOCK_SQL_LOG")" -eq 1 ]
+    [[ "$output" != *unit-only-password* ]]
+    : > "$MOCK_SQL_LOG"
+  done
+}
+
+@test "sessions keeps uncertainty about mutation when a lost KILL reply is followed by verified absence" {
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SESSION_TERMINATION_VERIFIED ]
+  [ "$(field '.changed')" = null ]
+  [ "$(field '.command_accepted')" = null ]
+  [ "$(field '.verification.state')" = verified ]
+  [ "$(grep -c '^KILL ' "$MOCK_SQL_LOG")" -eq 1 ]
+}
+
+@test "sessions cannot reconcile a failed KILL when verification is unavailable or the target remains" {
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1 MOCK_FAIL_SECTION=verify
+  [ "$(field '.reason_code')" = SESSION_VERIFICATION_UNAVAILABLE ]
+  [ "$(field '.changed')" = null ]
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_KILL_FAIL=1 MOCK_KILL_ERROR_CODE=1094 MOCK_PENDING=1
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = SESSION_KILL_FAILED ]
+  [ "$(field '.verification.connection_present')" = 1 ]
+}
+
+@test "sessions preserves large transaction IDs exactly and rejects numeric identity fields" {
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 DRY_RUN=false CONFIRM=true \
+    "EXPECTED_SESSION=$MOCK_FINGERPRINT" MOCK_TRX_ID=9007199254740993
+  [ "$status" -eq 0 ]
+  [ "$(field '.before.transaction_id')" = 9007199254740993 ]
+  grep -q "WHERE TRX_ID='9007199254740993'" "$MOCK_SQL_LOG"
+  : > "$MOCK_SQL_LOG"
+  run_sessions SESSION_ACTION=kill-connection CONNECTION_ID=42 MOCK_TRX_ID=9007199254740993 MOCK_NUMERIC_TRX_ID=1
+  [ "$status" -ne 0 ]
+  [ "$(field '.reason_code')" = SESSION_INSPECTION_FAILED ]
+  assert_no_kill
 }
 
 @test "sessions treats missing global counters as unavailable rather than zero" {

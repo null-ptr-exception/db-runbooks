@@ -103,6 +103,9 @@ payload() {
     .sections.transactions.rows | any(.connection_id==$blocker and .command=="Sleep")' <<< "$TASK_RESULT"
   jq -e --arg blocker "$BLOCKER" '
     .sections.lock_waits.rows | any(.blocking_connection_id==$blocker)' <<< "$TASK_RESULT"
+  jq -e '.sections.transactions.rows | all(.transaction_id | type=="string")' <<< "$TASK_RESULT"
+  jq -e '.sections.lock_waits.rows | all(
+    (.waiting_transaction_id | type=="string") and (.blocking_transaction_id | type=="string"))' <<< "$TASK_RESULT"
   jq -e '.sections.processlist.rows | any((.sql // "") | contains("lock_probe"))' <<< "$TASK_RESULT"
   assert_equal "$(jq -r .changed <<< "$TASK_RESULT")" false
 }
@@ -114,6 +117,7 @@ payload() {
   id="$(db_sql "SELECT ID FROM information_schema.PROCESSLIST WHERE USER='$TEST_USER' AND INFO='SELECT SLEEP(90)';")"
   submit_sessions "$(payload kill-query "$id")"
   assert_equal "$(jq -r .reason_code <<< "$TASK_RESULT")" SESSION_DRY_RUN_READY
+  jq -e '.before.transaction_id | type=="string"' <<< "$TASK_RESULT"
   preview="$(jq -r .before.fingerprint <<< "$TASK_RESULT")"
   request="$(payload kill-query "$id" | jq -c --arg token "$preview" \
     '.+{dry_run:"false",confirm:"true",expected_session:$token}')"

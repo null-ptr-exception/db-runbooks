@@ -70,7 +70,8 @@ if [[ "$ACTION" != diagnose ]]; then
   [[ "$DRY_RUN:$CONFIRM" == true:false || "$DRY_RUN:$CONFIRM" == false:true ]] \
     || block SESSION_CONFIRM_REQUIRED
   if [[ "$DRY_RUN" == false ]]; then
-    [[ "$EXPECTED_SESSION" =~ ^[a-f0-9]{64}$ ]] || block SESSION_TARGET_CHANGED
+    [[ -n "$EXPECTED_SESSION" ]] || block SESSION_EXPECTED_SESSION_REQUIRED
+    [[ "$EXPECTED_SESSION" =~ ^[a-f0-9]{64}$ ]] || block SESSION_INVALID_INPUT
   fi
 fi
 
@@ -92,8 +93,22 @@ PASSWORD="$(mariadb_read_root_password "" "$TARGET_POD")" || block SESSION_CREDE
 # JSON_OBJECT escapes control characters itself. --raw prevents the batch
 # client from escaping JSON a second time. Never forward client stderr.
 sql() {
+  local query="$1" stderr_file="${2:-/dev/null}"
   mariadb_exec "$TARGET_POD" mariadb -u root -p"$PASSWORD" \
-    --connect-timeout=5 --raw -N -B -e "$1" 2>/dev/null
+    --connect-timeout=5 --raw -N -B -e "$query" 2>"$stderr_file"
+}
+verify_target() {
+  local rows
+  rows="$(read_rows verify)" || return 1
+  jq -e 'length == 1 and (.[0] | .connection_present | IN(0,1)) and
+    (.[0] | .original_query_present | IN(0,1)) and
+    (.[0] | .original_transaction_present | IN(0,1)) and
+    (.[0].original_transaction_waiters | type == "number" and . >= 0)' \
+    <<< "$rows" >/dev/null || return 1
+  jq -c --arg action "$ACTION" '.[0] |
+    . + {state:(if (if $action == "kill-query" then .original_query_present == 0
+      else .connection_present == 0 and .original_transaction_present == 0 end)
+      then "verified" else "pending" end)}' <<< "$rows"
 }
 read_rows() {
   local query raw rows
@@ -148,7 +163,9 @@ fi
 BEFORE="$(read_rows inspect)" || error SESSION_INSPECTION_FAILED
 [[ "$(jq length <<< "$BEFORE")" == 0 ]] && { emit NO_ACTION SESSION_NOT_FOUND; exit 0; }
 jq -e --arg id "$CONNECTION_ID" 'length == 1 and .[0].connection_id == $id and
-  (.[0].query_id|type == "string") and (.[0].fingerprint|test("^[a-f0-9]{64}$"))' \
+  (.[0].query_id|type == "string") and
+  (.[0].transaction_id == null or (.[0].transaction_id | type == "string")) and
+  (.[0].fingerprint|test("^[a-f0-9]{64}$"))' \
   <<< "$BEFORE" >/dev/null || error SESSION_INSPECTION_FAILED
 BEFORE="$(jq -c '.[0]' <<< "$BEFORE")"
 # Only normal client commands are eligible. The built-in protected users cannot
@@ -156,7 +173,6 @@ BEFORE="$(jq -c '.[0]' <<< "$BEFORE")"
 jq -e --arg users "$PROTECTED_USERS" '
   . as $row | (($users|ascii_downcase|split(",")|map(gsub("^ +| +$";""))) |
     index($row.user|ascii_downcase)) == null and
-  ($row.self == 0) and
   (["Query","Execute","Sleep"]|index($row.command)) != null' \
   <<< "$BEFORE" >/dev/null || block SESSION_PROTECTED_TARGET
 ORIGINAL_QUERY_ID="$(jq -r .query_id <<< "$BEFORE")"
@@ -181,43 +197,54 @@ if [[ "$ACTION" == kill-query ]]; then
 else
   COMMAND="KILL CONNECTION $CONNECTION_ID;"
 fi
+KILL_ERROR_FILE="$(mktemp)" || error SESSION_KILL_PREPARATION_FAILED
+trap 'rm -f "$KILL_ERROR_FILE"' EXIT
 # Record an uncertain attempt before the network call as well: the server may
 # act even if this process is interrupted before it receives acknowledgement.
 EXTRA="$(jq -c '. + {changed:null, kill_issued:true, command_accepted:null,
   verification:{state:"unavailable"}}' <<< "$EXTRA")"
 emit UNKNOWN SESSION_KILL_ATTEMPTING "$EXTRA"
-if ! sql "$COMMAND" >/dev/null; then
-  EXTRA="$(jq -c '. + {changed:null, kill_issued:true, command_accepted:null,
-    verification:{state:"unavailable"}}' <<< "$EXTRA")"
+if ! sql "$COMMAND" "$KILL_ERROR_FILE" >/dev/null; then
+  MISSING_ID_ERROR=1094
+  [[ "$ACTION" != kill-query ]] || MISSING_ID_ERROR=1957
+  KNOWN_MISSING=false
+  if grep -Eq "^ERROR $MISSING_ID_ERROR \\(HY000\\)" "$KILL_ERROR_FILE"; then
+    KNOWN_MISSING=true
+    EXTRA="$(jq -c --argjson code "$MISSING_ID_ERROR" \
+      '. + {changed:false,command_accepted:false,kill_error_code:$code}' <<< "$EXTRA")"
+  fi
+  rm -f "$KILL_ERROR_FILE"
+  trap - EXIT
+  # Check once, without retrying KILL. A lost reply can hide an applied command,
+  # so only a definite missing-ID response establishes changed:false.
+  AFTER="$(verify_target)" || {
+    emit UNKNOWN SESSION_VERIFICATION_UNAVAILABLE "$EXTRA"; exit 0
+  }
+  EXTRA="$(jq -c --argjson after "$AFTER" '.verification=$after' <<< "$EXTRA")"
+  if [[ "$(jq -r .state <<< "$AFTER")" == verified ]]; then
+    if [[ "$KNOWN_MISSING" == true ]]; then
+      emit NO_ACTION SESSION_TARGET_ALREADY_GONE "$EXTRA"
+    else
+      emit VERIFIED SESSION_TERMINATION_VERIFIED "$EXTRA"
+    fi
+    exit 0
+  fi
   emit ERROR SESSION_KILL_FAILED "$EXTRA"; exit 1
 fi
+rm -f "$KILL_ERROR_FILE"
+trap - EXIT
 EXTRA="$(jq -c '. + {changed:true, kill_issued:true, command_accepted:true,
   verification:{state:"pending"}}' <<< "$EXTRA")"
 # Persist acceptance before verification, so an interrupted task does not leave
 # a result claiming that no mutation was attempted.
 emit ACCEPTED SESSION_KILL_ACCEPTED "$EXTRA"
 for (( attempt=1; attempt<=SESSION_VERIFY_ATTEMPTS; attempt++ )); do
-  AFTER="$(read_rows verify)" || {
+  AFTER="$(verify_target)" || {
     EXTRA="$(jq -c '.verification={state:"unavailable"}' <<< "$EXTRA")"
     emit UNKNOWN SESSION_VERIFICATION_UNAVAILABLE "$EXTRA"; exit 0
   }
-  jq -e 'length == 1 and (.[0] | .connection_present | IN(0,1)) and
-    (.[0] | .original_query_present | IN(0,1)) and
-    (.[0] | .original_transaction_present | IN(0,1)) and
-    (.[0].original_transaction_waiters | type == "number" and . >= 0)' \
-    <<< "$AFTER" >/dev/null || {
-      EXTRA="$(jq -c '.verification={state:"unavailable"}' <<< "$EXTRA")"
-      emit UNKNOWN SESSION_VERIFICATION_UNAVAILABLE "$EXTRA"; exit 0
-    }
-  AFTER="$(jq -c '.[0]' <<< "$AFTER")"
-  if [[ "$ACTION" == kill-query ]]; then
-    DONE="$(jq '.original_query_present == 0' <<< "$AFTER")"
-  else
-    DONE="$(jq '.connection_present == 0 and .original_transaction_present == 0' <<< "$AFTER")"
-  fi
-  EXTRA="$(jq -c --argjson after "$AFTER" --argjson 'done' "$DONE" \
-    '.verification=$after + {state:(if $done then "verified" else "pending" end)}' <<< "$EXTRA")"
-  if [[ "$DONE" == true ]]; then
+  EXTRA="$(jq -c --argjson after "$AFTER" '.verification=$after' <<< "$EXTRA")"
+  if [[ "$(jq -r .state <<< "$AFTER")" == verified ]]; then
     emit VERIFIED SESSION_TERMINATION_VERIFIED "$EXTRA"; exit 0
   fi
   (( attempt == SESSION_VERIFY_ATTEMPTS )) || sleep 1

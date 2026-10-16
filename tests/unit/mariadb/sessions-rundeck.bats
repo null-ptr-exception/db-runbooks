@@ -3,6 +3,7 @@ setup() {
   REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../../.." && pwd)"
   MOCK_DIR="$(mktemp -d)"
   export MOCK_HTTP_LOG="${MOCK_DIR}/requests.jsonl"
+  export MOCK_HTTP_GET_LOG="${MOCK_DIR}/polls.jsonl"
   cat > "${MOCK_DIR}/curl" <<'MOCK'
 #!/usr/bin/env python3
 import json, os, sys
@@ -12,9 +13,20 @@ if url.endswith('/tasks/sessions') and '--data' in args:
     body=json.loads(args[args.index('--data')+1])
     with open(os.environ['MOCK_HTTP_LOG'],'a') as f:
         f.write(json.dumps(body)+'\n')
+    if os.environ.get('MOCK_POST_FAIL'): sys.exit(22)
     print(json.dumps({'id':os.environ.get('MOCK_EXECUTION_ID','execution-1')}))
 elif url.endswith('/executions/execution-1') and '--data' not in args:
+    from pathlib import Path
+    p=Path(os.environ['MOCK_HTTP_GET_LOG'])
+    previous=len(p.read_text().splitlines()) if p.exists() else 0
+    with p.open('a') as f: f.write(url+'\n')
     if os.environ.get('MOCK_HTTP_FAIL'): sys.exit(22)
+    if previous < int(os.environ.get('MOCK_HTTP_FAILURES','0')): sys.exit(22)
+    if os.environ.get('MOCK_HTTP_INTERRUPT'):
+        import signal
+        os.kill(int(os.environ['MOCK_CLIENT_PID']),signal.SIGTERM)
+    if os.environ.get('MOCK_BAD_RESPONSE'):
+        print('not-json'); sys.exit(0)
     result={'status':os.environ.get('MOCK_RESULT_STATUS','READY'),
             'reason_code':'UNIT_RESULT','changed':False}
     if os.environ.get('MOCK_STRING_RESULT'): result=json.dumps(result)
@@ -29,7 +41,8 @@ teardown() { rm -rf "$MOCK_DIR"; }
 run_client() {
   run env "PATH=${MOCK_DIR}:$PATH" AQSH_URL=https://aqsh.example AQSH_TOKEN=unit-only-token \
     RD_OPTION_NAMESPACE=mariadb-1 RD_OPTION_TARGET_POD=mariadb-1 "$@" \
-    bash "${REPO_ROOT}/examples/rundeck/run-mariadb-sessions.sh"
+    bash -c 'export MOCK_CLIENT_PID=$$; exec bash "$1"' sh \
+    "${REPO_ROOT}/examples/rundeck/run-mariadb-sessions.sh"
 }
 @test "Rundeck client submits only the sessions route with safe diagnosis defaults" {
   run_client
@@ -44,10 +57,43 @@ run_client() {
   [ "$status" -eq 0 ]
   [ "$(jq -r .connection_id "$MOCK_HTTP_LOG")" = '$(touch /tmp/session-should-not-exist)' ]
 }
-@test "Rundeck client decodes string task results and exposes pending verification" {
+@test "Rundeck client decodes string task results and fails pending verification" {
   run_client MOCK_STRING_RESULT=1 MOCK_RESULT_STATUS=PENDING
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
   [[ "$output" == *PENDING* ]]
+}
+@test "Rundeck client fails closed for unverified and unrecognized result states" {
+  for state in UNKNOWN ACCEPTED future-state; do
+    run_client "MOCK_RESULT_STATUS=$state"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *execution-1* ]]
+    [[ "$output" == *'inspect that execution before resubmitting'* ]]
+  done
+}
+@test "Rundeck client succeeds only for completed positive result states" {
+  for state in READY PARTIAL NO_ACTION DRY_RUN_READY VERIFIED; do
+    run_client "MOCK_RESULT_STATUS=$state"
+    [ "$status" -eq 0 ]
+  done
+}
+@test "Rundeck client retries transient GET failures without repeating POST" {
+  run_client RD_OPTION_ACTION=kill-connection MOCK_HTTP_FAILURES=2
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$MOCK_HTTP_LOG" | tr -d ' ')" = 1 ]
+  [ "$(wc -l < "$MOCK_HTTP_GET_LOG" | tr -d ' ')" = 3 ]
+}
+@test "Rundeck client prints execution identity and resubmission guidance on malformed poll responses" {
+  run_client MOCK_BAD_RESPONSE=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *execution-1* ]]
+  [[ "$output" == *'inspect that execution before resubmitting'* ]]
+}
+@test "Rundeck client prints execution identity and resubmission guidance when interrupted" {
+  run_client MOCK_HTTP_INTERRUPT=1
+  [ "$status" -eq 143 ]
+  [[ "$output" == *execution-1* ]]
+  [[ "$output" == *'inspect that execution before resubmitting'* ]]
+  [ "$(wc -l < "$MOCK_HTTP_LOG" | tr -d ' ')" = 1 ]
 }
 @test "Rundeck client reports failed executions and blocked task results as failures" {
   run_client MOCK_EXECUTION_STATUS=failed
@@ -59,12 +105,23 @@ run_client() {
   run_client 'MOCK_EXECUTION_ID=../../other-task'
   [ "$status" -ne 0 ]
   [[ "$output" == *'Invalid execution ID'* ]]
+  [[ "$output" == *'inspect that execution before resubmitting'* ]]
 }
 @test "Rundeck client does not resubmit a mutation when polling fails" {
   run_client RD_OPTION_ACTION=kill-connection RD_OPTION_DRY_RUN=false \
-    RD_OPTION_CONFIRM=true RD_OPTION_CONNECTION_ID=42 MOCK_HTTP_FAIL=1
+    RD_OPTION_CONFIRM=true RD_OPTION_CONNECTION_ID=42 MOCK_HTTP_FAIL=1 AQSH_POLL_TIMEOUT_SECONDS=1
   [ "$status" -ne 0 ]
   [ "$(wc -l < "$MOCK_HTTP_LOG" | tr -d ' ')" = 1 ]
+  [[ "$output" == *execution-1* ]]
+  [[ "$output" == *'inspect that execution before resubmitting'* ]]
+}
+@test "Rundeck client warns when the submission reply is lost and never repeats POST" {
+  run_client RD_OPTION_ACTION=kill-connection MOCK_POST_FAIL=1
+  [ "$status" -ne 0 ]
+  [ "$(wc -l < "$MOCK_HTTP_LOG" | tr -d ' ')" = 1 ]
+  [ ! -e "$MOCK_HTTP_GET_LOG" ]
+  [[ "$output" == *'AQSH execution: unavailable'* ]]
+  [[ "$output" == *'inspect that execution before resubmitting'* ]]
 }
 @test "Rundeck definition has one job and an enforced fixed action selector" {
   run python3 - "${REPO_ROOT}" <<'CHECK'

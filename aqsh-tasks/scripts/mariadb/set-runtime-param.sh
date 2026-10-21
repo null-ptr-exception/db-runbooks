@@ -37,7 +37,7 @@ source "${LIB_DIR}/mariadb.sh"
 source "${LIB_DIR}/job-report.sh"
 trap 'job_report_exit "$?"' EXIT
 
-bool() { case "${1:-}" in 1 | true | TRUE | yes | YES | on | ON) return 0 ;; *) return 1 ;; esac; }
+bool() { local value="${1:-}"; case "${value,,}" in 1 | true | yes | on) return 0 ;; *) return 1 ;; esac; }
 
 # --- curated allow-list (single source of truth for what this task will set) --
 # Tier drives the confirm/warning strength; validation is per-param.

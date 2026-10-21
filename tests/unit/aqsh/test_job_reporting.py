@@ -105,6 +105,40 @@ class ConfigTests(Fixture):
         with self.assertRaises(ValueError):
             self.compile({"restart": task})
 
+    def test_unfiltered_inputs_without_env_remain_supported(self):
+        task = self.task(enabled=True)
+        task['input'].extend([{'name': 'label', 'type': 'string'}, {'name': 'dry_run'}])
+        path = self.compile({'restart': task})
+        inputs = json.loads(path.read_text())['tasks']['restart']['input']
+        self.assertEqual(inputs[1:3], [{'name': 'label', 'type': 'string'}, {'name': 'dry_run'}])
+        settings = json.loads(next(p for p in path.parent.glob('*.json') if p != path).read_text())
+        self.assertIsNone(settings['dry_run_env'])
+
+    def test_startup_validation_names_task_and_field_without_exposing_values(self):
+        cases = [
+            ([{'name': 'param'}], {'param': 'private-filter-value'}, 'param', 'env'),
+            ([{'name': 'param', 'env': ''}], {'param': 'private-filter-value'}, 'param', 'env'),
+            ([{'name': 'param', 'env': False}], {'param': 'private-filter-value'}, 'param', 'env'),
+            ([{'env': 'PARAM'}], {}, 'input[0]', 'name'),
+            ([None], {}, 'input[0]', 'name'),
+            ({'param': {}}, {}, 'input', 'list'),
+        ]
+        for inputs, when, field, detail in cases:
+            with self.subTest(inputs=inputs):
+                source = self.root / 'invalid.json'
+                source.write_text(json.dumps({'tasks': {'review-task': {
+                    'script': 'operation.sh', 'input': inputs,
+                    'job_report': {'enabled': True, 'when': when}}}}))
+                result = subprocess.run([sys.executable, str(LIB / 'job-report-config.py'),
+                                         str(source), str(self.tasks), str(self.root / 'out')],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, '')
+                for text in ('review-task', field, detail):
+                    self.assertIn(text, result.stderr)
+                self.assertNotIn('KeyError', result.stderr)
+                self.assertNotIn('private-filter-value', result.stderr)
+
     def test_yaml_merge_overrides_and_string_tokens_keep_aqsh_semantics(self):
         source = self.root / "anchored.yaml"
         source.write_text('''report: &report
@@ -237,7 +271,9 @@ exit "$TEST_CODE"
                              ({**self.options, "enabled": False}, {}),
                              ({**self.options, "when": {"RUNTIME_PARAM": "max_connections"}},
                               {"RUNTIME_PARAM": "slow_query_log"}),
-                             (self.options, {"TEST_RESULT": '{"status":"success","data":{"dryRun":true}}'})]:
+                             (self.options, {"TEST_RESULT": '{"status":"success","data":{"dryRun":true}}'}),
+                             (self.options, {"DRY_RUN": "True", "TEST_RESULT": '{"status":"success","dry_run":null}'}),
+                             (self.options, {"DRY_RUN": "false", "TEST_RESULT": '{"status":"success","dry_run":false,"data":{"dryRun":true}}'})]:
             self.options = options
             (self.root / "public-result").unlink(missing_ok=True)
             self.assertEqual(self.execute(**env).returncode, 0)
@@ -247,6 +283,54 @@ exit "$TEST_CODE"
         result = self.execute(TEST_REPORT_CODE="1", TEST_CODE="7")
         self.assertEqual(result.returncode, 7)
         self.assertIn(b"task result is unchanged", result.stderr)
+
+    def test_actual_result_overrides_request_dry_run_spelling(self):
+        payloads = [
+            {'status': 'CHANGED', 'dry_run': False, 'changed': True},
+            {'status': 'success', 'data': {'dryRun': False}},
+            {'status': 'success', 'data': {'dry_run': 'False'}},
+            {'status': 'CHANGED', 'changed': True},
+        ]
+        for payload in payloads:
+            for value in ('True', 'Yes', 'On'):
+                with self.subTest(payload=payload, value=value):
+                    try:
+                        self.assertEqual(self.execute(TEST_RESULT=json.dumps(payload), DRY_RUN=value).returncode, 0)
+                        self.assertTrue((self.root / 'report').exists(), 'actual execution was not reported')
+                        self.assertEqual((self.root / 'report').read_text().splitlines()[0], 'success')
+                    finally:
+                        (self.root / 'report').unlink(missing_ok=True)
+                        (self.root / 'public-result').unlink(missing_ok=True)
+
+    def test_partial_mutation_is_reported_despite_request_dry_run(self):
+        result = self.execute(DRY_RUN='True', TEST_CODE='1', TEST_RESULT=json.dumps({
+            'status': 'ERROR', 'dry_run': False, 'changed': True, 'partial': True}))
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual((self.root / 'report').read_text().splitlines()[0], 'failure')
+
+    def test_explicit_dry_run_result_takes_precedence_over_planned_changes(self):
+        result = self.execute(DRY_RUN='false', TEST_RESULT=json.dumps({
+            'status': 'CHANGED', 'dry_run': True, 'changed': True}))
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'report').exists())
+
+    def test_resolved_task_target_is_forwarded_instead_of_inherited_target(self):
+        self.report.write_text('''#!/usr/bin/env bash
+printf '%s' "$JOB_REPORT_TARGET_NAME" > "$TEST_REPORT"
+''')
+        for target in ('resolved-target', '', None):
+            with self.subTest(target=target):
+                self.execute(MARIADB_NAME='request-target', JOB_REPORT_TARGET_NAME='stale-target',
+                             TEST_RESULT=json.dumps({'status': 'CHANGED', 'mdb': target}))
+                self.assertEqual((self.root / 'report').read_text(), target or '')
+                (self.root / 'public-result').unlink()
+
+    def test_missing_result_target_does_not_reuse_an_inherited_internal_target(self):
+        self.report.write_text('''#!/usr/bin/env bash
+printf '%s' "${JOB_REPORT_TARGET_NAME+stale-target}" > "$TEST_REPORT"
+''')
+        self.execute(JOB_REPORT_TARGET_NAME='stale-target')
+        self.assertEqual((self.root / 'report').read_text(), '')
 
     def test_total_timeout_kills_report_descendants_and_preserves_success(self):
         self.options["timeout"] = .7
@@ -337,6 +421,8 @@ class DestinationFixture(Fixture):
         mock.write_text('''#!/usr/bin/env python3
 import json,os,sys
 args=sys.argv[1:]; text=' '.join(args)
+target=os.environ.get('MARIADB_NAME') or 'mariadb'
+with open(os.environ['TEST_KUBECTL_LOG'],'a') as out: out.write(json.dumps(args)+'\\n')
 if '-e' in args:
  q=args[args.index('-e')+1]
  with open(os.environ['TEST_SQL'],'a') as out: out.write(json.dumps({'query':q,'pod':args[args.index('exec')+1], 'public':os.path.exists(os.environ.get('TEST_PUBLIC_RESULT','/no-result'))})+'\\n')
@@ -349,8 +435,10 @@ if '-e' in args:
 elif 'printenv' in args: print('testpass')
 elif '.spec.replicas' in text: print(os.environ.get('TEST_REPLICAS','2'))
 elif 'get pods' in text:
- print(json.dumps({'items':[{'metadata':{'name':'mariadb-'+str(i),'ownerReferences':[{'kind':'StatefulSet','name':'mariadb'}]}} for i in range(int(os.environ.get('TEST_REPLICAS','2')))]}))
-elif 'currentPrimary' in text: print(os.environ.get('TEST_PRIMARY','mariadb-1'))
+ print(json.dumps({'items':[{'metadata':{'name':target+'-'+str(i),'ownerReferences':[{'kind':'StatefulSet','name':target}]}} for i in range(int(os.environ.get('TEST_REPLICAS','2')))]}))
+elif 'currentPrimary' in text: print(os.environ.get('TEST_PRIMARY',target+'-1'))
+elif 'metadata.name' in text and 'get mariadb' in text: print(os.environ.get('TEST_CR_NAMES','mariadb'))
+elif 'metadata.name' in text and 'get statefulset' in text: print(os.environ.get('TEST_STS_NAMES','legacy'))
 else: sys.exit(1)
 ''')
         mock.chmod(0o755)
@@ -358,7 +446,8 @@ else: sys.exit(1)
                     "LIB_DIR": str(LIB), "JOB_REPORT_CONFIG_FILE": str(self.root / "absent.env"),
                     "JOB_REPORT_DATABASE": "operations", "JOB_REPORT_TABLE": "executions",
                     "DB_NAMESPACE": "mariadb-1", "MARIADB_NAME": "mariadb", "JOB_REPORT_NAME": "backup",
-                    "K8S_CONTEXT": "kind-cluster-a", "TEST_SQL": str(self.root / "sql")}
+                    "K8S_CONTEXT": "kind-cluster-a", "TEST_SQL": str(self.root / "sql"),
+                    "TEST_KUBECTL_LOG": str(self.root / 'kubectl-log')}
 
     def execute(self, **env):
         return subprocess.run(['bash', str(LIB / 'job-report-task.sh'), 'success', 'done'],
@@ -386,9 +475,38 @@ class DestinationTests(DestinationFixture):
         self.assertEqual(self.execute(JOB_REPORT_DATABASE="", JOB_REPORT_TABLE="").returncode, 0)
         self.assertFalse((self.root / "sql").exists())
 
+    def test_autodetection_does_not_select_an_unrelated_statefulset(self):
+        result = self.execute(MARIADB_NAME='', TEST_CR_NAMES='', TEST_STS_NAMES='legacy')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b'job-report:', result.stderr)
+        self.assertFalse((self.root / 'sql').exists())
+        calls = [json.loads(line) for line in (self.root / 'kubectl-log').read_text().splitlines()]
+        self.assertFalse(any('statefulset' in call for call in calls))
+
+    def test_deployment_sts_default_does_not_override_cr_autodetection(self):
+        result = self.execute(MARIADB_NAME='', MARIADB_STS_NAME='legacy')
+        self.assertEqual(result.returncode, 0)
+        rows = [json.loads(line) for line in (self.root / 'sql').read_text().splitlines()]
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row['pod'] == 'mariadb-1' for row in rows))
+
+    def test_known_unresolved_task_target_skips_cluster_queries(self):
+        result = self.execute(JOB_REPORT_TARGET_NAME='')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn(b'job-report:', result.stderr)
+        self.assertFalse((self.root / 'sql').exists())
+        self.assertFalse((self.root / 'kubectl-log').exists())
+
+    def test_resolved_task_target_wins_over_request_and_deployment_defaults(self):
+        result = self.execute(JOB_REPORT_TARGET_NAME='resolved', MARIADB_NAME='request',
+                              MARIADB_STS_NAME='legacy')
+        self.assertEqual(result.returncode, 0)
+        rows = [json.loads(line) for line in (self.root / 'sql').read_text().splitlines()]
+        self.assertTrue(all(row['pod'] == 'resolved-1' for row in rows))
+
 
 class IntegrationTests(DestinationFixture):
-    def run_runtime(self, enabled=True, **env):
+    def run_runtime(self, enabled=True, expected_reason='SRP_APPLIED', **env):
         document = config.load_config((ROOT / 'aqsh-tasks/task-mariadb.yaml').resolve())
         task = document['tasks']['set-runtime-param']
         task['job_report']['enabled'] = enabled
@@ -404,8 +522,9 @@ class IntegrationTests(DestinationFixture):
                             'RUNTIME_PARAM':'max_connections', 'RUNTIME_VALUE':'500', **env},
                             stdout=stdout, stderr=subprocess.PIPE, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(public.read_text())['reason_code'], 'SRP_APPLIED')
-        return [json.loads(s) for s in (self.root / 'sql').read_text().splitlines()]
+        self.assertEqual(json.loads(public.read_text())['reason_code'], expected_reason)
+        sql = self.root / 'sql'
+        return [json.loads(s) for s in sql.read_text().splitlines()] if sql.exists() else []
 
     def test_compiled_runtime_reports_exactly_once_after_mutation_before_result(self):
         rows = self.run_runtime()
@@ -423,6 +542,30 @@ class IntegrationTests(DestinationFixture):
     def test_nonmatching_runtime_parameter_does_not_report(self):
         rows = self.run_runtime(RUNTIME_PARAM='max_statement_time')
         self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
+
+    def test_mixed_case_dry_run_never_mutates_or_reports(self):
+        for value in ('True', 'Yes', 'On'):
+            with self.subTest(value=value):
+                rows = self.run_runtime(DRY_RUN=value, expected_reason='SRP_DRY_RUN')
+                self.assertFalse(any(row['query'].startswith('SET GLOBAL') for row in rows))
+                self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
+                result = json.loads((self.root / 'public-result').read_text())
+                self.assertIs(result['dry_run'], True)
+                self.assertIs(result['changed'], False)
+                (self.root / 'sql').unlink()
+
+    def test_mixed_case_confirmation_uses_the_same_boolean_contract(self):
+        rows = self.run_runtime(CONFIRM='TrUe')
+        self.assertEqual(sum('INSERT INTO' in row['query'] for row in rows), 1)
+
+    def test_no_cr_task_rejection_does_not_report_to_a_statefulset(self):
+        rows = self.run_runtime(MARIADB_NAME='', TEST_CR_NAMES='', TEST_STS_NAMES='legacy',
+                                 expected_reason='MARIADB_NOT_FOUND')
+        self.assertEqual(rows, [])
+
+    def test_runtime_report_uses_the_resolved_task_instance_despite_sts_default(self):
+        rows = self.run_runtime(MARIADB_NAME='', MARIADB_STS_NAME='legacy')
+        self.assertTrue(all(row['pod'].startswith('mariadb-') for row in rows))
 
 
 if __name__ == "__main__":

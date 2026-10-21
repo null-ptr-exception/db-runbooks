@@ -67,8 +67,13 @@ def run_process(command, env, stdout, timeout=None):
             signal.signal(s, handler)
 
 
-def is_true(value):
-    return str(value).lower() in ("true", "1", "yes", "on")
+def as_bool(value):
+    value = str(value).lower()
+    if value in ("true", "1", "yes", "on"):
+        return True
+    if value in ("false", "0", "no", "off"):
+        return False
+    return None
 
 
 def outcome(result, code):
@@ -101,13 +106,19 @@ def should_report(options, env, result):
         return False
     if any(env.get(key, "") != value for key, value in options["when"].items()):
         return False
-    if options["dry_run_env"] and is_true(env.get(options["dry_run_env"], "")):
-        return False
+    parts = []
     if isinstance(result, dict):
-        data = result.get("data") if isinstance(result.get("data"), dict) else {}
-        if any(is_true(part.get(key, False)) for part in (result, data) for key in ("dry_run", "dryRun")):
-            return False
-    return True
+        parts.append(result)
+        if isinstance(result.get("data"), dict):
+            parts.append(result["data"])
+    # The task's result describes what ran. A differently parsed request must
+    # not hide a real change (including partial changes on a failed operation).
+    flags = [as_bool(part[key]) for part in parts for key in ("dry_run", "dryRun") if key in part]
+    if True in flags:
+        return False
+    if False in flags or any(part.get("changed") is True for part in parts):
+        return True
+    return not (options["dry_run_env"] and as_bool(env.get(options["dry_run_env"], "")) is True)
 
 
 def main(settings):
@@ -137,6 +148,12 @@ def main(settings):
                     continue
         if should_report(options, env, result):
             report_env = {**env, "JOB_REPORT_NAME": env.get("JOB_REPORT_NAME") or options["name"]}
+            report_env.pop("JOB_REPORT_TARGET_NAME", None)
+            if isinstance(result, dict) and "mdb" in result:
+                # Keep the selected instance across reporting-time discovery.
+                # An explicitly unresolved target must not select another DB.
+                target = result["mdb"]
+                report_env["JOB_REPORT_TARGET_NAME"] = target if isinstance(target, str) else ""
             summary = (result.get("summary") or result.get("message")) if isinstance(result, dict) else None
             # Never include arbitrary result/data contents (passwords, secrets).
             if not isinstance(summary, str):

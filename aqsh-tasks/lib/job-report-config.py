@@ -115,12 +115,24 @@ def report_options(name, task):
     if timeout <= 0 or not math.isfinite(timeout):
         raise ValueError(f"{name}: job_report.timeout must be positive")
     inputs = task.setdefault("input", [])
-    fields = {item["name"]: item for item in inputs}
+    if inputs is None:
+        inputs = task["input"] = []
+    if not isinstance(inputs, list):
+        raise ValueError(f"{name}: input must be a list")
+    fields = {}
+    for index, item in enumerate(inputs):
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            raise ValueError(f"{name}: input[{index}].name must be a nonempty string")
+        fields[item["name"]] = item
     when = options.get("when", {})
     if not isinstance(when, dict) or any(
         key not in fields or not isinstance(value, str) for key, value in when.items()
     ):
         raise ValueError(f"{name}: job_report.when must match declared inputs with strings")
+    for key in when:
+        env = fields[key].get("env")
+        if not isinstance(env, str) or not env:
+            raise ValueError(f"{name}: job_report.when input {key} must declare a nonempty env string")
     report_inputs = [item for item in inputs if item.get("env") == "JOB_REPORT_NAME"]
     if "job_name" in fields or report_inputs:
         if (len(report_inputs) != 1 or report_inputs[0].get("name") != "job_name"

@@ -96,9 +96,20 @@ job_report:
   timeout: 30s
 ```
 
+Each input referenced by `when` must declare a nonempty string `env`, since aqsh
+exports only inputs with that mapping. Other inputs may omit `env`. Invalid
+input definitions identify the task and field in the startup error without
+printing filter values.
+
 This is the `set-runtime-param` configuration shipped in this image. Listing and
-other parameters do not report. The wrapper also skips declared `dry_run=true`
-requests and results with top-level/nested `dry_run` or `dryRun` set to true.
+other parameters do not report. Results with top-level/nested `dry_run` or
+`dryRun` set to true skip reporting, including results describing planned changes.
+An explicit false result flag or an actual `changed: true` result takes precedence
+over the request's dry-run spelling, so real and partial mutations are not hidden.
+The declared dry-run input is a fallback only when the result has no such signal.
+`set-runtime-param` evaluates accepted dry-run and confirmation spellings
+case-insensitively, so `dry_run=True`, `dry_run=Yes`, and `dry_run=On` do not apply
+changes.
 Rejected real requests can still report Failed, including exit-code-zero BLOCKED
 results. `enabled: false` disables even this task's legacy native reporting when
 invoked through the compiled wrapper.
@@ -126,9 +137,13 @@ logs are consequently delayed and occupy temporary disk space during execution.
 Reporting runs **after** the task and cleanup, so it never adds database reads or
 writes ahead of a break-glass mutation. It resolves the current primary with the
 shared MariaDB helpers; an unknown multi-member primary skips reporting rather
-than selecting an arbitrary pod. Unlike the direct integration below, the YAML
-wrapper resolves the reporting primary after the task, so a failover during the
-task may change the reported host/destination.
+than selecting an arbitrary pod. A task's resolved `mdb` result pins reporting
+to that instance; an empty or non-string resolved name skips reporting without
+cluster queries. Otherwise, reporting uses an explicit request `MARIADB_NAME`
+or an unambiguous MariaDB CR, matching `set-runtime-param` discovery. It does not
+use the deployment's `MARIADB_STS_NAME` default or auto-select an unrelated
+StatefulSet. Unlike the direct integration below, the YAML wrapper resolves the
+current primary after the task, so a failover may change the reported primary pod.
 
 Nonzero exits and explicit ERROR/FAILED/BLOCK/BLOCKED/CRITICAL/PARTIAL results
 report Failed. Known success statuses (success/CHANGED/OK/READY/PASS/WARN/COMPLETED)

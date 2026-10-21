@@ -176,6 +176,52 @@ tasks:
         required: false
         type: string
         default: "true"
+  sessions:
+    script: mariadb/sessions.sh
+    description: "Bounded session diagnostics or explicit query/connection termination on one MariaDB pod"
+    timeout: 2m
+    # Combined read/write entry point: restrict to control-plane identities.
+    # Deployment must replace this sandbox group with its operator group.
+    allowed_groups: ["system:serviceaccounts:db-ops"]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+      - name: target_pod
+        env: TARGET_POD
+        required: true
+        type: string
+        pattern: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+      - name: action
+        env: SESSION_ACTION
+        required: false
+        type: string
+        default: diagnose
+        pattern: '^(diagnose|kill-query|kill-connection)$'
+      - name: connection_id
+        env: CONNECTION_ID
+        required: false
+        type: string
+        pattern: '^([1-9][0-9]{0,19})?$'
+      - name: dry_run
+        env: DRY_RUN
+        required: false
+        type: string
+        default: "true"
+        pattern: '^(true|false)$'
+      - name: confirm
+        env: CONFIRM
+        required: false
+        type: string
+        default: "false"
+        pattern: '^(true|false)$'
+      - name: expected_session
+        env: EXPECTED_SESSION
+        required: false
+        type: string
+        pattern: '^([a-f0-9]{64})?$'
   connection-usage:
     script: mariadb/connection-usage.sh
     description: "Read-only point-in-time MariaDB connection usage grouped by database account across all instance pods"

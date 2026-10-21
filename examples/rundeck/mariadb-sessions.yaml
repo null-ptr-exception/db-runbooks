@@ -1,0 +1,47 @@
+# Deploy the companion script to this path and configure AQSH_URL/AQSH_TOKEN
+# on the executor. Restrict run/read/output access to authorized operators.
+- name: mariadb_sessions
+  group: db/maintenance
+  description: |
+    Diagnose one MariaDB pod, preview a selected query/connection termination,
+    or apply a previously previewed termination. Diagnosis is the default.
+    Mutation requires dry_run=false, confirm=true and the preview expected_session.
+    SQL text and client hosts appear in the execution output.
+  loglevel: INFO
+  executionEnabled: true
+  scheduleEnabled: false
+  multipleExecutions: false
+  timeout: 4m
+  options:
+    - name: namespace
+      required: true
+      regex: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+    - name: target_pod
+      required: true
+      regex: '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+    - name: action
+      value: diagnose
+      required: true
+      enforced: true
+      values: [diagnose, kill-query, kill-connection]
+    - name: connection_id
+      description: 'Required for termination; use the ID from this exact pod.'
+      regex: '^([1-9][0-9]{0,19})?$'
+    - name: dry_run
+      value: 'true'
+      required: true
+      enforced: true
+      values: ['true', 'false']
+    - name: confirm
+      value: 'false'
+      required: true
+      enforced: true
+      values: ['false', 'true']
+    - name: expected_session
+      description: 'Copy before.fingerprint from the termination preview when applying.'
+      regex: '^([a-f0-9]{64})?$'
+  sequence:
+    keepgoing: false
+    strategy: node-first
+    commands:
+      - exec: /opt/db-runbooks/bin/run-mariadb-sessions.sh

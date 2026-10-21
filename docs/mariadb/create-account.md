@@ -23,7 +23,13 @@ same contract as MongoDB create-account.
   only during confirmed execution.
 - `mutation_applied` becomes true after a successful CREATE/ALTER USER. A later
   revoke, grant, or verification failure remains an ERROR with partial mutation
-  explicitly reported and no credential in the error result.
+  explicitly reported. Its `delivery_payload` retains the prepared credential in
+  the selected mode: one-time plaintext, encrypted payload, or Secret reference.
+  Preserve error results securely; an ERROR does not imply credential rollback.
+  `ACCOUNT_MUTATION_FAILED` also includes the prepared delivery because a client
+  error cannot prove whether CREATE/ALTER reached the server. In that case,
+  `mutation_applied=false` means success was not acknowledged; inspect the account
+  before retrying rather than assuming its old credential still applies.
 
 ## Endpoint
 
@@ -98,15 +104,20 @@ cannot be removed. Matching is case-insensitive.
 |---|---|
 | `skip` (default) | No credential or grant changes, no password generation/delivery |
 | `error` | ERROR / ACCOUNT_ALREADY_EXISTS, exit 2 |
-| `recreate` | ALTER USER, REVOKE ALL PRIVILEGES and GRANT OPTION, apply profile and verify |
+| `recreate` | Check existing grants, then ALTER USER, REVOKE ALL PRIVILEGES and GRANT OPTION, apply profile and verify |
 
 All three modes create a missing account. Recreate replaces direct grants and
 credentials; it is not DROP USER plus CREATE USER. MariaDB role assignments are
-not removed by REVOKE ALL; verification rejects unexpected role grants instead
-of claiming profile enforcement. Revoke/grant failures can leave partial state.
-Concurrent CREATE races fail rather than returning a password that was never
-applied. Serialize recreations of the same account at the caller; this task does
-not provide a distributed account lock.
+not removed by REVOKE ALL. Existing role, PROXY, or unrecognized grant statements
+return BLOCKED / `UNSUPPORTED_EXISTING_GRANTS`, exit 1, before reading or generating
+an account password or changing credentials/grants. Failure to read existing
+grants returns ERROR / `SQL_VERIFY_FAILED`, exit 2, with no mutation. Resolve
+non-revocable grants separately before requesting recreation. Revoke/grant
+failures after credential changes can leave partial state; error results retain
+the selected password delivery payload for recovery.
+Concurrent CREATE races return ERROR; a recovery payload does not prove that its
+password was applied. Serialize recreations of the same account at the caller;
+this task does not provide a distributed account lock.
 
 ## Password generation
 

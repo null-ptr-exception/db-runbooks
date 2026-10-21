@@ -10,6 +10,11 @@ Default ro requires a database. Global grants are deployment policy, not an
 arbitrary wildcard input. Existing accounts now skip by default without changing
 credentials or grants. Explicit recreate rotates credentials and replaces direct
 grants. Failures always exit nonzero while publishing structured JSON.
+Recreation blocks role, PROXY and unrecognized grants before changing an account.
+Errors after credential changes retain the selected password delivery payload;
+a failed CREATE/ALTER acknowledgement also returns the prepared credential with
+an explicitly uncertain outcome. Deployment profiles accept `READ_ONLY ADMIN`
+using MariaDB's native privilege name.
 
 The admin username is allowed. System accounts remain protected. An optional
 exact Secret/key read allowlist supports application credentials co-located in

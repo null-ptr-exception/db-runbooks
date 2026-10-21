@@ -217,6 +217,19 @@ fi
 
 SQL_PLAN_JSON="$(mariadb_account_build_sql_plan_json)"
 
+# REVOKE ALL leaves role and PROXY grants in place. Check before reading or
+# generating account credentials so a predictable verification failure is harmless.
+if [[ "$ACCOUNT_EXISTS" == true ]]; then
+  if ! EXISTING_GRANTS="$(mariadb_account_read_grants "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_REF")"; then
+    SUMMARY="Cannot inspect existing grants; account was not changed"
+    mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+  fi
+  if ! mariadb_account_recreate_safe "$EXISTING_GRANTS"; then
+    SUMMARY="Role, PROXY or unrecognized grants prevent recreation; account was not changed"
+    mariadb_account_emit_result "$(mariadb_account_result_json BLOCKED UNSUPPORTED_EXISTING_GRANTS "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" BLOCKED "$SUMMARY"
+  fi
+fi
+
 # Check the live server's supported privileges before generating a password or
 # changing credentials. Deployment profiles may target different MariaDB versions.
 if ! SERVER_PRIVILEGES="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" 'SHOW PRIVILEGES')"; then
@@ -273,8 +286,9 @@ else
 fi
 
 if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_SQL" >/dev/null; then
-  SUMMARY="Failed to create or recreate MariaDB account"
-  mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_MUTATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+  # A client/transport error cannot prove the server did not apply CREATE/ALTER.
+  SUMMARY="Failed to create or recreate MariaDB account; credential state may be uncertain"
+  mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_MUTATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" '[]' "$DELIVERY_PAYLOAD")" ERROR "$SUMMARY"
 fi
 # shellcheck disable=SC2034  # Consumed by mariadb-account.sh.
 MUTATION_APPLIED=true

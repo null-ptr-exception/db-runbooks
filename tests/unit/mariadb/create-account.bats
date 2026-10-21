@@ -22,7 +22,7 @@ set -euo pipefail
 case " $* " in
   *" --import "*) cat >/dev/null; [[ "${GPG_FAIL_IMPORT:-0}" != 1 ]]; exit 0 ;;
   *" --with-colons "*) printf 'fpr:::::::::0123456789ABCDEF0123456789ABCDEF01234567:\n'; exit 0 ;;
-  *" --encrypt "*) cat >/dev/null; printf '%s\n' '-----BEGIN PGP MESSAGE-----' 'encrypted-test-payload' '-----END PGP MESSAGE-----'; exit 0 ;;
+  *" --encrypt "*) cat > "${TEST_TMPDIR}/encrypted-input"; printf '%s\n' '-----BEGIN PGP MESSAGE-----' 'encrypted-test-payload' '-----END PGP MESSAGE-----'; exit 0 ;;
 esac
 exit 1
 EOF
@@ -123,16 +123,26 @@ SUPER|Server Admin
 FILE|File access on server
 SHUTDOWN|Server Admin
 CREATE USER|Server Admin
+Read_only admin|Server Admin
 GRANT OPTION|Databases,Tables,Functions,Procedures
 PRIVILEGES
       ;;
-    CREATE\ USER*|ALTER\ USER*) [[ "${SQL_FAIL_MUTATION:-0}" != 1 ]] || exit 1 ;;
+    CREATE\ USER*|ALTER\ USER*)
+      [[ "${SQL_FAIL_MUTATION:-0}" != 1 ]] || exit 1
+      touch "${TEST_TMPDIR}/mutation-applied"
+      ;;
     REVOKE*) [[ "${SQL_FAIL_REVOKE:-0}" != 1 ]] || exit 1 ;;
     GRANT*) [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1 ;;
     SHOW\ GRANTS*)
-      [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
+      if [[ -e "${TEST_TMPDIR}/mutation-applied" ]]; then
+        [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
+      else
+        [[ "${SQL_FAIL_EXISTING_GRANTS:-0}" != 1 ]] || exit 1
+      fi
       grants="$(
-        if [[ -n "${EXPECTED_GRANTS:-}" ]]; then
+        if [[ ! -e "${TEST_TMPDIR}/mutation-applied" && -n "${PREEXISTING_GRANTS:-}" ]]; then
+          printf '%s\n' "$PREEXISTING_GRANTS"
+        elif [[ -n "${EXPECTED_GRANTS:-}" ]]; then
           printf '%s\n' "$EXPECTED_GRANTS"
         elif [[ "${VERIFY_MISMATCH:-0}" == 1 ]]; then
           printf "GRANT INSERT ON *.* TO 'svc'@'%%'\n"
@@ -345,6 +355,64 @@ EOF
   grep -q '^GRANT SELECT, INSERT ON `app\\_db`\.\*' "${TEST_TMPDIR}/sql.log"
 }
 
+@test "recreate blocks role and PROXY grants before reading a password Secret" {
+  export ACCOUNT_COUNT=1
+  existing_grants=(
+    "GRANT \`app_role\` TO \`svc\`@\`%\`"
+    "GRANT PROXY ON 'other'@'%' TO 'svc'@'%'"
+  )
+  for grant in "${existing_grants[@]}"; do
+    export PREEXISTING_GRANTS="$grant"
+    run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate --password-secret-name missing
+    [ "$status" -eq 1 ]
+    [ "$(json_field '.status')" = BLOCKED ]
+    [ "$(json_field '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
+    [ "$(json_field '.account_exists')" = true ]
+    [ "$(json_field '.mutation_applied')" = false ]
+    [ "$(json_field '.delivery_payload')" = null ]
+    [ ! -e "${TEST_TMPDIR}/mutation-applied" ]
+    ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+    ! grep -q '^get secret ' "${TEST_TMPDIR}/kubectl.log"
+  done
+}
+
+@test "blocked recreation never generates or encrypts a password" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT app_role TO 'svc'@'%'"
+  export REAL_PYTHON3
+  REAL_PYTHON3="$(command -v python3)"
+  cat > "${TEST_TMPDIR}/bin/python3" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == - ]]; then
+  touch "${TEST_TMPDIR}/generator-called"
+  exit 99
+fi
+exec "$REAL_PYTHON3" "$@"
+STUB
+  chmod +x "${TEST_TMPDIR}/bin/python3"
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate --password-delivery-mode encrypted_payload --recipient-pgp-pubkey test-key
+  [ "$status" -eq 1 ]
+  [ "$(json_field '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  [ ! -e "${TEST_TMPDIR}/generator-called" ]
+  [ ! -e "${TEST_TMPDIR}/encrypted-input" ]
+}
+
+@test "unreadable or unrecognized existing grants fail before mutation" {
+  export ACCOUNT_COUNT=1 SQL_FAIL_EXISTING_GRANTS=1
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = SQL_VERIFY_FAILED ]
+  [ "$(json_field '.mutation_applied')" = false ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  unset SQL_FAIL_EXISTING_GRANTS
+  export PREEXISTING_GRANTS='unrecognized output'
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate
+  [ "$status" -eq 1 ]
+  [ "$(json_field '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
+  [ "$(json_field '.mutation_applied')" = false ]
+  ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+}
+
 @test "SHOW GRANTS verification accepts reordered profile privileges" {
   export MARIADB_ACCOUNT_RO_DATABASE_PRIVILEGES_DEFAULT=SELECT,INSERT
   export EXPECTED_PRIVILEGES='INSERT, SELECT'
@@ -375,6 +443,64 @@ EOF
   [ "$(json_field '.reason_code')" = SQL_FAILED ]
   [ "$(json_field '.mutation_applied')" = true ]
   [[ "$(json_field '.summary')" == *'revoking the prior grants failed'* ]]
+  [ "$(json_field '.delivery_payload.mode')" = caller_provided_secret ]
+  [ "$(json_field '.delivery_payload.secret_name')" = svc-password ]
+  [[ "$output" != *FixedServicePass123* && "$output" != *root-pass* ]]
+}
+
+@test "post-mutation failures retain the applied plaintext credential in JSON and result file" {
+  export ACCOUNT_COUNT=1
+  for failure in SQL_FAIL_REVOKE SQL_FAIL_GRANT SQL_FAIL_VERIFY VERIFY_MISMATCH; do
+    export "$failure=1"
+    rm -f "${TEST_TMPDIR}/mutation-applied" "${TEST_TMPDIR}/sql.log"
+    run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate --result-file "${TEST_TMPDIR}/result.json"
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.status')" = ERROR ]
+    [ "$(json_field '.mutation_applied')" = true ]
+    [ "$(json_field '.delivery_payload.mode')" = one_time_plaintext ]
+    password="$(json_field '.delivery_payload.password')"
+    [ "${#password}" -eq 24 ]
+    grep -Fq "IDENTIFIED BY '$password'" "${TEST_TMPDIR}/sql.log"
+    [ "$(jq -r '.delivery_payload.password' "${TEST_TMPDIR}/result.json")" = "$password" ]
+    [[ "$output" != *root-pass* ]]
+    unset "$failure"
+  done
+}
+
+@test "post-mutation encrypted delivery stays encrypted on failure" {
+  export ACCOUNT_COUNT=1 SQL_FAIL_GRANT=1
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate --password-delivery-mode encrypted_payload --recipient-pgp-pubkey test-key
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.mutation_applied')" = true ]
+  [ "$(json_field '.delivery_payload.mode')" = encrypted_payload ]
+  [ "$(json_field '.delivery_payload.password // empty')" = '' ]
+  [[ "$(json_field '.delivery_payload.ciphertext')" == *'BEGIN PGP MESSAGE'* ]]
+  password="$(cat "${TEST_TMPDIR}/encrypted-input")"
+  [ "${#password}" -eq 24 ]
+  grep -Fq "IDENTIFIED BY '$password'" "${TEST_TMPDIR}/sql.log"
+  [[ "$output" != *"$password"* && "$output" != *root-pass* ]]
+}
+
+@test "unacknowledged account mutation preserves prepared delivery without claiming success" {
+  export ACCOUNT_COUNT=1 SQL_FAIL_MUTATION=1
+  for mode in one_time_plaintext encrypted_payload; do
+    delivery_args=(--password-delivery-mode "$mode")
+    [[ "$mode" != encrypted_payload ]] || delivery_args+=(--recipient-pgp-pubkey test-key)
+    run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists recreate "${delivery_args[@]}"
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.reason_code')" = ACCOUNT_MUTATION_FAILED ]
+    [ "$(json_field '.mutation_applied')" = false ]
+    [ "$(json_field '.delivery_payload.mode')" = "$mode" ]
+    [[ "$(json_field '.summary')" == *'credential state may be uncertain'* ]]
+    if [[ "$mode" == one_time_plaintext ]]; then
+      password="$(json_field '.delivery_payload.password')"
+      [ "${#password}" -eq 24 ]
+      grep -Fq "IDENTIFIED BY '$password'" "${TEST_TMPDIR}/sql.log"
+    else
+      [ "$(json_field '.delivery_payload.password // empty')" = '' ]
+      [[ "$output" != *"$(cat "${TEST_TMPDIR}/encrypted-input")"* ]]
+    fi
+  done
 }
 
 @test "SQL mutation failures are redacted" {
@@ -442,6 +568,19 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(json_field '.status')" = CREATED ]
   grep -Fq "GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, CREATE USER, RELOAD ON *.* TO 'svc'@'%' WITH GRANT OPTION;" "${TEST_TMPDIR}/sql.log"
+}
+
+@test "deployment policy accepts the native READ_ONLY ADMIN spelling" {
+  export MARIADB_ACCOUNT_MONITOR_GLOBAL_PRIVILEGES_DEFAULT='READ_ONLY ADMIN'
+  export EXPECTED_GRANTS="GRANT READ_ONLY ADMIN ON *.* TO 'svc'@'%'"
+  run "$SCRIPT" --namespace mariadb-1 --mdb mariadb --username svc --account-type monitor --dry-run false --confirm true --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = CREATED ]
+  grep -Fq "GRANT READ_ONLY ADMIN ON *.* TO 'svc'@'%';" "${TEST_TMPDIR}/sql.log"
+  export MARIADB_ACCOUNT_MONITOR_GLOBAL_PRIVILEGES_DEFAULT='READ ONLY ADMIN'
+  run "$SCRIPT" --namespace mariadb-1 --username svc --account-type monitor --json
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = INVALID_INPUT ]
 }
 
 @test "database and global privileges are applied and verified separately" {

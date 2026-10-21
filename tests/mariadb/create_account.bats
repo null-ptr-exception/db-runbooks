@@ -197,6 +197,24 @@ prepare_database() {
   [[ "$grants" != *'ALL PRIVILEGES ON `app_db`.*'* ]]
 }
 
+@test "recreate with a role is blocked without changing the password or grants" {
+  prepare_database
+  sql_as_root "DROP ROLE IF EXISTS account_test_role; CREATE ROLE account_test_role; CREATE USER 'app_user'@'%' IDENTIFIED BY 'OldPass123!'; GRANT SELECT ON app_db.* TO 'app_user'@'%'; GRANT account_test_role TO 'app_user'@'%';"
+  before_grants=$(sql_as_root "SHOW GRANTS FOR 'app_user'@'%'")
+  before_account=$(sql_as_root "SHOW CREATE USER 'app_user'@'%'")
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"app_user",if_exists:"recreate",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload" failed
+  result=$(task_result)
+  [ "$(echo "$result" | jq -r '.status')" = BLOCKED ]
+  [ "$(echo "$result" | jq -r '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
+  [ "$(echo "$result" | jq -r '.mutation_applied')" = false ]
+  [ "$(echo "$result" | jq -r '.delivery_payload')" = null ]
+  [ "$(sql_as_root "SHOW GRANTS FOR 'app_user'@'%'")" = "$before_grants" ]
+  [ "$(sql_as_root "SHOW CREATE USER 'app_user'@'%'")" = "$before_account" ]
+  sql_as_account app_user 'OldPass123!' app_db 'SELECT * FROM allowed_probe' >/dev/null
+  sql_as_root "REVOKE account_test_role FROM 'app_user'@'%'; DROP ROLE account_test_role;"
+}
+
 @test "first-login and interval expiry are stored natively by MariaDB" {
   prepare_database
   payload=$(jq -nc '{namespace:"mariadb-1",resource:"mariadb",mdb:"mariadb",database:"app_db",username:"expiry_user",password_expire_mode:"first_login",dry_run:"false",confirm:"true"}')

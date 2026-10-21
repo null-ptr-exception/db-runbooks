@@ -11,6 +11,26 @@ def canonical(value):
     return "BINLOG MONITOR" if value == "REPLICATION CLIENT" else value
 
 
+def recreate_safe(lines):
+    """Only direct grants are removed by REVOKE ALL PRIVILEGES, GRANT OPTION."""
+    if not lines:
+        return False
+    # Ignore quoted identifiers and strings: a role name containing ON/TO must
+    # not be mistaken for a direct grant. Keep PROXY distinct from privileges.
+    tokens = re.compile(
+        r"`(?:``|[^`])*`|'(?:''|\\.|[^'\\])*'|\"(?:\"\"|\\.|[^\"\\])*\""
+        r"|\b(?:GRANT|PROXY|ON|TO)\b", re.IGNORECASE
+    )
+    for line in lines:
+        if not re.match(r"^GRANT\s", line, re.IGNORECASE):
+            return False
+        keywords = [token.upper() for token in tokens.findall(line)
+                    if token[0] not in "`'\""]
+        if keywords[:3] != ["GRANT", "ON", "TO"]:
+            return False
+    return True
+
+
 def matches(expected, supported, lines):
     if not lines:
         return False
@@ -63,4 +83,7 @@ def matches(expected, supported, lines):
 
 
 if __name__ == "__main__":
-    sys.exit(0 if matches(json.loads(sys.argv[1]), sys.argv[2], sys.stdin.read().splitlines()) else 1)
+    lines = sys.stdin.read().splitlines()
+    if sys.argv[1:] == ["--recreate-safe"]:
+        sys.exit(0 if recreate_safe(lines) else 1)
+    sys.exit(0 if matches(json.loads(sys.argv[1]), sys.argv[2], lines) else 1)

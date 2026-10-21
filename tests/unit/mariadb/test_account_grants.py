@@ -51,6 +51,32 @@ class GrantsTest(unittest.TestCase):
         self.assertFalse(self.verify(expected, "not a grant"))
         self.assertFalse(self.verify(expected, "GRANT SELECT ON `app`.`table` TO 'u'@'%'"))
 
+    def test_recreate_accepts_revocable_direct_grants_at_all_levels(self):
+        self.assertTrue(MODULE.recreate_safe([
+            "GRANT ALL PRIVILEGES ON *.* TO 'u'@'%' IDENTIFIED BY PASSWORD 'hash' WITH GRANT OPTION",
+            "GRANT SELECT ON `app`.* TO 'u'@'%'",
+            "GRANT SELECT (`ON`, `TO`) ON `app`.`table` TO 'u'@'%'",
+            "GRANT EXECUTE ON PROCEDURE `app`.`proc` TO 'u'@'%'",
+        ]))
+
+    def test_recreate_rejects_roles_and_proxy_even_with_quoted_sql_keywords(self):
+        for grant in [
+            "GRANT app_role TO 'u'@'%'",
+            "GRANT `role ON *.* TO fake` TO 'u'@'%' WITH ADMIN OPTION",
+            "GRANT `role`` ON *.* TO fake` TO 'u'@'%'",
+            'GRANT "role ON *.* TO fake" TO "u"@"%"',
+            "GRANT PROXY ON 'other'@'%' TO 'u'@'%' WITH GRANT OPTION",
+        ]:
+            with self.subTest(grant=grant):
+                self.assertFalse(MODULE.recreate_safe([
+                    "GRANT USAGE ON *.* TO 'u'@'%'", grant,
+                ]))
+
+    def test_recreate_fails_closed_on_missing_or_unrecognized_grants(self):
+        for grants in [[], [""], ["not a grant"], ["GRANT missing scope TO 'u'@'%'"]]:
+            with self.subTest(grants=grants):
+                self.assertFalse(MODULE.recreate_safe(grants))
+
 
 if __name__ == "__main__":
     unittest.main()

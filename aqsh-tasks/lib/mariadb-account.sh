@@ -37,7 +37,7 @@ mariadb_account_is_global_privilege() {
     "CREATE USER" | FILE | PROCESS | RELOAD | SHUTDOWN | SUPER | "SHOW DATABASES" | \
     "REPLICATION SLAVE" | "REPLICATION CLIENT" | "BINLOG MONITOR" | "SLAVE MONITOR" | \
     "BINLOG ADMIN" | "BINLOG REPLAY" | "CONNECTION ADMIN" | "CREATE TABLESPACE" | \
-    "FEDERATED ADMIN" | "READ ONLY ADMIN" | "REPLICATION MASTER ADMIN" | \
+    "FEDERATED ADMIN" | "READ_ONLY ADMIN" | "REPLICATION MASTER ADMIN" | \
     "REPLICATION SLAVE ADMIN" | "SET USER") return 0 ;;
     *) return 1 ;;
   esac
@@ -244,6 +244,11 @@ mariadb_account_result_json() {
   local status="$1" reason="$2" summary="$3" primary="${4:-}" existing="${5:-false}"
   local plan="${6:-[]}" errors="${7:-[]}" delivery="${8:-null}" candidates="${9:-[]}"
   local privileges_json
+  # A later failure must not discard the credential already applied to the account.
+  # Preserve the prepared delivery mode, including ciphertext or a Secret reference.
+  if [[ "$MUTATION_APPLIED" == true && "$delivery" == null ]]; then
+    delivery="${DELIVERY_PAYLOAD:-null}"
+  fi
   if [[ "${#PRIVILEGES[@]}" -eq 0 ]]; then
     privileges_json='[]'
   else
@@ -320,6 +325,10 @@ mariadb_account_password_source_allowed() {
 
 mariadb_account_grants_match() {
   printf '%s\n' "$1" | python3 "${LIB_DIR}/mariadb-account-grants.py" "$GRANTS_JSON" "$SERVER_PRIVILEGES"
+}
+
+mariadb_account_recreate_safe() {
+  printf '%s\n' "$1" | python3 "${LIB_DIR}/mariadb-account-grants.py" --recreate-safe
 }
 
 mariadb_account_read_grants() {

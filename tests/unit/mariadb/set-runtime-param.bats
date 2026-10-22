@@ -164,6 +164,28 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.reason_code')" = "CONFIRM_REQUIRED" ]
 }
 
+@test "set-runtime-param mixed-case dry-run aliases never mutate or report" {
+  for value in True Yes On tRuE; do
+    rm -f "$MOCK_SQL_LOG" "$MOCK_REPORT_LOG"
+    run_srp DRY_RUN="$value" CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 \
+      JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history
+    [ "$status" -eq 0 ]
+    [ "$(field '.reason_code')" = SRP_DRY_RUN ]
+    [ "$(field '.dry_run')" = true ]
+    [ "$(field '.changed')" = false ]
+    if grep -q '^SET GLOBAL ' "$MOCK_SQL_LOG"; then return 1; fi
+    [ ! -e "$MOCK_REPORT_LOG" ]
+  done
+}
+
+@test "set-runtime-param invalid confirmation is rejected before database queries" {
+  run_srp DRY_RUN=false CONFIRM=TruX RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
+  [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = INVALID_BOOL ]
+  [ "$(field '.changed')" = false ]
+  [ ! -e "$MOCK_SQL_LOG" ]
+}
+
 @test "set-runtime-param applies SET GLOBAL on confirm (all pods) and reads it back" {
   run_srp DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
   [ "$status" -eq 0 ]

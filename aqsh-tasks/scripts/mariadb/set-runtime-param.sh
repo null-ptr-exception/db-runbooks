@@ -37,7 +37,7 @@ source "${LIB_DIR}/mariadb.sh"
 source "${LIB_DIR}/job-report.sh"
 trap 'job_report_exit "$?"' EXIT
 
-bool() { case "${1:-}" in 1 | true | TRUE | yes | YES | on | ON) return 0 ;; *) return 1 ;; esac; }
+bool() { local value="${1:-}"; case "${value,,}" in 1 | true | yes | on) return 0 ;; *) return 1 ;; esac; }
 
 # --- curated allow-list (single source of truth for what this task will set) --
 # Tier drives the confirm/warning strength; validation is per-param.
@@ -174,7 +174,7 @@ ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
 # is known, so reporting cannot delay SET GLOBAL or its read-back verification.
 # Optional JOB_REPORT_NAME overrides the recorded job_name; empty falls back to $PARAM.
 # Ignored whenever reporting is off (no JOB_REPORT_DATABASE/TABLE or enable skipped).
-if [[ "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
+if [[ "${JOB_REPORT_WRAPPED:-false}" != true && "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
   _job_name="${JOB_REPORT_NAME:-}"
   [[ -n "$_job_name" ]] || _job_name="$PARAM"
   job_report_enable "$_job_name"

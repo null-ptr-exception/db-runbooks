@@ -6,6 +6,8 @@
 # come back silently.
 # =============================================================================
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   LIB_DIR="$(cd "$BATS_TEST_DIRNAME/../../../aqsh-tasks/lib" && pwd)"
   # shellcheck disable=SC1091

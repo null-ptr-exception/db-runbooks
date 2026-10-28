@@ -104,7 +104,9 @@ jobs:
           printf '%s\0' "${bats_files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
           # SC2314/SC2315 at any severity: a test-final `! cmd` or `! [ … ]` is
           # only style-level, but it stops failing the test as soon as a line is
-          # added after it. Use `run ! cmd`, and `[ ! … ]` for tests.
+          # added after it. Use `run ! cmd`, and `[ ! … ]` for tests. For grep,
+          # `run -1 grep` where the file always exists (grep exits 2 on a missing
+          # file, which `run !` also accepts).
           printf '%s\0' "${bats_files[@]}" \
             | xargs -0 "$shellcheck" --severity=style --include=SC2314,SC2315 -x
           # ShellCheck only checks the top level of a @test body; a `! cmd`

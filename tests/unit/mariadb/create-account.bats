@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+bats_require_minimum_version 1.5.0
+
 # Per test: kubectl and gpg PATH stubs that log to $TEST_TMPDIR,
 # plus the env create-account.sh reads.
 setup() {
@@ -371,8 +373,8 @@ EOF
     [ "$(json_field '.mutation_applied')" = false ]
     [ "$(json_field '.delivery_payload')" = null ]
     [ ! -e "${TEST_TMPDIR}/mutation-applied" ]
-    ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
-    ! grep -q '^get secret ' "${TEST_TMPDIR}/kubectl.log"
+    run ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+    run ! grep -q '^get secret ' "${TEST_TMPDIR}/kubectl.log"
   done
 }
 
@@ -410,7 +412,7 @@ STUB
   [ "$status" -eq 1 ]
   [ "$(json_field '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
   [ "$(json_field '.mutation_applied')" = false ]
-  ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+  run ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
 }
 
 @test "SHOW GRANTS verification accepts reordered profile privileges" {

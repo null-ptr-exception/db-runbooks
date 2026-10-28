@@ -10,6 +10,8 @@
 #                            restored, and the instance comes back inconsistent
 # =============================================================================
 
+bats_require_minimum_version 1.5.0
+
 # Per test: source the library under test and set the default MariaDB CR name.
 setup() {
   LIB_DIR="$(cd "$BATS_TEST_DIRNAME/../../../aqsh-tasks/lib" && pwd)"
@@ -200,5 +202,5 @@ _mock_storage_client() {
   grep -q 'patch statefulset mariadb --type merge' "$calls"
   grep -q 'OnDelete' "$calls"
   grep -q 'patch mariadb mariadb --type merge' "$calls"
-  ! grep -q 'scale statefulset' "$calls"
+  run ! grep -q 'scale statefulset' "$calls"
 }

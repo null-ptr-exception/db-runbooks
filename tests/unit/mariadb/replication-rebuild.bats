@@ -152,9 +152,9 @@ _mock_storage_client() {
 # shellcheck disable=SC2034  # BACKUP_* are read by aqsh-tasks/lib/mariadb-replication-rebuild.sh under test
 @test "in-place restore hook downloads the preflighted object exactly" {
   BACKUP_ENDPOINT="http://minio:9000"
-  BACKUP_ACCESS_SECRET="minio"
+  BACKUP_ACCESS_SECRET="minio-access"
   BACKUP_ACCESS_KEY="access-key-id"
-  BACKUP_SECRET_ACCESS_SECRET="minio"
+  BACKUP_SECRET_ACCESS_SECRET="minio-secret"
   BACKUP_SECRET_KEY="secret-access-key"
 
   run _mdbr_restore_init_containers mariadb:10.6 \
@@ -175,6 +175,15 @@ _mock_storage_client() {
   [[ "$(jq -r '.[3].args[0]' <<<"$output")" == \
     *"! -name .aqsh-restore"* ]]
   [ "$(jq -r '.[0] | has("volumeMounts")' <<<"$output")" = "false" ]
+  # Only the s5cmd download gets the endpoint and the S3 credentials, each
+  # from its own Secret and key.
+  [ "$(jq -c '.[1].args[0:2]' <<<"$output")" = \
+    '["--endpoint-url","http://minio:9000"]' ]
+  [ "$(jq -c '.[1].env[] | select(.name == "AWS_ACCESS_KEY_ID") | .valueFrom.secretKeyRef' <<<"$output")" = \
+    '{"name":"minio-access","key":"access-key-id"}' ]
+  [ "$(jq -c '.[1].env[] | select(.name == "AWS_SECRET_ACCESS_KEY") | .valueFrom.secretKeyRef' <<<"$output")" = \
+    '{"name":"minio-secret","key":"secret-access-key"}' ]
+  [ "$(jq -r '[.[] | select(any(.env[]?; has("valueFrom")))] | length' <<<"$output")" = "1" ]
 }
 
 @test "restore hook is appended without changing existing user init containers" {

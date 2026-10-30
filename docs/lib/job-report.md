@@ -213,10 +213,52 @@ Direct invocations retain this behavior. Under the YAML wrapper,
 `JOB_REPORT_WRAPPED=true` suppresses the script's native reporting to avoid a
 second row; the common wrapper owns the reporting phase and result publication.
 
-## Identity and incomplete records
+## Retry identity and schema migration
 
-No ID column is required. The deployment must serialize operations in each
-namespace and keep records in that target database. Completion matches the saved
+When aqsh supplies `AQSH_TASK_ID`, reporting uses that stable ID across retries.
+For example, `max_retry: 2` can execute three attempts, but three failures leave
+one `Failed` row; failure followed by success updates that row to `Finish`.
+A new submission has a different ID and creates a separate row. This applies to
+both YAML reporting and native `set-runtime-param` reporting, without new task
+inputs. `max_retry` still controls operation retries; reporting does not retry
+operations itself.
+
+Before upgrading a reporting deployment, migrate its existing table. The names
+below are examples; substitute the configured database and table:
+
+```sql
+ALTER TABLE operations.job_history
+  ADD COLUMN task_id VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  ADD UNIQUE KEY job_history_task_id (task_id);
+```
+
+The nullable column leaves historical rows and standalone writes valid. Existing
+rows are not merged or backfilled. The task ID column must be `VARCHAR` with
+`ascii_bin` collation and a full-column, single-column unique index; prefix,
+composite, and nonunique indexes are insufficient. Reporting validates the
+schema and ID length before writing. An incompatible or unmigrated table logs a
+warning and skips reporting for aqsh tasks rather than creating duplicate rows.
+The task's original outcome is preserved. Apply the migration before rolling out
+the new image; no automatic DDL is performed.
+
+Across retries, the time range includes the wait between reporting attempts.
+Each retry reuses the first `start_time`, clears the previous failure summary,
+and records its primary pod and outcome in the same row. `Finish` is terminal:
+redelivery of an already successful task does not reopen it. Failed rows may be
+reopened by subsequent attempts. The available aqsh environment does not expose
+retry exhaustion: a `Failed` row between retries is the latest attempt outcome,
+not proof that the whole task has exhausted its retries. Use the execution API
+for queue/retry state. This table is a task summary, not an attempt history.
+
+Deduplication is scoped to one destination table. Retries must resolve the same
+MariaDB database/table; separate databases cannot share this identity. Sequential
+retries are supported; this is not fencing for concurrent executions of the same
+task ID. Changing the reporting name does not create a new row for that ID.
+
+## Standalone identity and incomplete records
+
+Without `AQSH_TASK_ID`, no ID column is required. The deployment must serialize
+operations in each namespace and keep records in that target database. Completion matches the saved
 `job_name + host + start_time` (case-sensitive identities) and only transitions
 an unfinished `flag=2` row. Completed rows are not overwritten by a later run in
 the same second. An unfinished collision in the same DB second skips the new

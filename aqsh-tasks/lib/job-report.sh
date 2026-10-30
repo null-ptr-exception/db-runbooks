@@ -105,20 +105,40 @@ job_report_start() {
   [[ "${JOB_REPORT_ACTIVE:-false}" != true ]] || return 0
   [[ -n "${JOB_REPORT_DATABASE:-}${JOB_REPORT_TABLE:-}" ]] || return 0
   local pod="$1" password="$2" lengths job_len host_len message_len status_len stamp
+  local task_len unique_task_id task_metadata="" start_sql
   if [[ ! "${JOB_REPORT_DATABASE:-}" =~ ^[a-zA-Z0-9_]+$ || ! "${JOB_REPORT_TABLE:-}" =~ ^[a-zA-Z0-9_]+$ || -z "$pod" ]]; then
     _job_report_warn; return 0
   fi
   JOB_REPORT_TARGET="\`${JOB_REPORT_DATABASE}\`.\`${JOB_REPORT_TABLE}\`"
   JOB_REPORT_POD="$pod"
-  lengths="$(_job_report_sql "$pod" "$password" "SELECT MAX(CASE WHEN COLUMN_NAME='job_name' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='host' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='message' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='status' THEN CHARACTER_MAXIMUM_LENGTH END) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$JOB_REPORT_DATABASE' AND TABLE_NAME='$JOB_REPORT_TABLE'")" || { _job_report_warn; return 0; }
-  read -r job_len host_len message_len status_len <<< "$lengths" || { _job_report_warn; return 0; }
+  # An aqsh task keeps its ID across retries. Require the migration rather than
+  # silently falling back to per-attempt inserts on an old table.
+  JOB_REPORT_TASK_ID_SQL=""
+  if [[ -n "${AQSH_TASK_ID:-}" ]]; then
+    JOB_REPORT_TASK_ID_SQL="$(_job_report_literal "$AQSH_TASK_ID")"
+    task_metadata=", MAX(CASE WHEN COLUMN_NAME='task_id' AND DATA_TYPE='varchar' AND COLLATION_NAME='ascii_bin' THEN CHARACTER_MAXIMUM_LENGTH END), (SELECT COUNT(*) FROM (SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA='$JOB_REPORT_DATABASE' AND TABLE_NAME='$JOB_REPORT_TABLE' AND NON_UNIQUE=0 GROUP BY INDEX_NAME HAVING COUNT(*)=1 AND MAX(COLUMN_NAME)='task_id' AND MAX(COALESCE(SUB_PART,0))=0) AS task_indexes)"
+  fi
+  lengths="$(_job_report_sql "$pod" "$password" "SELECT MAX(CASE WHEN COLUMN_NAME='job_name' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='host' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='message' THEN CHARACTER_MAXIMUM_LENGTH END), MAX(CASE WHEN COLUMN_NAME='status' THEN CHARACTER_MAXIMUM_LENGTH END)$task_metadata FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='$JOB_REPORT_DATABASE' AND TABLE_NAME='$JOB_REPORT_TABLE'")" || { _job_report_warn; return 0; }
+  read -r job_len host_len message_len status_len task_len unique_task_id <<< "$lengths" || { _job_report_warn; return 0; }
   if [[ ! "$job_len" =~ ^[1-9][0-9]*$ || ! "$host_len" =~ ^[1-9][0-9]*$ || ! "$message_len" =~ ^[1-9][0-9]*$ || ! "$status_len" =~ ^[1-9][0-9]*$ ]] || (( ${#JOB_REPORT_NAME} > job_len || ${#pod} > host_len || status_len < 6 )); then
+    _job_report_warn; return 0
+  fi
+  if [[ -n "$JOB_REPORT_TASK_ID_SQL" ]] && { [[ ! "$task_len" =~ ^[1-9][0-9]*$ || ! "$unique_task_id" =~ ^[1-9][0-9]*$ ]] || (( ${#AQSH_TASK_ID} > task_len )); }; then
     _job_report_warn; return 0
   fi
   JOB_REPORT_MESSAGE_LIMIT="$message_len"
   JOB_REPORT_NAME_SQL="$(_job_report_literal "$JOB_REPORT_NAME")"
   JOB_REPORT_HOST_SQL="$(_job_report_literal "$pod")"
-  stamp="$(_job_report_sql "$pod" "$password" "SET SESSION sql_mode='STRICT_ALL_TABLES', innodb_lock_wait_timeout=3, lock_wait_timeout=3, max_statement_time=5; SET @job_report_start=NOW(); INSERT INTO $JOB_REPORT_TARGET (job_name,start_time,end_time,status,flag,host,message) SELECT $JOB_REPORT_NAME_SQL,@job_report_start,NULL,'Start',2,$JOB_REPORT_HOST_SQL,'' WHERE NOT EXISTS (SELECT 1 FROM $JOB_REPORT_TARGET WHERE BINARY job_name=BINARY $JOB_REPORT_NAME_SQL AND BINARY host=BINARY $JOB_REPORT_HOST_SQL AND start_time=@job_report_start AND flag=2 AND end_time IS NULL); SELECT IF(ROW_COUNT()=1,DATE_FORMAT(@job_report_start,'%Y-%m-%d %H:%i:%s'),'');")" || { _job_report_warn; return 0; }
+  if [[ -n "$JOB_REPORT_TASK_ID_SQL" ]]; then
+    # A duplicate on any other unique key must never modify an unrelated row.
+    # Keep the first start_time; retries may move to a different primary pod.
+    # Successful tasks stay terminal even if the same task is delivered again.
+    start_sql="SET SESSION sql_mode='STRICT_ALL_TABLES', innodb_lock_wait_timeout=3, lock_wait_timeout=3, max_statement_time=5; INSERT INTO $JOB_REPORT_TARGET (task_id,job_name,start_time,end_time,status,flag,host,message) VALUES ($JOB_REPORT_TASK_ID_SQL,$JOB_REPORT_NAME_SQL,NOW(),NULL,'Start',2,$JOB_REPORT_HOST_SQL,'') ON DUPLICATE KEY UPDATE task_id=task_id; UPDATE $JOB_REPORT_TARGET SET end_time=NULL,status='Start',flag=2,host=$JOB_REPORT_HOST_SQL,message='' WHERE BINARY task_id=BINARY $JOB_REPORT_TASK_ID_SQL AND flag IN (2,4); SELECT IF(flag=1,'finished',DATE_FORMAT(start_time,'%Y-%m-%d %H:%i:%s')) FROM $JOB_REPORT_TARGET WHERE BINARY task_id=BINARY $JOB_REPORT_TASK_ID_SQL AND (flag=1 OR (flag=2 AND end_time IS NULL));"
+  else
+    start_sql="SET SESSION sql_mode='STRICT_ALL_TABLES', innodb_lock_wait_timeout=3, lock_wait_timeout=3, max_statement_time=5; SET @job_report_start=NOW(); INSERT INTO $JOB_REPORT_TARGET (job_name,start_time,end_time,status,flag,host,message) SELECT $JOB_REPORT_NAME_SQL,@job_report_start,NULL,'Start',2,$JOB_REPORT_HOST_SQL,'' WHERE NOT EXISTS (SELECT 1 FROM $JOB_REPORT_TARGET WHERE BINARY job_name=BINARY $JOB_REPORT_NAME_SQL AND BINARY host=BINARY $JOB_REPORT_HOST_SQL AND start_time=@job_report_start AND flag=2 AND end_time IS NULL); SELECT IF(ROW_COUNT()=1,DATE_FORMAT(@job_report_start,'%Y-%m-%d %H:%i:%s'),'');"
+  fi
+  stamp="$(_job_report_sql "$pod" "$password" "$start_sql")" || { _job_report_warn; return 0; }
+  if [[ -n "$JOB_REPORT_TASK_ID_SQL" && "$stamp" == finished ]]; then return 0; fi
   if [[ ! "$stamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]]; then _job_report_warn; return 0; fi
   JOB_REPORT_PASSWORD="$password"
   JOB_REPORT_START="$stamp"
@@ -127,10 +147,12 @@ job_report_start() {
 
 job_report_finish() {
   [[ "${JOB_REPORT_ACTIVE:-false}" == true ]] || return 0
-  local state="$1" message="$2" flag=4 label=Failed result
+  local state="$1" message="$2" flag=4 label=Failed result identity
   [[ "$state" != success ]] || { flag=1; label=Finish; }
-  # Guard the transition with Start. Completed rows must never be overwritten.
-  result="$(_job_report_sql "$JOB_REPORT_POD" "$JOB_REPORT_PASSWORD" "SET SESSION sql_mode='STRICT_ALL_TABLES', innodb_lock_wait_timeout=3, lock_wait_timeout=3, max_statement_time=5; UPDATE $JOB_REPORT_TARGET SET end_time=NOW(),status='$label',flag=$flag,message=LEFT($(_job_report_literal "$message"),$JOB_REPORT_MESSAGE_LIMIT) WHERE BINARY job_name=BINARY $JOB_REPORT_NAME_SQL AND BINARY host=BINARY $JOB_REPORT_HOST_SQL AND start_time='$JOB_REPORT_START' AND flag=2 AND end_time IS NULL; SELECT ROW_COUNT();")" || result=''
+  identity="BINARY job_name=BINARY $JOB_REPORT_NAME_SQL AND BINARY host=BINARY $JOB_REPORT_HOST_SQL AND start_time='$JOB_REPORT_START'"
+  if [[ -n "${JOB_REPORT_TASK_ID_SQL:-}" ]]; then identity="BINARY task_id=BINARY $JOB_REPORT_TASK_ID_SQL"; fi
+  # Guard completion with Start; a later retry reopens only Failed/Start rows.
+  result="$(_job_report_sql "$JOB_REPORT_POD" "$JOB_REPORT_PASSWORD" "SET SESSION sql_mode='STRICT_ALL_TABLES', innodb_lock_wait_timeout=3, lock_wait_timeout=3, max_statement_time=5; UPDATE $JOB_REPORT_TARGET SET end_time=NOW(),status='$label',flag=$flag,message=LEFT($(_job_report_literal "$message"),$JOB_REPORT_MESSAGE_LIMIT) WHERE $identity AND flag=2 AND end_time IS NULL; SELECT ROW_COUNT();")" || result=''
   [[ "$result" == 1 ]] || _job_report_warn
   JOB_REPORT_ACTIVE=false
   unset JOB_REPORT_PASSWORD

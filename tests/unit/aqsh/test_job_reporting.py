@@ -426,7 +426,7 @@ with open(os.environ['TEST_KUBECTL_LOG'],'a') as out: out.write(json.dumps(args)
 if '-e' in args:
  q=args[args.index('-e')+1]
  with open(os.environ['TEST_SQL'],'a') as out: out.write(json.dumps({'query':q,'pod':args[args.index('exec')+1], 'public':os.path.exists(os.environ.get('TEST_PUBLIC_RESULT','/no-result'))})+'\\n')
- if 'information_schema.COLUMNS' in q: print('80 80 255 16')
+ if 'information_schema.COLUMNS' in q: print(os.environ.get('TEST_REPORT_LENGTHS','80 80 255 16'))
  elif 'INSERT INTO' in q: print('2026-01-02 03:04:05')
  elif 'SYSTEM_VARIABLES' in q: print('NO')
  elif q.startswith('SET GLOBAL'): print('')
@@ -534,6 +534,18 @@ class IntegrationTests(DestinationFixture):
         self.assertEqual(sum(row['query'].startswith('SET GLOBAL') for row in rows[:metadata]), 2)
         self.assertEqual(sum(row['query'].startswith('SELECT @@GLOBAL') for row in rows[:metadata]), 2)
         self.assertTrue(all(not row['public'] for row in rows))
+
+    def test_compiled_runtime_forwards_aqsh_identity_without_double_reporting(self):
+        rows = self.run_runtime(AQSH_TASK_ID='retry-task', TEST_REPORT_LENGTHS='80 80 255 16 191 1')
+        self.assertEqual(sum('INSERT INTO' in row['query'] for row in rows), 1)
+        self.assertIn('ON DUPLICATE KEY UPDATE task_id=task_id',
+                      next(row['query'] for row in rows if 'INSERT INTO' in row['query']))
+        self.assertIn("WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4)", rows[-1]['query'])
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+
+    def test_compiled_runtime_preserves_success_when_retry_schema_is_missing(self):
+        rows = self.run_runtime(AQSH_TASK_ID='retry-task')
+        self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
 
     def test_disabled_yaml_does_not_fall_back_to_legacy_native_reporting(self):
         rows = self.run_runtime(enabled=False)

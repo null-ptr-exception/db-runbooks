@@ -58,7 +58,7 @@ if [[ " ${args} " == *" exec "* ]]; then
   case "$q" in
     *information_schema.COLUMNS*)
       report_step metadata
-      printf '80\t80\t255\t16\n'; exit 0 ;;
+      printf '%s\n' "${MOCK_REPORT_LENGTHS:-80 80 255 16}"; exit 0 ;;
     *INSERT\ INTO*)
       report_step insert
       [[ "${MOCK_REPORT_FAIL:-}" != insert ]] || exit 1
@@ -461,5 +461,16 @@ field() { jq -r "$1" "${RESULT}"; }
   run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
     DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY= MOCK_CR_REPLICAS=1
   [ "$status" -eq 0 ]
+  grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+}
+
+@test "native reporting uses the stable aqsh task ID without YAML wrapping" {
+  run_srp AQSH_TASK_ID=retry-task MOCK_REPORT_LENGTHS='80 80 255 16 191 1' \
+    JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 DRY_RUN=false CONFIRM=true
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'INSERT INTO' "$MOCK_SQL_LOG")" -eq 1 ]
+  grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$MOCK_SQL_LOG"
+  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND flag=2" "$MOCK_SQL_LOG"
   grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
 }

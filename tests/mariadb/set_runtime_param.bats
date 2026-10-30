@@ -69,6 +69,7 @@ YAML
   _report_sql "DROP DATABASE IF EXISTS job_report_e2e;
     CREATE DATABASE job_report_e2e CHARACTER SET utf8mb4;
     CREATE TABLE job_report_e2e.executions (
+      task_id VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin NULL UNIQUE,
       job_name VARCHAR(80) NOT NULL, start_time DATETIME NOT NULL,
       end_time DATETIME NULL, status VARCHAR(16) NOT NULL, flag INT NOT NULL,
       host VARCHAR(80) NOT NULL, message VARCHAR(255) NOT NULL
@@ -202,7 +203,7 @@ _report_sql() {
   assert_equal "$(_pod_max_conn mariadb-2)" "512"
   assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$((count_before + 1))"
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
-    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Finish'
+    WHERE job_name='set-runtime-param/max_connections' AND host='$REPORT_PRIMARY' AND status='Finish'
       AND flag=1 AND end_time >= start_time AND end_time <= NOW()
       AND message LIKE 'SET GLOBAL max_connections=512%'")" 1
 }
@@ -228,7 +229,7 @@ _report_sql() {
   assert_equal "$(echo "$data" | jq -r '.reason_code')" VALUE_INVALID
   assert_equal "$(_pod_max_conn "$REPORT_PRIMARY")" "$before"
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
-    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Failed'
+    WHERE job_name='set-runtime-param/max_connections' AND host='$REPORT_PRIMARY' AND status='Failed'
       AND flag=4 AND end_time >= start_time AND message LIKE '%invalid%'")" 1
 }
 
@@ -240,4 +241,55 @@ _report_sql() {
   assert_equal "$(echo "$data" | jq -r '.reason_code')" SRP_APPLIED
   assert_equal "$(_pod_max_conn "$REPORT_PRIMARY")" 513
   _report_sql 'RENAME TABLE job_report_e2e.saved_executions TO job_report_e2e.executions'
+}
+
+# Exercise the repository helper against the fixture DB without replaying a
+# mutation or depending on queue timing.
+_report_attempt() (
+  export AQSH_TASK_ID="$1" JOB_REPORT_DATABASE=job_report_e2e JOB_REPORT_TABLE=executions
+  export JOB_REPORT_CONFIG_FILE=/dev/null
+  source "${BATS_TEST_DIRNAME}/../../aqsh-tasks/lib/job-report.sh"
+  mariadb_sql() { _report_sql "$3"; }
+  job_report_enable retry-summary
+  trap 'job_report_exit "$?"' EXIT
+  job_report_start "$REPORT_PRIMARY" unused
+  job_report_finish "$2" "$2"
+)
+
+@test "report retries keep one failed row and later success replaces failure" {
+  local id="retry-failed-${BATS_TEST_NUMBER}"
+  _report_attempt "$id" failure
+  _report_attempt "$id" failure
+  _report_attempt "$id" failure
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id='$id'")" 1
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Failed
+  local first_start
+  first_start="$(_report_sql "SELECT start_time FROM job_report_e2e.executions WHERE task_id='$id'")"
+  _report_attempt "$id" success
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Finish
+  assert_equal "$(_report_sql "SELECT start_time FROM job_report_e2e.executions WHERE task_id='$id'")" "$first_start"
+  _report_attempt "$id" failure
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id='$id'")" 1
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Finish
+}
+
+@test "report IDs isolate tasks with the same name and host" {
+  local prefix="retry-distinct-${BATS_TEST_NUMBER}"
+  _report_attempt "${prefix}-a" failure
+  _report_attempt "${prefix}-b" success
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id IN ('${prefix}-a','${prefix}-b')")" 2
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='${prefix}-a'")" Failed
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='${prefix}-b'")" Finish
+}
+
+@test "set-runtime-param reports another supported parameter with its own name" {
+  local current before
+  # Reapply the current value on the primary so this test needs no new mutation cleanup.
+  current="$(_report_sql 'SELECT @@GLOBAL.max_statement_time')"
+  before="$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')"
+  _submit "set-runtime-param" \
+    "{\"namespace\":\"mariadb-1\",\"param\":\"max_statement_time\",\"value\":\"$current\",\"scope\":\"primary\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$(_task_result_data | jq -r '.reason_code')" SRP_APPLIED
+  assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$((before + 1))"
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE job_name='set-runtime-param/max_statement_time' AND status='Finish'")" 1
 }

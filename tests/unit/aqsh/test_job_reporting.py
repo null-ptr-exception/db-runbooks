@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -104,6 +105,26 @@ class ConfigTests(Fixture):
         task["input"].append({"name": "job_name", "env": "OTHER", "type": "string"})
         with self.assertRaises(ValueError):
             self.compile({"restart": task})
+
+    def test_dynamic_name_and_required_inputs_resolve_declared_env_mappings(self):
+        task = self.task(enabled=True, name='maintenance', name_from='operation',
+                         require_nonempty=['namespace', 'operation'])
+        task['input'].append({'name': 'operation', 'env': 'ACTION', 'type': 'string'})
+        path = self.compile({'custom': task})
+        settings = json.loads(next(p for p in path.parent.glob('*.json') if p != path).read_text())
+        self.assertEqual(settings['name_from_env'], 'ACTION')
+        self.assertEqual(settings['require_nonempty_envs'], ['DB_NAMESPACE', 'ACTION'])
+
+    def test_dynamic_reporting_rejects_unknown_inputs_and_missing_env_mappings(self):
+        for options in [{'name_from': 'unknown'}, {'name_from': False},
+                        {'require_nonempty': 'namespace'}, {'require_nonempty': [False]},
+                        {'require_nonempty': ['unknown']}, {'name_from': 'unmapped'},
+                        {'require_nonempty': ['unmapped']}]:
+            with self.subTest(options=options):
+                task = self.task(enabled=True, **options)
+                task['input'].append({'name': 'unmapped', 'type': 'string'})
+                with self.assertRaises(ValueError):
+                    self.compile({'custom': task})
 
     def test_unfiltered_inputs_without_env_remain_supported(self):
         task = self.task(enabled=True)
@@ -254,6 +275,32 @@ exit "$TEST_CODE"
     def test_yaml_name_is_fallback_for_empty_input(self):
         self.execute(JOB_REPORT_NAME="")
         self.assertEqual((self.root / "report").read_text().splitlines()[-1], "restart")
+
+    def test_dynamic_name_preserves_explicit_override_and_static_fallback(self):
+        self.options.update(name='maintenance', name_from_env='ACTION')
+        for action, override, expected in [('backup', '', 'maintenance/backup'),
+                                           ('backup', 'incident-1', 'incident-1'),
+                                           ('', '', 'maintenance')]:
+            with self.subTest(action=action, override=override):
+                (self.root / 'public-result').unlink(missing_ok=True)
+                self.execute(ACTION=action, JOB_REPORT_NAME=override)
+                self.assertEqual((self.root / 'report').read_text().splitlines()[-1], expected)
+
+    def test_required_input_filters_empty_and_whitespace_even_for_changed_result(self):
+        self.options['require_nonempty_envs'] = ['ACTION']
+        for value in ('', '  ', '\t'):
+            with self.subTest(value=value):
+                (self.root / 'public-result').unlink(missing_ok=True)
+                self.execute(ACTION=value, TEST_RESULT='{"status":"CHANGED","changed":true}')
+                self.assertFalse((self.root / 'report').exists())
+
+    def test_required_input_and_exact_filters_are_both_enforced(self):
+        self.options.update(require_nonempty_envs=['ACTION'], when={'MODE': 'apply'})
+        self.execute(ACTION='backup', MODE='preview')
+        self.assertFalse((self.root / 'report').exists())
+        (self.root / 'public-result').unlink()
+        self.execute(ACTION='backup', MODE='apply')
+        self.assertTrue((self.root / 'report').exists())
 
     def test_blocked_partial_missing_and_error_results_are_not_success(self):
         for payload, code in [('{"status":"BLOCKED"}', "0"),
@@ -426,7 +473,7 @@ with open(os.environ['TEST_KUBECTL_LOG'],'a') as out: out.write(json.dumps(args)
 if '-e' in args:
  q=args[args.index('-e')+1]
  with open(os.environ['TEST_SQL'],'a') as out: out.write(json.dumps({'query':q,'pod':args[args.index('exec')+1], 'public':os.path.exists(os.environ.get('TEST_PUBLIC_RESULT','/no-result'))})+'\\n')
- if 'information_schema.COLUMNS' in q: print('80 80 255 16')
+ if 'information_schema.COLUMNS' in q: print(os.environ.get('TEST_REPORT_LENGTHS','80 80 255 16'))
  elif 'INSERT INTO' in q: print('2026-01-02 03:04:05')
  elif 'SYSTEM_VARIABLES' in q: print('NO')
  elif q.startswith('SET GLOBAL'): print('')
@@ -505,6 +552,132 @@ class DestinationTests(DestinationFixture):
         self.assertTrue(all(row['pod'] == 'resolved-1' for row in rows))
 
 
+class ExternalTaskTests(DestinationFixture):
+    """Mounted YAML and scripts use the same entrypoint and reporter as built-ins."""
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(ROOT / 'aqsh-tasks/scripts', self.tasks, dirs_exist_ok=True)
+        external = self.tasks / 'external/maintenance.sh'
+        external.parent.mkdir()
+        external.write_text('\n'.join([
+            '#!/usr/bin/env bash',
+            "printf '%s' \"$TEST_RESULT\" > \"$AQSH_RESULT_FILE\"",
+            'exit "${TEST_EXIT:-0}"', '']))
+        external.chmod(0o755)
+        self.configuration = self.root / 'config'
+        self.configuration.mkdir()
+        (self.configuration / 'external.yaml').write_text("""tasks:
+  external/maintenance:
+    script: external/maintenance.sh
+    job_report:
+      enabled: true
+      name: external-maintenance
+      name_from: operation
+      require_nonempty: [operation]
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        type: string
+      - name: dry_run
+        env: DRY_RUN
+        type: string
+      - name: operation
+        env: CUSTOM_OPERATION
+        type: string
+""")
+        # Use a stub executor and the fixture mock kubectl; startup, compilation,
+        # runner, result publication and reporter execute the repository code.
+        executor = self.tasks / 'aqsh'
+        executor.write_text("""#!/usr/bin/env python3
+import json,os
+from pathlib import Path
+doc=json.loads(Path(os.environ['AQSH_TASKS_CONFIG']).read_text())
+Path(os.environ['TEST_COMPILED']).write_text(json.dumps(doc))
+script=doc['tasks']['external/maintenance']['script']
+os.execv(script,[script])
+""")
+        executor.chmod(0o755)
+        self.runtime = self.root / 'runtime'
+        self.runtime.mkdir()
+
+    def mount_config(self, builtins=False):
+        if builtins:
+            source = config.read_document(ROOT / 'aqsh-tasks/task-mariadb.yaml')
+            source['include'].append('external.yaml')
+            shutil.copyfile(ROOT / 'aqsh-tasks/tasks-mariadb.yaml',
+                            self.configuration / 'tasks-mariadb.yaml')
+        else:
+            source = {'include': ['external.yaml']}
+        main = self.configuration / 'tasks.yaml'
+        main.write_text(json.dumps(source))
+        for path in self.configuration.iterdir():
+            path.chmod(0o444)
+        return main
+
+    def execute_external(self, source, status='ERROR', code=7, **extra):
+        public = self.root / 'external-result'
+        payload = json.dumps({'status': status, 'summary': 'external outcome'})
+        env = {**self.env, 'AQSH_TASK_ID': 'external-retry-id',
+               'AQSH_TASKS_CONFIG': str(source), 'AQSH_TASKS_DIR': str(self.tasks),
+               'AQSH_LIB_DIR': str(LIB), 'AQSH_RESULT_FILE': str(public),
+               'TMPDIR': str(self.runtime), 'TEST_COMPILED': str(self.root / 'compiled-config'),
+               'TEST_RESULT': payload, 'TEST_EXIT': str(code),
+               'TEST_REPORT_LENGTHS': '80 80 255 16 191 1', 'DRY_RUN': 'false',
+               'CUSTOM_OPERATION': 'backup', 'JOB_REPORT_NAME': '', **extra}
+        result = subprocess.run(['bash', str(self.tasks / 'aqsh-entrypoint.sh')], env=env,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, code, result.stderr)
+        self.assertEqual(public.read_text(), env['TEST_RESULT'])
+        return [json.loads(line) for line in (self.root / 'sql').read_text().splitlines()] if (self.root / 'sql').exists() else []
+
+    def test_readonly_external_yaml_retries_keep_the_same_aqsh_identity(self):
+        source = self.mount_config()
+        for _ in range(3):
+            rows = self.execute_external(source)
+        self.assertEqual(sum('INSERT INTO' in r['query'] for r in rows), 3)
+        finishes = [r['query'] for r in rows if "status='Failed',flag=4" in r['query']]
+        self.assertEqual(len(finishes), 3)
+        identity = "WHERE BINARY task_id=BINARY CONVERT(X'65787465726e616c2d72657472792d6964' USING utf8mb4)"
+        self.assertTrue(all(identity in query for query in finishes))
+        self.assertTrue(all('ON DUPLICATE KEY UPDATE task_id=task_id' in r['query']
+                            for r in rows if 'INSERT INTO' in r['query']))
+
+    def test_builtin_and_external_includes_coexist_and_retry_can_succeed(self):
+        source = self.mount_config(builtins=True)
+        self.execute_external(source)
+        rows = self.execute_external(source, status='SUCCESS', code=0)
+        compiled = json.loads((self.root / 'compiled-config').read_text())
+        self.assertIn('set-runtime-param', compiled['tasks'])
+        self.assertIn('external/maintenance', compiled['tasks'])
+        self.assertNotIn('job_report', compiled['tasks']['external/maintenance'])
+        self.assertEqual(sum('INSERT INTO' in r['query'] for r in rows), 2)
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+        self.assertFalse(any(r['query'].startswith('SET GLOBAL') for r in rows))
+
+    def test_external_dry_run_does_not_report(self):
+        rows = self.execute_external(self.mount_config(), status='SUCCESS', code=0, DRY_RUN='true')
+        self.assertEqual(rows, [])
+
+    def test_external_missing_migration_preserves_original_failure(self):
+        rows = self.execute_external(self.mount_config(), TEST_REPORT_LENGTHS='80 80 255 16')
+        self.assertTrue(rows)
+        self.assertFalse(any('INSERT INTO' in r['query'] for r in rows))
+
+    def test_external_dynamic_name_and_explicit_override(self):
+        source = self.mount_config()
+        rows = self.execute_external(source, status='SUCCESS', code=0)
+        insert = next(r['query'] for r in rows if 'INSERT INTO' in r['query'])
+        self.assertIn("X'" + 'external-maintenance/backup'.encode().hex() + "'", insert)
+        rows = self.execute_external(source, status='SUCCESS', code=0,
+                                     CUSTOM_OPERATION='restart', JOB_REPORT_NAME='incident-2',
+                                     AQSH_TASK_ID='another-task')
+        insert = [r['query'] for r in rows if 'INSERT INTO' in r['query']][-1]
+        self.assertIn("X'" + 'incident-2'.encode().hex() + "'", insert)
+
+    def test_external_empty_selector_does_not_report(self):
+        self.assertEqual(self.execute_external(self.mount_config(), CUSTOM_OPERATION=''), [])
+
+
 class IntegrationTests(DestinationFixture):
     def run_runtime(self, enabled=True, expected_reason='SRP_APPLIED', **env):
         document = config.load_config((ROOT / 'aqsh-tasks/task-mariadb.yaml').resolve())
@@ -519,7 +692,8 @@ class IntegrationTests(DestinationFixture):
         with (self.root / 'stdout').open('wb') as stdout:
             result = subprocess.run([launcher], env={**self.env, 'AQSH_RESULT_FILE':str(public),
                             'TEST_PUBLIC_RESULT':str(public), 'DRY_RUN':'false', 'CONFIRM':'true',
-                            'RUNTIME_PARAM':'max_connections', 'RUNTIME_VALUE':'500', **env},
+                            'RUNTIME_PARAM':'max_connections', 'RUNTIME_VALUE':'500',
+                            'JOB_REPORT_NAME':'', **env},
                             stdout=stdout, stderr=subprocess.PIPE, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(public.read_text())['reason_code'], expected_reason)
@@ -535,13 +709,36 @@ class IntegrationTests(DestinationFixture):
         self.assertEqual(sum(row['query'].startswith('SELECT @@GLOBAL') for row in rows[:metadata]), 2)
         self.assertTrue(all(not row['public'] for row in rows))
 
+    def test_compiled_runtime_forwards_aqsh_identity_without_double_reporting(self):
+        rows = self.run_runtime(AQSH_TASK_ID='retry-task', TEST_REPORT_LENGTHS='80 80 255 16 191 1')
+        self.assertEqual(sum('INSERT INTO' in row['query'] for row in rows), 1)
+        self.assertIn('ON DUPLICATE KEY UPDATE task_id=task_id',
+                      next(row['query'] for row in rows if 'INSERT INTO' in row['query']))
+        self.assertIn("WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4)", rows[-1]['query'])
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+
+    def test_compiled_runtime_preserves_success_when_retry_schema_is_missing(self):
+        rows = self.run_runtime(AQSH_TASK_ID='retry-task')
+        self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
+
     def test_disabled_yaml_does_not_fall_back_to_legacy_native_reporting(self):
         rows = self.run_runtime(enabled=False)
         self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
 
-    def test_nonmatching_runtime_parameter_does_not_report(self):
+    def test_other_runtime_parameter_reports_with_derived_name(self):
         rows = self.run_runtime(RUNTIME_PARAM='max_statement_time')
+        insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
+        self.assertIn("X'" + 'set-runtime-param/max_statement_time'.encode().hex() + "'", insert)
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+
+    def test_runtime_listing_does_not_report_even_without_dry_run(self):
+        rows = self.run_runtime(RUNTIME_PARAM='', expected_reason='SRP_LIST')
         self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
+
+    def test_runtime_dynamic_name_can_be_overridden(self):
+        rows = self.run_runtime(RUNTIME_PARAM='max_statement_time', JOB_REPORT_NAME='incident-3')
+        insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
+        self.assertIn("X'" + 'incident-3'.encode().hex() + "'", insert)
 
     def test_mixed_case_dry_run_never_mutates_or_reports(self):
         for value in ('True', 'Yes', 'On'):

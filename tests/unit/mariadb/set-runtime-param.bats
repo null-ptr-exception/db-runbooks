@@ -58,7 +58,7 @@ if [[ " ${args} " == *" exec "* ]]; then
   case "$q" in
     *information_schema.COLUMNS*)
       report_step metadata
-      printf '80\t80\t255\t16\n'; exit 0 ;;
+      printf '%s\n' "${MOCK_REPORT_LENGTHS:-80 80 255 16}"; exit 0 ;;
     *INSERT\ INTO*)
       report_step insert
       [[ "${MOCK_REPORT_FAIL:-}" != insert ]] || exit 1
@@ -70,6 +70,8 @@ if [[ " ${args} " == *" exec "* ]]; then
     "SET GLOBAL "*)
       [[ -n "${MOCK_FAIL_POD:-}" && "$pod" == "${MOCK_FAIL_POD}" ]] && exit 1
       rest="${q#SET GLOBAL }"; p="${rest%% =*}"; v="${rest##*= }"
+      # MariaDB returns boolean globals as 0/1, even after SET ... = ON/OFF.
+      case "${v^^}" in ON) v=1 ;; OFF) v=0 ;; esac
       printf '%s' "$v" > "${MOCK_STATE}/${p}"; exit 0 ;;
     "SELECT @@GLOBAL."*)
       [[ -n "${MOCK_READBACK+x}" ]] && { printf '%s' "${MOCK_READBACK}"; exit 0; }
@@ -352,26 +354,27 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(field '.reason_code')" = SRP_APPLIED ]
   grep -q "CONVERT(X'696e636964656e742d62756d70' USING utf8mb4)" "$MOCK_SQL_LOG"
-  # default max_connections hex must NOT appear as job_name identity
-  if grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"; then return 1; fi
+  # default task/parameter name must NOT appear as job_name identity
+  if grep -q "CONVERT(X'7365742d72756e74696d652d706172616d2f6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"; then return 1; fi
 }
 
-@test "empty JOB_REPORT_NAME falls back to the parameter name" {
+@test "empty JOB_REPORT_NAME falls back to the task and parameter name" {
   run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
     JOB_REPORT_NAME= \
     DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY=mariadb-1
   [ "$status" -eq 0 ]
-  grep -q "CONVERT(X'6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"
+  grep -q "CONVERT(X'7365742d72756e74696d652d706172616d2f6d61785f636f6e6e656374696f6e73' USING utf8mb4)" "$MOCK_SQL_LOG"
 }
 
-@test "dry-run and other params never report even with deployment settings" {
+@test "dry-run and listing never report even with deployment settings" {
   run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
     DRY_RUN=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500
   [ "$status" -eq 0 ]
   if grep -q 'INSERT INTO' "$MOCK_SQL_LOG"; then return 1; fi
   run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
-    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_statement_time RUNTIME_VALUE=10
+    DRY_RUN=false RUNTIME_PARAM=
   [ "$status" -eq 0 ]
+  [ "$(field '.reason_code')" = SRP_LIST ]
   if grep -q 'INSERT INTO' "$MOCK_SQL_LOG"; then return 1; fi
 }
 
@@ -462,4 +465,37 @@ field() { jq -r "$1" "${RESULT}"; }
     DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 MOCK_PRIMARY= MOCK_CR_REPLICAS=1
   [ "$status" -eq 0 ]
   grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+}
+
+@test "native reporting uses the stable aqsh task ID without YAML wrapping" {
+  run_srp AQSH_TASK_ID=retry-task MOCK_REPORT_LENGTHS='80 80 255 16 191 1' \
+    JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    RUNTIME_PARAM=max_connections RUNTIME_VALUE=500 DRY_RUN=false CONFIRM=true
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'INSERT INTO' "$MOCK_SQL_LOG")" -eq 1 ]
+  grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$MOCK_SQL_LOG"
+  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND flag=2" "$MOCK_SQL_LOG"
+  grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+}
+
+@test "native reporting covers numeric and boolean parameters with derived names" {
+  local spec param value expected_hex
+  for spec in max_statement_time:10 wait_timeout:300 slow_query_log:ON; do
+    param="${spec%%:*}"; value="${spec#*:}"
+    run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history JOB_REPORT_NAME= \
+      DRY_RUN=false CONFIRM=true RUNTIME_PARAM="$param" RUNTIME_VALUE="$value"
+    [ "$status" -eq 0 ]
+    [ "$(field '.reason_code')" = SRP_APPLIED ]
+    expected_hex="$(printf '%s' "set-runtime-param/$param" | od -An -v -tx1 | tr -d ' \n')"
+    grep -q "CONVERT(X'$expected_hex' USING utf8mb4)" "$MOCK_SQL_LOG"
+    grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
+  done
+}
+
+@test "another parameter's partial failure reports Failed and preserves its exit code" {
+  run_srp JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history \
+    DRY_RUN=false CONFIRM=true RUNTIME_PARAM=max_statement_time RUNTIME_VALUE=10 MOCK_FAIL_POD=mariadb-2
+  [ "$status" -eq 1 ]
+  [ "$(field '.partial')" = true ]
+  grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
 }

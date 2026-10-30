@@ -104,6 +104,8 @@ def read_result(path):
 def should_report(options, env, result):
     if not options["enabled"]:
         return False
+    if any(not env.get(key, "").strip() for key in options.get("require_nonempty_envs", [])):
+        return False
     if any(env.get(key, "") != value for key, value in options["when"].items()):
         return False
     parts = []
@@ -119,6 +121,13 @@ def should_report(options, env, result):
     if False in flags or any(part.get("changed") is True for part in parts):
         return True
     return not (options["dry_run_env"] and as_bool(env.get(options["dry_run_env"], "")) is True)
+
+
+def report_name(options, env):
+    if env.get("JOB_REPORT_NAME"):
+        return env["JOB_REPORT_NAME"]
+    suffix = env.get(options.get("name_from_env"), "")
+    return f"{options['name']}/{suffix}" if suffix.strip() else options["name"]
 
 
 def main(settings):
@@ -147,7 +156,7 @@ def main(settings):
                 except ValueError:
                     continue
         if should_report(options, env, result):
-            report_env = {**env, "JOB_REPORT_NAME": env.get("JOB_REPORT_NAME") or options["name"]}
+            report_env = {**env, "JOB_REPORT_NAME": report_name(options, env)}
             report_env.pop("JOB_REPORT_TARGET_NAME", None)
             if isinstance(result, dict) and "mdb" in result:
                 # Keep the selected instance across reporting-time discovery.

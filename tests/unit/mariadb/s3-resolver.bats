@@ -323,8 +323,22 @@ b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
 
   local manifest
   manifest="$(mdbt_physical_backup_manifest backup example database)"
-  [ "$(jq -r '.spec.storage.s3.accessKeyIdSecretKeyRef.name' <<<"$manifest")" = 'access-reference' ]
-  [ "$(jq -r '.spec.storage.s3.secretAccessKeySecretKeyRef.name' <<<"$manifest")" = 'secret-reference' ]
+  # Every input lands in its own field; the endpoint loses its scheme and
+  # https:// turns TLS on.
+  [ "$(jq -c '.spec' <<<"$manifest")" = "$(jq -nc '{
+    mariaDbRef: {name: "database"},
+    target: "PreferReplica",
+    compression: "gzip",
+    storage: {s3: {
+      bucket: "example-bucket",
+      prefix: "mariadb/example",
+      endpoint: "object.example.invalid",
+      region: "example-region-1",
+      tls: {enabled: true},
+      accessKeyIdSecretKeyRef: {name: "access-reference", key: "access-key"},
+      secretAccessKeySecretKeyRef: {name: "secret-reference", key: "secret-key"}
+    }}
+  }')" ]
   [[ "$manifest" != *"$MINIO_ROOT_USER"* ]]
   [[ "$manifest" != *"$MINIO_ROOT_PASSWORD"* ]]
 }

@@ -1,8 +1,8 @@
 # Optional MariaDB job reporting
 
 `lib/job-report.sh` records task execution in an existing table on the target
-MariaDB primary. The first consumer is `set-runtime-param` for
-`max_connections`. No schema migration or table creation is performed.
+MariaDB primary. The first consumer is `set-runtime-param` for supported
+runtime parameters. No schema migration or table creation is performed.
 
 The runbook image also supports deploy-time `job_report` metadata in task YAML.
 This lets an existing task use the common reporting wrapper without editing its
@@ -80,10 +80,31 @@ task inputs. Database/table names stay in `mariadb.env`.
 An enabled task automatically gets the optional string input `job_name`, mapped
 to `JOB_REPORT_NAME`. An existing compatible declaration is reused, never
 duplicated. A nonempty per-call name overrides the YAML name; omitted/empty names
-fall back to it. If the existing input has a nonempty `default`, aqsh supplies
-that value and it takes precedence too; prefer `job_report.name` for the static
-fallback and leave the input default empty. This is caller intent (e.g. different incident/change labels
-within the same deployment), rather than a deployment location or credential.
+fall back to the configured static or dynamic name. If the existing input has
+a nonempty `default`, aqsh supplies that value and it takes precedence too;
+prefer `job_report.name` for the static fallback and leave the input default
+empty. This is caller intent (e.g. different incident/change labels within the same deployment), rather than a deployment location or credential.
+
+Optional `name_from` appends a declared input's value to `name`, separated by `/`.
+For example, the following configuration generates
+`set-runtime-param/max_connections` or `set-runtime-param/wait_timeout`:
+
+```yaml
+job_report:
+  enabled: true
+  name: set-runtime-param
+  name_from: param
+  require_nonempty: [param]
+  timeout: 30s
+```
+
+`require_nonempty` lists declared input names whose mapped environment values
+must be present and nonempty after trimming whitespace. All listed conditions
+must hold, even when `job_name` is supplied. With an empty `name_from` value and
+no matching nonempty requirement, the static `name` remains the fallback.
+A nonempty per-call `job_name` overrides the complete derived name, not just its
+prefix. These settings do not introduce new task inputs. They can be used by
+bundled tasks and deployment-mounted YAML/scripts alike.
 
 Optional `when` filters match declared input names against **string** values:
 
@@ -96,14 +117,18 @@ job_report:
   timeout: 30s
 ```
 
-Each input referenced by `when` must declare a nonempty string `env`, since aqsh
-exports only inputs with that mapping. Other inputs may omit `env`. Invalid
-input definitions identify the task and field in the startup error without
+Each input referenced by `when`, `name_from`, or `require_nonempty` must declare
+a nonempty string `env`, since aqsh exports only inputs with that mapping. Other
+inputs may omit `env`. Invalid input definitions identify the task and field in the startup error without
 printing filter values.
 
-This is the `set-runtime-param` configuration shipped in this image. Listing and
-other parameters do not report. Results with top-level/nested `dry_run` or
-`dryRun` set to true skip reporting, including results describing planned changes.
+The shipped `set-runtime-param` configuration uses `name_from: param` and
+`require_nonempty: [param]`, without an exact parameter filter. All supported
+parameter requests can report; listing is excluded because `param` is empty.
+Existing deployments that want to retain a parameter-specific opt-in can keep
+the exact `when` filter above. Exact filters and nonempty requirements are ANDed.
+Results with top-level/nested `dry_run` or `dryRun` set to true skip reporting,
+including results describing planned changes.
 An explicit false result flag or an actual `changed: true` result takes precedence
 over the request's dry-run spelling, so real and partial mutations are not hidden.
 The declared dry-run input is a fallback only when the result has no such signal.
@@ -166,7 +191,9 @@ below still apply.
 
 Source this library after `mariadb.sh`. Each task opts in explicitly; leaving out
 `job_report_enable` disables reporting even when the deployment is configured.
-The name argument is optional (defaults to the script filename). Tasks may expose an optional `job_name` input that overrides it; `set-runtime-param` falls back to the parameter name.
+The name argument is optional (defaults to the script filename). Tasks may expose
+an optional `job_name` input that overrides it; `set-runtime-param` defaults to
+`set-runtime-param/<param>`.
 
 ```bash
 source "${LIB_DIR}/job-report.sh"
@@ -188,10 +215,14 @@ finish calls do not write again, and reporting SQL output is kept out of task
 JSON. SQL failures produce a generic warning without credentials or query text;
 they do not change the task's original result or retry its operation.
 
-`set-runtime-param` opts in for real `max_connections` requests (including
-decreases). The recorded `job_name` is optional input `job_name` /
-`JOB_REPORT_NAME`, or the parameter name when omitted. Listing, dry-run, and
-other parameters do not report.
+`set-runtime-param` opts in for real requests for all supported parameters
+(including decreases). The recorded `job_name` is optional input `job_name` /
+`JOB_REPORT_NAME`, or `set-runtime-param/<param>` when omitted. Listing and
+dry-run do not report. Compared with the previous `max_connections`-only
+configuration, default names now include the task prefix; pass an explicit
+`job_name` to preserve a caller-selected historical label. Ensure the existing
+`job_name` column can hold the longer prefixed names; oversized identities are
+skipped with a warning rather than truncated.
 It defers both Start and Finish until the parameter operation and its read-back
 attempts have completed, or the request has been rejected. No report SQL runs
 before the mutation or between its per-pod apply/read-back steps. Once credentials are

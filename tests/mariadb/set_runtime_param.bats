@@ -203,7 +203,7 @@ _report_sql() {
   assert_equal "$(_pod_max_conn mariadb-2)" "512"
   assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$((count_before + 1))"
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
-    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Finish'
+    WHERE job_name='set-runtime-param/max_connections' AND host='$REPORT_PRIMARY' AND status='Finish'
       AND flag=1 AND end_time >= start_time AND end_time <= NOW()
       AND message LIKE 'SET GLOBAL max_connections=512%'")" 1
 }
@@ -229,7 +229,7 @@ _report_sql() {
   assert_equal "$(echo "$data" | jq -r '.reason_code')" VALUE_INVALID
   assert_equal "$(_pod_max_conn "$REPORT_PRIMARY")" "$before"
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions
-    WHERE job_name='max_connections' AND host='$REPORT_PRIMARY' AND status='Failed'
+    WHERE job_name='set-runtime-param/max_connections' AND host='$REPORT_PRIMARY' AND status='Failed'
       AND flag=4 AND end_time >= start_time AND message LIKE '%invalid%'")" 1
 }
 
@@ -280,4 +280,16 @@ _report_attempt() (
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id IN ('${prefix}-a','${prefix}-b')")" 2
   assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='${prefix}-a'")" Failed
   assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='${prefix}-b'")" Finish
+}
+
+@test "set-runtime-param reports another supported parameter with its own name" {
+  local current before
+  # Reapply the current value on the primary so this test needs no new mutation cleanup.
+  current="$(_report_sql 'SELECT @@GLOBAL.max_statement_time')"
+  before="$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')"
+  _submit "set-runtime-param" \
+    "{\"namespace\":\"mariadb-1\",\"param\":\"max_statement_time\",\"value\":\"$current\",\"scope\":\"primary\",\"dry_run\":\"false\",\"confirm\":\"true\"}"
+  assert_equal "$(_task_result_data | jq -r '.reason_code')" SRP_APPLIED
+  assert_equal "$(_report_sql 'SELECT COUNT(*) FROM job_report_e2e.executions')" "$((before + 1))"
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE job_name='set-runtime-param/max_statement_time' AND status='Finish'")" 1
 }

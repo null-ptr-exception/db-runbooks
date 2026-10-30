@@ -168,15 +168,15 @@ QUERY_POD="${CURRENT_PRIMARY:-${ALL_PODS[0]}}"
 ROOT_PW="$(mariadb_read_root_password "$QUERY_POD" "${ALL_PODS[@]}")" \
   || { emit BLOCKED ROOT_PASSWORD_UNAVAILABLE "cannot read MARIADB_ROOT_PASSWORD from any ready pod" false; exit 0; }
 
-# Opt this task family in only for real max_connections requests. Deployment
+# Opt this task family in for real parameter requests, excluding list/dry-run. Deployment
 # database/table settings enable persistence; no settings means no SQL writes.
 # Capture the destination here; emit() defers all reporting SQL until the outcome
 # is known, so reporting cannot delay SET GLOBAL or its read-back verification.
-# Optional JOB_REPORT_NAME overrides the recorded job_name; empty falls back to $PARAM.
+# Optional JOB_REPORT_NAME overrides the recorded job_name; empty uses the task/param.
 # Ignored whenever reporting is off (no JOB_REPORT_DATABASE/TABLE or enable skipped).
-if [[ "${JOB_REPORT_WRAPPED:-false}" != true && "$PARAM" == max_connections ]] && ! bool "$DRY_RUN"; then
+if [[ "${JOB_REPORT_WRAPPED:-false}" != true && -n "${PARAM//[[:space:]]/}" ]] && ! bool "$DRY_RUN"; then
   _job_name="${JOB_REPORT_NAME:-}"
-  [[ -n "$_job_name" ]] || _job_name="$PARAM"
+  [[ -n "$_job_name" ]] || _job_name="set-runtime-param/$PARAM"
   job_report_enable "$_job_name"
   REPORT_PRIMARY="$CURRENT_PRIMARY"
   if [[ -z "$REPORT_PRIMARY" && ${#ALL_PODS[@]} -eq 1 ]]; then REPORT_PRIMARY="${ALL_PODS[0]}"; fi

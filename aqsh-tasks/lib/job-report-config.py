@@ -99,7 +99,9 @@ def load_config(path):
 
 def report_options(name, task):
     options = task.pop("job_report")
-    if not isinstance(options, dict) or set(options) - {"enabled", "name", "when", "timeout"}:
+    if not isinstance(options, dict) or set(options) - {
+        "enabled", "name", "name_from", "require_nonempty", "when", "timeout"
+    }:
         raise ValueError(f"{name}: unsupported job_report configuration")
     enabled = options.get("enabled", False)
     if not isinstance(enabled, bool):
@@ -129,10 +131,22 @@ def report_options(name, task):
         key not in fields or not isinstance(value, str) for key, value in when.items()
     ):
         raise ValueError(f"{name}: job_report.when must match declared inputs with strings")
-    for key in when:
+    name_from = options.get("name_from")
+    if name_from is not None and (not isinstance(name_from, str) or name_from not in fields):
+        raise ValueError(f"{name}: job_report.name_from must reference a declared input")
+    required = options.get("require_nonempty", [])
+    if not isinstance(required, list) or any(
+        not isinstance(key, str) or key not in fields for key in required
+    ):
+        raise ValueError(f"{name}: job_report.require_nonempty must list declared inputs")
+    references = [("when", key) for key in when]
+    references += [("require_nonempty", key) for key in required]
+    if name_from is not None:
+        references.append(("name_from", name_from))
+    for option, key in references:
         env = fields[key].get("env")
         if not isinstance(env, str) or not env:
-            raise ValueError(f"{name}: job_report.when input {key} must declare a nonempty env string")
+            raise ValueError(f"{name}: job_report.{option} input {key} must declare a nonempty env string")
     report_inputs = [item for item in inputs if item.get("env") == "JOB_REPORT_NAME"]
     if "job_name" in fields or report_inputs:
         if (len(report_inputs) != 1 or report_inputs[0].get("name") != "job_name"
@@ -144,6 +158,8 @@ def report_options(name, task):
     return {
         "enabled": enabled,
         "name": label,
+        "name_from_env": fields[name_from]["env"] if name_from is not None else None,
+        "require_nonempty_envs": [fields[key]["env"] for key in required],
         "timeout": timeout,
         "when": {fields[key]["env"]: value for key, value in when.items()},
         "dry_run_env": fields.get("dry_run", {}).get("env"),

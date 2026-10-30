@@ -106,6 +106,26 @@ class ConfigTests(Fixture):
         with self.assertRaises(ValueError):
             self.compile({"restart": task})
 
+    def test_dynamic_name_and_required_inputs_resolve_declared_env_mappings(self):
+        task = self.task(enabled=True, name='maintenance', name_from='operation',
+                         require_nonempty=['namespace', 'operation'])
+        task['input'].append({'name': 'operation', 'env': 'ACTION', 'type': 'string'})
+        path = self.compile({'custom': task})
+        settings = json.loads(next(p for p in path.parent.glob('*.json') if p != path).read_text())
+        self.assertEqual(settings['name_from_env'], 'ACTION')
+        self.assertEqual(settings['require_nonempty_envs'], ['DB_NAMESPACE', 'ACTION'])
+
+    def test_dynamic_reporting_rejects_unknown_inputs_and_missing_env_mappings(self):
+        for options in [{'name_from': 'unknown'}, {'name_from': False},
+                        {'require_nonempty': 'namespace'}, {'require_nonempty': [False]},
+                        {'require_nonempty': ['unknown']}, {'name_from': 'unmapped'},
+                        {'require_nonempty': ['unmapped']}]:
+            with self.subTest(options=options):
+                task = self.task(enabled=True, **options)
+                task['input'].append({'name': 'unmapped', 'type': 'string'})
+                with self.assertRaises(ValueError):
+                    self.compile({'custom': task})
+
     def test_unfiltered_inputs_without_env_remain_supported(self):
         task = self.task(enabled=True)
         task['input'].extend([{'name': 'label', 'type': 'string'}, {'name': 'dry_run'}])
@@ -255,6 +275,32 @@ exit "$TEST_CODE"
     def test_yaml_name_is_fallback_for_empty_input(self):
         self.execute(JOB_REPORT_NAME="")
         self.assertEqual((self.root / "report").read_text().splitlines()[-1], "restart")
+
+    def test_dynamic_name_preserves_explicit_override_and_static_fallback(self):
+        self.options.update(name='maintenance', name_from_env='ACTION')
+        for action, override, expected in [('backup', '', 'maintenance/backup'),
+                                           ('backup', 'incident-1', 'incident-1'),
+                                           ('', '', 'maintenance')]:
+            with self.subTest(action=action, override=override):
+                (self.root / 'public-result').unlink(missing_ok=True)
+                self.execute(ACTION=action, JOB_REPORT_NAME=override)
+                self.assertEqual((self.root / 'report').read_text().splitlines()[-1], expected)
+
+    def test_required_input_filters_empty_and_whitespace_even_for_changed_result(self):
+        self.options['require_nonempty_envs'] = ['ACTION']
+        for value in ('', '  ', '\t'):
+            with self.subTest(value=value):
+                (self.root / 'public-result').unlink(missing_ok=True)
+                self.execute(ACTION=value, TEST_RESULT='{"status":"CHANGED","changed":true}')
+                self.assertFalse((self.root / 'report').exists())
+
+    def test_required_input_and_exact_filters_are_both_enforced(self):
+        self.options.update(require_nonempty_envs=['ACTION'], when={'MODE': 'apply'})
+        self.execute(ACTION='backup', MODE='preview')
+        self.assertFalse((self.root / 'report').exists())
+        (self.root / 'public-result').unlink()
+        self.execute(ACTION='backup', MODE='apply')
+        self.assertTrue((self.root / 'report').exists())
 
     def test_blocked_partial_missing_and_error_results_are_not_success(self):
         for payload, code in [('{"status":"BLOCKED"}', "0"),
@@ -526,12 +572,17 @@ class ExternalTaskTests(DestinationFixture):
     job_report:
       enabled: true
       name: external-maintenance
+      name_from: operation
+      require_nonempty: [operation]
     input:
       - name: namespace
         env: DB_NAMESPACE
         type: string
       - name: dry_run
         env: DRY_RUN
+        type: string
+      - name: operation
+        env: CUSTOM_OPERATION
         type: string
 """)
         # Use a stub executor and the fixture mock kubectl; startup, compilation,
@@ -571,7 +622,8 @@ os.execv(script,[script])
                'AQSH_LIB_DIR': str(LIB), 'AQSH_RESULT_FILE': str(public),
                'TMPDIR': str(self.runtime), 'TEST_COMPILED': str(self.root / 'compiled-config'),
                'TEST_RESULT': payload, 'TEST_EXIT': str(code),
-               'TEST_REPORT_LENGTHS': '80 80 255 16 191 1', 'DRY_RUN': 'false', **extra}
+               'TEST_REPORT_LENGTHS': '80 80 255 16 191 1', 'DRY_RUN': 'false',
+               'CUSTOM_OPERATION': 'backup', 'JOB_REPORT_NAME': '', **extra}
         result = subprocess.run(['bash', str(self.tasks / 'aqsh-entrypoint.sh')], env=env,
                                 capture_output=True, timeout=15)
         self.assertEqual(result.returncode, code, result.stderr)
@@ -611,6 +663,20 @@ os.execv(script,[script])
         self.assertTrue(rows)
         self.assertFalse(any('INSERT INTO' in r['query'] for r in rows))
 
+    def test_external_dynamic_name_and_explicit_override(self):
+        source = self.mount_config()
+        rows = self.execute_external(source, status='SUCCESS', code=0)
+        insert = next(r['query'] for r in rows if 'INSERT INTO' in r['query'])
+        self.assertIn("X'" + 'external-maintenance/backup'.encode().hex() + "'", insert)
+        rows = self.execute_external(source, status='SUCCESS', code=0,
+                                     CUSTOM_OPERATION='restart', JOB_REPORT_NAME='incident-2',
+                                     AQSH_TASK_ID='another-task')
+        insert = [r['query'] for r in rows if 'INSERT INTO' in r['query']][-1]
+        self.assertIn("X'" + 'incident-2'.encode().hex() + "'", insert)
+
+    def test_external_empty_selector_does_not_report(self):
+        self.assertEqual(self.execute_external(self.mount_config(), CUSTOM_OPERATION=''), [])
+
 
 class IntegrationTests(DestinationFixture):
     def run_runtime(self, enabled=True, expected_reason='SRP_APPLIED', **env):
@@ -626,7 +692,8 @@ class IntegrationTests(DestinationFixture):
         with (self.root / 'stdout').open('wb') as stdout:
             result = subprocess.run([launcher], env={**self.env, 'AQSH_RESULT_FILE':str(public),
                             'TEST_PUBLIC_RESULT':str(public), 'DRY_RUN':'false', 'CONFIRM':'true',
-                            'RUNTIME_PARAM':'max_connections', 'RUNTIME_VALUE':'500', **env},
+                            'RUNTIME_PARAM':'max_connections', 'RUNTIME_VALUE':'500',
+                            'JOB_REPORT_NAME':'', **env},
                             stdout=stdout, stderr=subprocess.PIPE, timeout=15)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(public.read_text())['reason_code'], expected_reason)
@@ -658,9 +725,20 @@ class IntegrationTests(DestinationFixture):
         rows = self.run_runtime(enabled=False)
         self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
 
-    def test_nonmatching_runtime_parameter_does_not_report(self):
+    def test_other_runtime_parameter_reports_with_derived_name(self):
         rows = self.run_runtime(RUNTIME_PARAM='max_statement_time')
+        insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
+        self.assertIn("X'" + 'set-runtime-param/max_statement_time'.encode().hex() + "'", insert)
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+
+    def test_runtime_listing_does_not_report_even_without_dry_run(self):
+        rows = self.run_runtime(RUNTIME_PARAM='', expected_reason='SRP_LIST')
         self.assertFalse(any('INSERT INTO' in row['query'] for row in rows))
+
+    def test_runtime_dynamic_name_can_be_overridden(self):
+        rows = self.run_runtime(RUNTIME_PARAM='max_statement_time', JOB_REPORT_NAME='incident-3')
+        insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
+        self.assertIn("X'" + 'incident-3'.encode().hex() + "'", insert)
 
     def test_mixed_case_dry_run_never_mutates_or_reports(self):
         for value in ('True', 'Yes', 'On'):

@@ -102,11 +102,23 @@ jobs:
             exit 1
           fi
           printf '%s\0' "${bats_files[@]}" | xargs -0 "$shellcheck" --severity=warning -x
-          # SC2314 at any severity: a test-final `! cmd` is only a note, but it
-          # stops failing the test as soon as a line is added after it. Use
-          # `run ! cmd` everywhere.
+          # SC2314/SC2315 at any severity: a test-final `! cmd` or `! [ … ]` is
+          # only style-level, but it stops failing the test as soon as a line is
+          # added after it. Use `run ! cmd`, and `[ ! … ]` for tests. For grep,
+          # `run -1 grep` where the file always exists (grep exits 2 on a missing
+          # file, which `run !` also accepts).
           printf '%s\0' "${bats_files[@]}" \
-            | xargs -0 "$shellcheck" --severity=style --include=SC2314 -x
+            | xargs -0 "$shellcheck" --severity=style --include=SC2314,SC2315 -x
+          # ShellCheck only checks the top level of a @test body; a `! cmd`
+          # inside a loop, block or helper never fails the test either.
+          # git grep exits 1 only when nothing matched; 0 (a hit) or >1 (an
+          # error) fails the step.
+          rc=0
+          git grep -nE '^[[:space:]]*![[:space:]]' -- '*.bats' 'tests/**/*.bash' || rc=$?
+          if [ "$rc" -ne 1 ]; then
+            echo "line starting with '!' in test code (or git grep failed, rc=$rc): use run ! / [ ! … ] instead" >&2
+            exit 1
+          fi
 
       - name: Run yamllint
         run: |

@@ -373,6 +373,7 @@ EOF
     [ "$(json_field '.mutation_applied')" = false ]
     [ "$(json_field '.delivery_payload')" = null ]
     [ ! -e "${TEST_TMPDIR}/mutation-applied" ]
+    # run ! overwrites $status/$output: re-run the task before checking them again.
     run ! grep -qE '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
     run ! grep -q '^get secret ' "${TEST_TMPDIR}/kubectl.log"
   done

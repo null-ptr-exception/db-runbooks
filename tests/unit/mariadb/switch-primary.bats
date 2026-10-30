@@ -294,7 +294,7 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$(field '.reason_code')" = "REPLICA_DRAIN_FAILED" ]
   [ "$(field '.fence_released')" = "true" ]
   [ "$(cat "$READ_ONLY_STATE")" = "0" ]
-  run ! grep -q 'patch .*podIndex' "$OP_LOG"
+  run -1 grep -q 'patch .*podIndex' "$OP_LOG"
 }
 
 @test "switch-primary TERM trap restores writes before the CR handoff" {
@@ -316,7 +316,7 @@ field() { jq -r "$1" "${RESULT}"; }
   wait "$task_pid" || rc=$?
   [ "$rc" -eq 143 ]
   [ "$(cat "$READ_ONLY_STATE")" = "0" ]
-  run ! grep -q 'patch .*podIndex' "$OP_LOG"
+  run -1 grep -q 'patch .*podIndex' "$OP_LOG"
 }
 
 @test "switch-primary restores writes when the CR patch fails after drain" {

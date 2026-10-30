@@ -131,8 +131,8 @@ assert_error_reason() {
   [ "$(result_field '.data.dryRun')" = "true" ]
   [ "$(result_field '.data.provisioned')" = "false" ]
   [ "$(result_field '.data.restored')" = "false" ]
-  run ! grep -Fq 'private-target' "${RESULT}"
-  run ! grep -Fq 'private.registry.invalid' "${RESULT}"
+  run -1 grep -Fq 'private-target' "${RESULT}"
+  run -1 grep -Fq 'private.registry.invalid' "${RESULT}"
   [ ! -f "${CAPTURE}" ]
 }
 
@@ -155,7 +155,7 @@ assert_error_reason() {
   assert_public_result_contract
   assert_result_hides_internals
   [ "$(jq -r '.spec.bootstrapFrom.backupRef.name' "${CAPTURE}")" = "mariadb-logical-pick" ]
-  run ! grep -Fq 'mariadb-logical-pick' "${RESULT}"
+  run -1 grep -Fq 'mariadb-logical-pick' "${RESULT}"
 }
 
 @test "logical-restore fails when no Backup exists to restore from" {
@@ -171,7 +171,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason BACKUP_NOT_FOUND
   assert_result_hides_internals
-  run ! grep -Fq 'ghost' "${RESULT}"
+  run -1 grep -Fq 'ghost' "${RESULT}"
 }
 
 @test "logical-restore refuses to overwrite an existing target" {
@@ -180,14 +180,14 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_FAILED
   assert_result_hides_internals
-  run ! grep -Fq 'mariadb-clone' "${RESULT}"
+  run -1 grep -Fq 'mariadb-clone' "${RESULT}"
 }
 
 @test "logical-restore fails fast when the Backup CRD is absent" {
   run_restore DRY_RUN=false CONFIRM=true RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi MOCK_NO_CRD=1
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_CAPABILITY_UNAVAILABLE
-  run ! grep -Eqi 'crd|k8s\.mariadb|mmontes|api.?group' "${RESULT}"
+  run -1 grep -Eqi 'crd|k8s\.mariadb|mmontes|api.?group' "${RESULT}"
 }
 
 @test "logical-restore fails on mixed versions without a source/image override" {
@@ -195,8 +195,8 @@ assert_error_reason() {
   run_restore DRY_RUN=false CONFIRM=true STORAGE_SIZE=1Gi MOCK_BACKUP_EXISTS=1
   [ "$status" -ne 0 ]
   assert_error_reason DATABASE_CONFIGURATION_AMBIGUOUS
-  run ! grep -Fq 'mariadb:10.6' "${RESULT}"
-  run ! grep -Fq 'mariadb:11.4' "${RESULT}"
+  run -1 grep -Fq 'mariadb:10.6' "${RESULT}"
+  run -1 grep -Fq 'mariadb:11.4' "${RESULT}"
 }
 
 @test "logical-restore hides an invalid internal context" {
@@ -205,7 +205,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason INTERNAL_ERROR
   [ "$(result_field '.message')" = "database service is unavailable" ]
-  run ! grep -Fq 'private/context-marker' "${RESULT}"
+  run -1 grep -Fq 'private/context-marker' "${RESULT}"
 }
 
 @test "logical-restore validates the optional public backup name" {
@@ -220,7 +220,7 @@ assert_error_reason() {
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi
   [ "$status" -ne 0 ]
   assert_error_reason INVALID_REQUEST
-  run ! grep -Fq 'private-timeout-marker' "${RESULT}"
+  run -1 grep -Fq 'private-timeout-marker' "${RESULT}"
 
   run_restore DRY_RUN=true WAIT_TIMEOUT=0s \
     RESTORE_IMAGE=mariadb:11.4 STORAGE_SIZE=1Gi
@@ -243,7 +243,7 @@ assert_error_reason() {
   [ "$status" -ne 0 ]
   assert_error_reason RESTORE_FAILED
   assert_result_hides_internals
-  run ! grep -Fq 'private-backend-diagnostic' "${RESULT}"
+  run -1 grep -Fq 'private-backend-diagnostic' "${RESULT}"
 }
 
 @test "logical-restore returns a partial result (not lost) when the Ready wait times out" {

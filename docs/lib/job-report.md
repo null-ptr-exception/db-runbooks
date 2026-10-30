@@ -222,6 +222,9 @@ A new submission has a different ID and creates a separate row. This applies to
 both YAML reporting and native `set-runtime-param` reporting, without new task
 inputs. `max_retry` still controls operation retries; reporting does not retry
 operations itself.
+The same identity handling applies to bundled task YAML and deployment-mounted
+YAML loaded through `AQSH_TASKS_CONFIG` or its includes. Custom scripts must still
+follow the script location, executable permission, and result contracts above.
 
 Before upgrading a reporting deployment, migrate its existing table. The names
 below are examples; substitute the configured database and table:

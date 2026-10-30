@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -503,6 +504,112 @@ class DestinationTests(DestinationFixture):
         self.assertEqual(result.returncode, 0)
         rows = [json.loads(line) for line in (self.root / 'sql').read_text().splitlines()]
         self.assertTrue(all(row['pod'] == 'resolved-1' for row in rows))
+
+
+class ExternalTaskTests(DestinationFixture):
+    """Mounted YAML and scripts use the same entrypoint and reporter as built-ins."""
+    def setUp(self):
+        super().setUp()
+        shutil.copytree(ROOT / 'aqsh-tasks/scripts', self.tasks, dirs_exist_ok=True)
+        external = self.tasks / 'external/maintenance.sh'
+        external.parent.mkdir()
+        external.write_text('\n'.join([
+            '#!/usr/bin/env bash',
+            "printf '%s' \"$TEST_RESULT\" > \"$AQSH_RESULT_FILE\"",
+            'exit "${TEST_EXIT:-0}"', '']))
+        external.chmod(0o755)
+        self.configuration = self.root / 'config'
+        self.configuration.mkdir()
+        (self.configuration / 'external.yaml').write_text("""tasks:
+  external/maintenance:
+    script: external/maintenance.sh
+    job_report:
+      enabled: true
+      name: external-maintenance
+    input:
+      - name: namespace
+        env: DB_NAMESPACE
+        type: string
+      - name: dry_run
+        env: DRY_RUN
+        type: string
+""")
+        # Use a stub executor and the fixture mock kubectl; startup, compilation,
+        # runner, result publication and reporter execute the repository code.
+        executor = self.tasks / 'aqsh'
+        executor.write_text("""#!/usr/bin/env python3
+import json,os
+from pathlib import Path
+doc=json.loads(Path(os.environ['AQSH_TASKS_CONFIG']).read_text())
+Path(os.environ['TEST_COMPILED']).write_text(json.dumps(doc))
+script=doc['tasks']['external/maintenance']['script']
+os.execv(script,[script])
+""")
+        executor.chmod(0o755)
+        self.runtime = self.root / 'runtime'
+        self.runtime.mkdir()
+
+    def mount_config(self, builtins=False):
+        if builtins:
+            source = config.read_document(ROOT / 'aqsh-tasks/task-mariadb.yaml')
+            source['include'].append('external.yaml')
+            shutil.copyfile(ROOT / 'aqsh-tasks/tasks-mariadb.yaml',
+                            self.configuration / 'tasks-mariadb.yaml')
+        else:
+            source = {'include': ['external.yaml']}
+        main = self.configuration / 'tasks.yaml'
+        main.write_text(json.dumps(source))
+        for path in self.configuration.iterdir():
+            path.chmod(0o444)
+        return main
+
+    def execute_external(self, source, status='ERROR', code=7, **extra):
+        public = self.root / 'external-result'
+        payload = json.dumps({'status': status, 'summary': 'external outcome'})
+        env = {**self.env, 'AQSH_TASK_ID': 'external-retry-id',
+               'AQSH_TASKS_CONFIG': str(source), 'AQSH_TASKS_DIR': str(self.tasks),
+               'AQSH_LIB_DIR': str(LIB), 'AQSH_RESULT_FILE': str(public),
+               'TMPDIR': str(self.runtime), 'TEST_COMPILED': str(self.root / 'compiled-config'),
+               'TEST_RESULT': payload, 'TEST_EXIT': str(code),
+               'TEST_REPORT_LENGTHS': '80 80 255 16 191 1', 'DRY_RUN': 'false', **extra}
+        result = subprocess.run(['bash', str(self.tasks / 'aqsh-entrypoint.sh')], env=env,
+                                capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, code, result.stderr)
+        self.assertEqual(public.read_text(), env['TEST_RESULT'])
+        return [json.loads(line) for line in (self.root / 'sql').read_text().splitlines()] if (self.root / 'sql').exists() else []
+
+    def test_readonly_external_yaml_retries_keep_the_same_aqsh_identity(self):
+        source = self.mount_config()
+        for _ in range(3):
+            rows = self.execute_external(source)
+        self.assertEqual(sum('INSERT INTO' in r['query'] for r in rows), 3)
+        finishes = [r['query'] for r in rows if "status='Failed',flag=4" in r['query']]
+        self.assertEqual(len(finishes), 3)
+        identity = "WHERE BINARY task_id=BINARY CONVERT(X'65787465726e616c2d72657472792d6964' USING utf8mb4)"
+        self.assertTrue(all(identity in query for query in finishes))
+        self.assertTrue(all('ON DUPLICATE KEY UPDATE task_id=task_id' in r['query']
+                            for r in rows if 'INSERT INTO' in r['query']))
+
+    def test_builtin_and_external_includes_coexist_and_retry_can_succeed(self):
+        source = self.mount_config(builtins=True)
+        self.execute_external(source)
+        rows = self.execute_external(source, status='SUCCESS', code=0)
+        compiled = json.loads((self.root / 'compiled-config').read_text())
+        self.assertIn('set-runtime-param', compiled['tasks'])
+        self.assertIn('external/maintenance', compiled['tasks'])
+        self.assertNotIn('job_report', compiled['tasks']['external/maintenance'])
+        self.assertEqual(sum('INSERT INTO' in r['query'] for r in rows), 2)
+        self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+        self.assertFalse(any(r['query'].startswith('SET GLOBAL') for r in rows))
+
+    def test_external_dry_run_does_not_report(self):
+        rows = self.execute_external(self.mount_config(), status='SUCCESS', code=0, DRY_RUN='true')
+        self.assertEqual(rows, [])
+
+    def test_external_missing_migration_preserves_original_failure(self):
+        rows = self.execute_external(self.mount_config(), TEST_REPORT_LENGTHS='80 80 255 16')
+        self.assertTrue(rows)
+        self.assertFalse(any('INSERT INTO' in r['query'] for r in rows))
 
 
 class IntegrationTests(DestinationFixture):

@@ -21,7 +21,7 @@ mariadb_sql() {
       [[ "${HANG_STAGE:-}" != insert ]] || sleep 30
       [[ "${FAIL_STAGE:-}" != insert ]] || return 1
       [[ "${FAIL_STAGE:-}" != collision ]] || return 0
-      printf '%s\n' '2026-01-02 03:04:05' ;;
+      if [[ "${FAIL_STAGE:-}" == finished ]]; then printf 'finished\n'; else printf '2026-01-02 03:04:05\n'; fi ;;
     *UPDATE*)
       [[ "${HANG_STAGE:-}" != update ]] || sleep 30
       if [[ "${HANG_STAGE:-}" == orphan_tree ]]; then
@@ -264,3 +264,56 @@ DRIVER
   fi
 }
 
+
+@test "aqsh identity requires a full unique task ID column before any writes" {
+  for lengths in '80 80 255 16' '80 80 255 16 NULL 0' '80 80 255 16 191 0' '80 80 255 16 2 1'; do
+    rm -f "$REPORT_SQL_LOG"
+    run env AQSH_TASK_ID=task-1 LENGTHS="$lengths" bash "$REPORT_DRIVER"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *job-report:*task-result*cleaned* ]]
+    [ "$(wc -l < "$REPORT_SQL_LOG" | tr -d ' ')" -eq 1 ]
+  done
+  grep -q "COLLATION_NAME='ascii_bin'" "$REPORT_SQL_LOG"
+  grep -q 'NON_UNIQUE=0' "$REPORT_SQL_LOG"
+  grep -q 'HAVING COUNT(\*)=1' "$REPORT_SQL_LOG"
+  grep -q 'MAX(COALESCE(SUB_PART,0))=0' "$REPORT_SQL_LOG"
+}
+
+@test "three failed attempts address one stable ID and preserve the first start time" {
+  for ((attempt=1; attempt<=3; attempt++)); do
+    run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' OUTCOME=failure bash "$REPORT_DRIVER"
+    [ "$status" -eq 0 ]
+    [[ "$output" == $'task-result\ncleaned' ]]
+  done
+  [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 3 ]
+  [ "$(grep -c "status='Failed',flag=4" "$REPORT_SQL_LOG")" -eq 3 ]
+  grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$REPORT_SQL_LOG"
+  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag IN (2,4)" "$REPORT_SQL_LOG"
+  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag=2 AND end_time IS NULL" "$REPORT_SQL_LOG"
+  if grep -q 'SET start_time=' "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "retry success and SQL metacharacters use the task ID for completion" {
+  run env AQSH_TASK_ID="task'1" LENGTHS='80 80 255 16 191 1' ACTION=twice bash "$REPORT_DRIVER"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 1 ]
+  [ "$(grep -c "status='Finish',flag=1" "$REPORT_SQL_LOG")" -eq 1 ]
+  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2731' USING utf8mb4) AND flag=2" "$REPORT_SQL_LOG"
+  if grep -q "task'1" "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "retry-aware insert failures preserve task exit code and do not finish a row" {
+  run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' FAIL_STAGE=insert ACTION=exit EXIT_CODE=7 bash "$REPORT_DRIVER"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *job-report:*cleaned* ]]
+  if grep -q "status='Failed',flag=4" "$REPORT_SQL_LOG"; then return 1; fi
+}
+
+@test "already successful task IDs are skipped without warning or another finish" {
+  run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' FAIL_STAGE=finished bash "$REPORT_DRIVER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'task-result\ncleaned' ]]
+  [ "$(grep -c "status='Finish',flag=1" "$REPORT_SQL_LOG")" -eq 0 ]
+  grep -q "flag IN (2,4)" "$REPORT_SQL_LOG"
+  grep -q "IF(flag=1,'finished'" "$REPORT_SQL_LOG"
+}

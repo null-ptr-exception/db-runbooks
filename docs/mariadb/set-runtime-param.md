@@ -31,7 +31,7 @@ during connection exhaustion). AWS RDS analogue: `ModifyDBParameterGroup` for a
 | `mdb` | `MARIADB_NAME` | | (auto) | Which MariaDB CR |
 | `dry_run` | `DRY_RUN` | | `true` | Plan-only by default |
 | `confirm` | `CONFIRM` | | `false` | Must be `true` to apply |
-| `job_name` | `JOB_REPORT_NAME` | | (param name) | Name recorded for this execution. Only used for real `max_connections` requests when reporting is configured; ignored otherwise |
+| `job_name` | `JOB_REPORT_NAME` | | `set-runtime-param/<param>` | Name recorded for any real parameter request when reporting is configured; ignored for listing and dry-run |
 
 ## Allow-list & risk tiers
 
@@ -92,13 +92,16 @@ non-numeric params (`slow_query_log`, `read_only`, …).
 
 ## Optional execution reporting
 
-Real `max_connections` requests can record their outcome in an existing
+Real requests for all supported parameters can record their outcome in an existing
 MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
 `mariadb.env` to enable reporting. Optional task input `job_name` (`JOB_REPORT_NAME`)
-overrides the recorded name; when omitted it defaults to the parameter name
-(`max_connections` on this opt-in path). The recorded host is the actual primary
-pod, regardless of operation scope. Dry-runs, listing, and other parameters do not
-report. Reporting errors leave the original task result unchanged. See
+overrides the recorded name; when omitted it defaults to
+`set-runtime-param/<param>` (for example, `set-runtime-param/max_connections`).
+This replaces the earlier unprefixed default; an explicit `job_name` can preserve
+an existing caller-selected label. The recorded host is the actual primary pod,
+regardless of operation scope. Dry-runs and listing do not report. Reporting
+remains best effort on the target MariaDB: parameters that prevent writes or connectivity may also prevent the report write. Reporting
+errors leave the original task result unchanged. See
 [job reporting](../lib/job-report.md) for the table contract, opt-in API, and
 incomplete-record limitations.
 
@@ -118,7 +121,8 @@ operation. Callers needing no custom label can omit it. The reporting database
 and table remain deployment configuration in `mariadb.env`.
 
 The updated runbook image also enables this path with `job_report` metadata in
-task YAML (`enabled: true`, `name: max_connections`, `when.param: max_connections`).
+task YAML (`enabled: true`, `name: set-runtime-param`, `name_from: param`,
+`require_nonempty: [param]`).
 Its common wrapper owns reporting after the task, automatically reuses the
 existing `job_name` input, and prevents duplicate native reports. The complete
 reporting phase defaults to a 30-second budget, including target resolution;

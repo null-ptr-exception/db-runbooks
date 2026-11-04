@@ -7,7 +7,7 @@
 }
 
 @test "generic reporting preserves operation results, cleanup and timeout bounds" {
-  run python3 "${BATS_TEST_DIRNAME}/test_job_reporting.py" RunnerTests DestinationTests IntegrationTests
+  run python3 "${BATS_TEST_DIRNAME}/test_job_reporting.py" RunnerTests DestinationTests ExternalTaskTests IntegrationTests
   if [ "$status" -ne 0 ]; then printf '%s\n' "$output"; fi
   [ "$status" -eq 0 ]
 }

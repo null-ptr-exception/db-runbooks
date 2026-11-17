@@ -70,22 +70,50 @@ mariadb_account_add_grant() {
 mariadb_account_resolve_profile() {
   local database_privileges="" global_privileges="" protected username_lower
   local admin_default='SELECT,INSERT,UPDATE,DELETE,CREATE,DROP,REFERENCES,INDEX,ALTER,CREATE TEMPORARY TABLES,LOCK TABLES,EXECUTE,CREATE VIEW,SHOW VIEW,CREATE ROUTINE,ALTER ROUTINE,EVENT,TRIGGER,DELETE HISTORY'
-  case "$ACCOUNT_TYPE" in
-    admin)
-      database_privileges="${MARIADB_ACCOUNT_ADMIN_DATABASE_PRIVILEGES_DEFAULT-$admin_default}"
-      global_privileges="${MARIADB_ACCOUNT_ADMIN_GLOBAL_PRIVILEGES_DEFAULT-}"
-      ;;
-    ro)
-      database_privileges="${MARIADB_ACCOUNT_RO_DATABASE_PRIVILEGES_DEFAULT-SELECT}"
-      global_privileges="${MARIADB_ACCOUNT_RO_GLOBAL_PRIVILEGES_DEFAULT-}"
-      ;;
-    monitor)
-      database_privileges="${MARIADB_ACCOUNT_MONITOR_DATABASE_PRIVILEGES_DEFAULT-}"
-      global_privileges="${MARIADB_ACCOUNT_MONITOR_GLOBAL_PRIVILEGES_DEFAULT-PROCESS,BINLOG MONITOR,SLAVE MONITOR}"
-      ;;
-    none) ;;
-    *) mariadb_account_add_error "account_type must be admin, ro, monitor, or none"; return ;;
-  esac
+  if [[ ! "$ACCOUNT_TYPE" =~ ^[a-z][a-z0-9_-]{0,62}$ ]]; then
+    mariadb_account_add_error "account_type must be a profile name of 1-63 lowercase letters, digits, underscores or dashes, starting with a letter"
+    return
+  fi
+  if [[ -n "${MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT+x}" ]]; then
+    # A configured registry is an allowlist, not an overlay of the legacy defaults.
+    # Values are privilege names only; SQL syntax and scopes remain task-owned.
+    if ! printf '%s' "$MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT" | jq -e -s '
+      length == 1 and (.[0] | type == "object" and all(to_entries[];
+        (.key | test("\\A[a-z][a-z0-9_-]{0,62}\\z")) and .key != "none" and
+        (.value | type == "object" and
+          ((keys - ["database_privileges", "global_privileges"]) | length == 0) and
+          all(.[]; type == "array" and
+            all(.[]; type == "string" and test("\\A[A-Za-z_]+( +[A-Za-z_]+)*\\z"))))))
+    ' >/dev/null 2>&1; then
+      mariadb_account_add_error "deployment profile registry must map valid names to database_privileges/global_privileges arrays; none is reserved"
+      return
+    fi
+    if [[ "$ACCOUNT_TYPE" != none ]]; then
+      if ! printf '%s' "$MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT" | jq -e --arg name "$ACCOUNT_TYPE" 'has($name)' >/dev/null; then
+        mariadb_account_add_error "account_type is not defined in the deployment profile registry"
+        return
+      fi
+      database_privileges="$(printf '%s' "$MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT" | jq -r --arg name "$ACCOUNT_TYPE" '.[$name].database_privileges // [] | join(",")')"
+      global_privileges="$(printf '%s' "$MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT" | jq -r --arg name "$ACCOUNT_TYPE" '.[$name].global_privileges // [] | join(",")')"
+    fi
+  else
+    case "$ACCOUNT_TYPE" in
+      admin)
+        database_privileges="${MARIADB_ACCOUNT_ADMIN_DATABASE_PRIVILEGES_DEFAULT-$admin_default}"
+        global_privileges="${MARIADB_ACCOUNT_ADMIN_GLOBAL_PRIVILEGES_DEFAULT-}"
+        ;;
+      ro)
+        database_privileges="${MARIADB_ACCOUNT_RO_DATABASE_PRIVILEGES_DEFAULT-SELECT}"
+        global_privileges="${MARIADB_ACCOUNT_RO_GLOBAL_PRIVILEGES_DEFAULT-}"
+        ;;
+      monitor)
+        database_privileges="${MARIADB_ACCOUNT_MONITOR_DATABASE_PRIVILEGES_DEFAULT-}"
+        global_privileges="${MARIADB_ACCOUNT_MONITOR_GLOBAL_PRIVILEGES_DEFAULT-PROCESS,BINLOG MONITOR,SLAVE MONITOR}"
+        ;;
+      none) ;;
+      *) mariadb_account_add_error "account_type is not defined; configure a deployment profile registry for custom names"; return ;;
+    esac
+  fi
   username_lower="$(printf '%s' "$USERNAME" | tr '[:upper:]' '[:lower:]')"
   protected="root,mysql,mariadb.sys,${MARIADB_ACCOUNT_PROTECTED_USERS_DEFAULT-mariadb,system,sys}"
   protected="$(printf '%s' "$protected" | tr ', ' '\n' | tr '[:upper:]' '[:lower:]')"
@@ -157,8 +185,8 @@ mariadb_account_validate_inputs() {
   fi
   mariadb_account_resolve_profile
   case "$IF_EXISTS" in
-    error | skip | recreate) ;;
-    *) mariadb_account_add_error "if_exists must be error, skip, or recreate" ;;
+    error | skip | recreate | update_grants) ;;
+    *) mariadb_account_add_error "if_exists must be error, skip, recreate, or update_grants" ;;
   esac
   if [[ -n "${ACCOUNT_PRIVILEGES+x}${ALLOW_ADMIN_PRIVILEGES+x}${ALLOW_GLOBAL+x}${ALLOW_EXISTING+x}" ]]; then
     mariadb_account_add_error "legacy privileges/allow_admin_privileges/allow_global/allow_existing inputs are unsupported; use account_type and if_exists"
@@ -168,6 +196,10 @@ mariadb_account_validate_inputs() {
   for bool_var in DRY_RUN CONFIRM; do
     mariadb_account_is_valid_bool "${!bool_var}" || mariadb_account_add_error "${bool_var} must be a boolean-like value"
   done
+
+  # Grants-only updates preserve authentication and expiry. Password inputs from
+  # a shared caller form are unused and must not trigger validation or access.
+  [[ "$IF_EXISTS" != update_grants ]] || return 0
 
   [[ "$PASSWORD_LENGTH" =~ ^[0-9]+$ ]] || mariadb_account_add_error "password_length must be an integer"
   if [[ "$PASSWORD_LENGTH" =~ ^[0-9]+$ && "$PASSWORD_LENGTH" -lt 12 ]]; then
@@ -221,7 +253,10 @@ mariadb_account_build_sql_plan_json() {
   local account
   account="$(mariadb_account_sql_string_literal "$USERNAME")@$(mariadb_account_sql_string_literal "$ACCOUNT_HOST_VALUE")"
   {
-    if [[ "$IF_EXISTS" == recreate && "${ACCOUNT_EXISTS:-true}" == true ]]; then
+    if [[ "$IF_EXISTS" == update_grants ]]; then
+      printf 'SHOW CREATE USER %s\n' "$account"
+      printf 'REVOKE ALL PRIVILEGES, GRANT OPTION FROM %s\n' "$account"
+    elif [[ "$IF_EXISTS" == recreate && "${ACCOUNT_EXISTS:-true}" == true ]]; then
       printf "ALTER USER %s IDENTIFIED BY '<redacted>' %s\n" "$account" "$EXPIRY_SQL"
       printf 'REVOKE ALL PRIVILEGES, GRANT OPTION FROM %s\n' "$account"
     else
@@ -229,6 +264,7 @@ mariadb_account_build_sql_plan_json() {
     fi
     mariadb_account_grant_statements "$account"
     printf 'SHOW GRANTS FOR %s\n' "$account"
+    [[ "$IF_EXISTS" != update_grants ]] || printf 'SHOW CREATE USER %s\n' "$account"
   } | jq -Rsc 'split("\n")[:-1]'
 }
 
@@ -269,8 +305,9 @@ mariadb_account_result_json() {
       target:{context:$context,namespace:$namespace,resource:$resource,mdb:$mdb},
       database:(if $database == "" then null else $database end),
       scope:{kind:$scope,grant:$grant_scope},username:$username,host:$host,
-      account_type:$account_type,if_exists:$if_exists,grants:$grants,privileges:$privileges,password_expire_mode:$password_expire_mode,
-      validity_days:(if $validity_days == "" then null else (try ($validity_days|tonumber) catch $validity_days) end),
+      account_type:$account_type,if_exists:$if_exists,grants:$grants,privileges:$privileges,
+      password_expire_mode:(if $if_exists == "update_grants" then null else $password_expire_mode end),
+      validity_days:(if $if_exists == "update_grants" or $validity_days == "" then null else (try ($validity_days|tonumber) catch $validity_days) end),
       primary:$primary,dry_run:$dry_run,account_exists:$account_exists,
       mutation_applied:$mutation_applied,
       delivery_payload:$delivery_payload,sql_plan:$sql_plan,errors:$errors,candidates:$candidates}'
@@ -281,7 +318,7 @@ mariadb_account_emit_result() {
   [[ -z "$RESULT_FILE" ]] || printf '%s\n' "$json" > "$RESULT_FILE"
   if [[ "$JSON_ONLY" -eq 1 || -z "$RESULT_FILE" ]]; then printf '%s\n' "$json"; else printf '=== CREATE ACCOUNT: %s ===\n%s\n' "$status" "$summary"; fi
   case "$status" in
-    READY | CREATED | RECREATED | SKIPPED) exit 0 ;;
+    READY | CREATED | RECREATED | SKIPPED | GRANTS_UPDATED | UNCHANGED) exit 0 ;;
     BLOCKED) exit 1 ;;
     *) exit 2 ;;
   esac
@@ -335,4 +372,10 @@ mariadb_account_read_grants() {
   # Batch mode otherwise doubles the backslashes in escaped database patterns.
   # Keep the SQL representation intact for exact scope verification.
   mariadb_exec "$1" mariadb -u root -p"$2" -N -B --raw -e "SHOW GRANTS FOR $3" 2>/dev/null
+}
+
+mariadb_account_apply_grant() {
+  # Never let GRANT implicitly recreate a concurrently removed account without
+  # authentication. Each mariadb_sql call uses its own SQL session.
+  mariadb_sql "$1" "$2" "SET SESSION sql_mode = CONCAT_WS(',', NULLIF(@@SESSION.sql_mode, ''), 'NO_AUTO_CREATE_USER'); $3"
 }

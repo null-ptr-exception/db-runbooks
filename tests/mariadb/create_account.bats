@@ -229,3 +229,59 @@ prepare_database() {
   create_sql=$(sql_as_root "SHOW CREATE USER 'expiry_user'@'%'")
   [[ "$create_sql" == *'PASSWORD EXPIRE INTERVAL 7 DAY'* ]]
 }
+
+@test "different accounts select distinct deployment-defined privilege profiles" {
+  prepare_database
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"app_user",account_type:"app_writer",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  writer_result=$(task_result)
+  [ "$(echo "$writer_result" | jq -r '.status')" = CREATED ]
+  writer_password=$(echo "$writer_result" | jq -r '.delivery_payload.password')
+  sql_as_account app_user "$writer_password" app_db 'INSERT INTO allowed_probe VALUES (2); UPDATE allowed_probe SET id=3 WHERE id=2;' >/dev/null
+
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"global_reader",account_type:"report_reader",password_expire_mode:"never",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  reader_result=$(task_result)
+  [ "$(echo "$reader_result" | jq -r '.status')" = CREATED ]
+  reader_password=$(echo "$reader_result" | jq -r '.delivery_payload.password')
+  sql_as_account global_reader "$reader_password" app_db 'SELECT * FROM allowed_probe' >/dev/null
+  run sql_as_account global_reader "$reader_password" app_db 'INSERT INTO allowed_probe VALUES (4)'
+  [ "$status" -ne 0 ]
+  [ "$(echo "$writer_result" | jq -r '.account_type')" = app_writer ]
+  [ "$(echo "$reader_result" | jq -r '.account_type')" = report_reader ]
+}
+
+@test "grants-only profile updates preserve passwords expiry and other accounts" {
+  prepare_database
+  sql_as_root "CREATE USER 'app_user'@'%' IDENTIFIED BY 'OldPass123!' PASSWORD EXPIRE NEVER; CREATE USER 'global_reader'@'%' IDENTIFIED BY 'ReaderPass123!' PASSWORD EXPIRE NEVER; GRANT SELECT, INSERT, UPDATE ON app_db.* TO 'app_user'@'%'; GRANT SELECT ON app_db.* TO 'global_reader'@'%';"
+  before_account=$(sql_as_root "SHOW CREATE USER 'app_user'@'%'")
+  before_other=$(sql_as_root "SHOW CREATE USER 'global_reader'@'%'")
+  before_other_grants=$(sql_as_root "SHOW GRANTS FOR 'global_reader'@'%'")
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"app_user",account_type:"report_reader",if_exists:"update_grants",password_secret_name:"missing-account-secret",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload"
+  result=$(task_result)
+  [ "$(echo "$result" | jq -r '.status')" = GRANTS_UPDATED ]
+  [ "$(echo "$result" | jq -r '.mutation_applied')" = true ]
+  [ "$(echo "$result" | jq -r '.delivery_payload')" = null ]
+  [ "$(echo "$result" | jq -r '.password_expire_mode')" = null ]
+  [ "$(sql_as_root "SHOW CREATE USER 'app_user'@'%'")" = "$before_account" ]
+  [ "$(sql_as_root "SHOW CREATE USER 'global_reader'@'%'")" = "$before_other" ]
+  [ "$(sql_as_root "SHOW GRANTS FOR 'global_reader'@'%'")" = "$before_other_grants" ]
+  sql_as_account app_user 'OldPass123!' app_db 'SELECT * FROM allowed_probe' >/dev/null
+  run sql_as_account app_user 'OldPass123!' app_db 'INSERT INTO allowed_probe VALUES (2)'
+  [ "$status" -ne 0 ]
+  submit_create_account "$payload"
+  [ "$(task_result | jq -r '.status')" = UNCHANGED ]
+  [ "$(task_result | jq -r '.mutation_applied')" = false ]
+  [ "$(sql_as_root "SHOW CREATE USER 'app_user'@'%'")" = "$before_account" ]
+}
+
+@test "grants-only update of a missing account fails without creating credentials" {
+  prepare_database
+  payload=$(jq -nc '{namespace:"mariadb-1",mdb:"mariadb",database:"app_db",username:"app_user",account_type:"report_reader",if_exists:"update_grants",dry_run:"false",confirm:"true"}')
+  submit_create_account "$payload" failed
+  [ "$(task_result | jq -r '.reason_code')" = ACCOUNT_NOT_FOUND ]
+  [ "$(task_result | jq -r '.mutation_applied')" = false ]
+  [ "$(task_result | jq -r '.delivery_payload')" = null ]
+  [ "$(sql_as_root "SELECT COUNT(*) FROM mysql.user WHERE User='app_user' AND Host='%'")" = 0 ]
+}

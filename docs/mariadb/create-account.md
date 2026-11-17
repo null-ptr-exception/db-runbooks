@@ -1,7 +1,7 @@
 # Task: create-account
 
-Create, skip, or recreate a MariaDB account using a deployment-defined privilege
-profile and native password expiry. Password generation and delivery use the
+Create, skip, recreate, or update the grants of a MariaDB account using a
+deployment-defined privilege profile and native password expiry. Password generation and delivery use the
 same contract as MongoDB create-account.
 
 ## Safety defaults
@@ -13,7 +13,7 @@ same contract as MongoDB create-account.
   `ACCOUNT_EXISTS`, `mutation_applied=false`, an empty SQL plan and no credential.
   The requested profile is not verified or reconciled when skipped.
 - ERROR exits 2 and BLOCKED exits 1, after publishing structured JSON. Successful
-  READY/CREATED/RECREATED/SKIPPED results exit 0. `--strict-exit` remains a no-op
+  READY/CREATED/RECREATED/SKIPPED/GRANTS_UPDATED/UNCHANGED results exit 0. `--strict-exit` remains a no-op
   compatibility flag. An execution-query HTTP 200 only means the query succeeded;
   check execution state and the structured task result for operation outcome.
 - Dry-run validates the request and deployment policy, but does not contact
@@ -21,7 +21,8 @@ same contract as MongoDB create-account.
   Its plan contains `<redacted>` and `delivery_payload=null`. Live target,
   account-existence, Secret access, server-version and encryption checks occur
   only during confirmed execution.
-- `mutation_applied` becomes true after a successful CREATE/ALTER USER. A later
+- `mutation_applied` becomes true after an acknowledged CREATE/ALTER USER, or a
+  successful REVOKE in grants-only mode. A later
   revoke, grant, or verification failure remains an ERROR with partial mutation
   explicitly reported. Its `delivery_payload` retains the prepared credential in
   the selected mode: one-time plaintext, encrypted payload, or Secret reference.
@@ -41,10 +42,14 @@ The task is served by `aqsh-mariadb`; submission returns 202 and an execution ID
 
 ## Account profiles and scopes
 
-Callers select `account_type=admin|ro|monitor|none`, not arbitrary privileges or
-wildcard scopes. `admin` is an allowed username; it does not itself grant any
-privileges. Root, mysql, and mariadb.sys remain protected, together with the
-additional deployment protection list.
+Each account selects a deployment-defined profile name through `account_type`.
+Names contain 1–63 lowercase letters, digits, underscores or dashes and start
+with a letter. Callers cannot supply privilege lists, raw SQL or wildcard scopes.
+The username and profile name are independent: an account named admin does not
+itself gain administrative privileges. Root, mysql and mariadb.sys remain
+protected, together with the additional deployment protection list.
+
+When no custom registry is configured, these legacy profiles remain available:
 
 | Profile | Default database privileges | Default global privileges |
 |---|---|---|
@@ -68,23 +73,44 @@ For mixed scopes the compatibility `scope` field has `kind=mixed` and an empty
 
 ## Deployment policy
 
-Set policy in the mounted `/etc/aqsh/config/mariadb.env`; these settings are not
-public task inputs. Each profile except the fixed `none` profile has separate
-`MARIADB_ACCOUNT_<ADMIN|RO|MONITOR>_DATABASE_PRIVILEGES_DEFAULT` and
-`MARIADB_ACCOUNT_<ADMIN|RO|MONITOR>_GLOBAL_PRIVILEGES_DEFAULT` comma-separated
-lists. Unset uses the defaults above; an explicitly empty string means no grants
-at that level. An empty profile creates a login without data privileges (USAGE).
-
-For example, a deployment can allow a fixed global read-only profile:
+Set policy in the mounted `/etc/aqsh/config/mariadb.env`. The registry is internal
+configuration, not a task input:
 
 ```bash
-MARIADB_ACCOUNT_RO_DATABASE_PRIVILEGES_DEFAULT=''
-MARIADB_ACCOUNT_RO_GLOBAL_PRIVILEGES_DEFAULT='SELECT'
+MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{
+  "ro": {"database_privileges": ["SELECT"]},
+  "app_writer": {"database_privileges": ["SELECT", "INSERT", "UPDATE"]},
+  "report_reader": {"database_privileges": ["SELECT"]},
+  "ops_monitor": {"global_privileges": ["PROCESS", "BINLOG MONITOR", "SLAVE MONITOR"]}
+}'
 ```
 
-To permit global administrative writes, set ADMIN database privileges empty and
-explicitly enumerate the permitted ADMIN global privileges. Global SELECT also
-includes system schemas, so it must be a deliberate deployment policy.
+For example, account_a can select app_writer on orders while account_b selects
+report_reader on reports. Adding a new profile does not change existing accounts;
+only an explicit create, recreate or grants-only update applies its policy.
+
+A configured registry is an authoritative allowlist, not an overlay. Include all
+permitted names, including `ro` if callers rely on the default input. Legacy
+ADMIN/RO/MONITOR privilege variables are ignored when a registry is configured.
+An undefined name, invalid name or malformed registry fails with INVALID_INPUT
+before cluster access. An explicitly empty registry `{}` permits only `none`;
+an empty string is invalid and does not fall back to defaults.
+
+Each entry accepts only `database_privileges` and `global_privileges` arrays of
+privilege names; omitted arrays mean no grants at that level. Empty entries are
+valid zero-grant profiles. `none` is reserved, always has native USAGE only, and
+cannot be redefined in the registry. Profile names are case-sensitive. Privilege
+names are normalized to uppercase.
+
+With the registry **unset**, the existing
+`MARIADB_ACCOUNT_<ADMIN|RO|MONITOR>_DATABASE_PRIVILEGES_DEFAULT` and
+`MARIADB_ACCOUNT_<ADMIN|RO|MONITOR>_GLOBAL_PRIVILEGES_DEFAULT` comma-separated
+lists retain their behavior. Unset variables use the legacy defaults above;
+explicitly empty lists disable grants at that level.
+
+Global administrative privileges remain explicit deployment policy. A global
+SELECT profile includes system schemas; a database-scoped profile requires the
+caller to select a database and never silently grants access to every schema.
 
 Only fixed, recognized privilege names are accepted; environment values are never
 raw SQL. Global-only privileges at database scope and SQL injection text are
@@ -105,19 +131,48 @@ cannot be removed. Matching is case-insensitive.
 | `skip` (default) | No credential or grant changes, no password generation/delivery |
 | `error` | ERROR / ACCOUNT_ALREADY_EXISTS, exit 2 |
 | `recreate` | Check existing grants, then ALTER USER, REVOKE ALL PRIVILEGES and GRANT OPTION, apply profile and verify |
+| `update_grants` | Existing accounts only; replace direct grants and preserve authentication/expiry, or return UNCHANGED if already matched |
 
-All three modes create a missing account. Recreate replaces direct grants and
-credentials; it is not DROP USER plus CREATE USER. MariaDB role assignments are
+The error, skip and recreate modes create a missing account. The update_grants
+mode returns ERROR / ACCOUNT_NOT_FOUND, exit 2, for a missing account. Recreate
+replaces direct grants and credentials; it is not DROP USER plus CREATE USER. MariaDB role assignments are
 not removed by REVOKE ALL. Existing role, PROXY, or unrecognized grant statements
 return BLOCKED / `UNSUPPORTED_EXISTING_GRANTS`, exit 1, before reading or generating
 an account password or changing credentials/grants. Failure to read existing
 grants returns ERROR / `SQL_VERIFY_FAILED`, exit 2, with no mutation. Resolve
-non-revocable grants separately before requesting recreation. Revoke/grant
-failures after credential changes can leave partial state; error results retain
+non-revocable grants separately before requesting recreation or a grants-only
+update. Revoke/grant failures after credential changes can leave partial state;
+error results retain
 the selected password delivery payload for recovery.
 Concurrent CREATE races return ERROR; a recovery payload does not prove that its
-password was applied. Serialize recreations of the same account at the caller;
-this task does not provide a distributed account lock.
+password was applied. Serialize all changes to the same user/host account at the
+caller; this task does not provide a distributed account lock.
+
+### Update grants while preserving credentials
+
+`if_exists=update_grants` reconciles the selected profile by replacing **all direct
+grants**, including grants on other databases. It does not merge privileges into
+the old set. It never issues CREATE/ALTER/DROP USER or authentication clauses,
+and ignores password generation, Secret, delivery and expiry inputs. The result
+has `delivery_payload=null`, `password_expire_mode=null` and `validity_days=null`.
+
+The task validates existing grants and server privilege support before mutation.
+If effective grants already match, it returns UNCHANGED /
+ACCOUNT_GRANTS_UNCHANGED, exit 0, with `mutation_applied=false` and an empty plan.
+Otherwise it reads SHOW CREATE USER, revokes direct privileges, applies the
+profile, then verifies both grants and the unchanged account definition. Success
+returns GRANTS_UPDATED / ACCOUNT_GRANTS_UPDATED, exit 0. If the account definition
+changes during the operation, it returns ERROR / ACCOUNT_STATE_CHANGED rather
+than claiming credentials were preserved. Account definitions and password hashes
+are never included in results.
+
+Each GRANT session enables NO_AUTO_CREATE_USER, so a concurrently removed target
+cannot be implicitly recreated without authentication. See the
+[MariaDB GRANT contract](https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/grant#implicit-account-creation).
+Grant replacement is not transactional and can temporarily remove access. A
+failed REVOKE acknowledgement leaves the grant state uncertain; later errors
+can leave a partial profile. `mutation_applied` records acknowledged mutations,
+not rollback or atomicity. Grants-only errors never return password material.
 
 ## Password generation
 
@@ -230,8 +285,8 @@ before it can change the password.
 | database | profile-dependent | empty | Target of database-scoped profile grants |
 | username | yes | — | MariaDB username |
 | host | no | % | MariaDB account host |
-| account_type | no | ro | admin, ro, monitor, none |
-| if_exists | no | skip | error, skip, recreate |
+| account_type | no | ro | Named deployment profile; legacy admin/ro/monitor/none when registry is unset |
+| if_exists | no | skip | error, skip, recreate, update_grants |
 | password_length | no | 24 | Generated length |
 | password_special_chars | no | !@#%^*_-+=. | Generated special-character set |
 | password_special_max | no | 4 | Generated special-character maximum |
@@ -274,6 +329,24 @@ Create or recreate a non-interactive monitoring account using an existing Secret
 }
 ```
 
+Update only the grants of an existing account without changing its password:
+
+```json
+{
+  "namespace": "mariadb-1",
+  "database": "orders",
+  "username": "account_a",
+  "account_type": "app_writer",
+  "if_exists": "update_grants",
+  "dry_run": "false",
+  "confirm": "true"
+}
+```
+
+The named profile must exist in the deployment registry. Repeating the same
+request returns UNCHANGED once the profile is applied. For an existing account,
+use this mode instead of recreate when its credential must remain unchanged.
+
 ## Breaking-change migration
 
 | Previous contract | New contract |
@@ -292,5 +365,5 @@ rejected with INVALID_INPUT. Removed fields are not declared in AQSH's schema;
 callers must migrate and must not rely on unknown JSON fields being rejected by
 the gateway. API input validation behavior belongs to the deployed AQSH version.
 
-Capture generated credentials from successful delivery, or choose encrypted
-payload delivery. No task-owned password Secret is created.
+For creates and recreations, capture generated credentials from delivery, or
+choose encrypted payload delivery. Grants-only updates have no password payload. No task-owned password Secret is created.

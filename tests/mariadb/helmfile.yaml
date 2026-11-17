@@ -162,6 +162,56 @@ releases:
               JOB_REPORT_TABLE=executions
               SECRETS_PROTECTED_NAMES_DEFAULT=mariadb,minio
               SECRETS_AUTODETECT_DEFAULT=false
+              # Create-account profiles used by the API regression cases.
+              MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{
+                "admin": {
+                  "database_privileges": [
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE",
+                    "DELETE",
+                    "CREATE",
+                    "DROP",
+                    "REFERENCES",
+                    "INDEX",
+                    "ALTER",
+                    "CREATE TEMPORARY TABLES",
+                    "LOCK TABLES",
+                    "EXECUTE",
+                    "CREATE VIEW",
+                    "SHOW VIEW",
+                    "CREATE ROUTINE",
+                    "ALTER ROUTINE",
+                    "EVENT",
+                    "TRIGGER",
+                    "DELETE HISTORY"
+                  ]
+                },
+                "ro": {
+                  "database_privileges": [
+                    "SELECT"
+                  ]
+                },
+                "monitor": {
+                  "global_privileges": [
+                    "PROCESS",
+                    "BINLOG MONITOR",
+                    "SLAVE MONITOR"
+                  ]
+                },
+                "app_writer": {
+                  "database_privileges": [
+                    "SELECT",
+                    "INSERT",
+                    "UPDATE"
+                  ]
+                },
+                "report_reader": {
+                  "database_privileges": [
+                    "SELECT"
+                  ]
+                }
+              }'
               # Cross-cluster replication. Necessarily per-cluster: each AQSH's
               # peer is the OTHER cluster, so this cannot live in the shared
               # aqsh-tasks/config/mariadb.env template.

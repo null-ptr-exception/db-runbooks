@@ -37,8 +37,8 @@ Usage:
 
 Scope:
   --database <database>            Required for database-scoped profile grants.
-  --account-type <type>            admin, ro (default), monitor, or none.
-  --if-exists <mode>               error, skip (default), or recreate.
+  --account-type <profile>         Deployment profile name. Default: ro.
+  --if-exists <mode>               error, skip (default), recreate, or update_grants.
   --host <host>                    MariaDB account host. Default: %
 
 Password delivery:
@@ -213,6 +213,9 @@ if [[ "$ACCOUNT_EXISTS" == true ]]; then
       mariadb_account_emit_result "$(mariadb_account_result_json SKIPPED ACCOUNT_EXISTS "$SUMMARY" "$CURRENT_PRIMARY" true '[]')" SKIPPED "$SUMMARY"
       ;;
   esac
+elif [[ "$IF_EXISTS" == update_grants ]]; then
+  SUMMARY="Grants-only updates require an existing account"
+  mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_NOT_FOUND "$SUMMARY" "$CURRENT_PRIMARY" false '[]')" ERROR "$SUMMARY"
 fi
 
 SQL_PLAN_JSON="$(mariadb_account_build_sql_plan_json)"
@@ -225,7 +228,7 @@ if [[ "$ACCOUNT_EXISTS" == true ]]; then
     mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
   fi
   if ! mariadb_account_recreate_safe "$EXISTING_GRANTS"; then
-    SUMMARY="Role, PROXY or unrecognized grants prevent recreation; account was not changed"
+    SUMMARY="Role, PROXY or unrecognized grants prevent grant replacement; account was not changed"
     mariadb_account_emit_result "$(mariadb_account_result_json BLOCKED UNSUPPORTED_EXISTING_GRANTS "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" BLOCKED "$SUMMARY"
   fi
 fi
@@ -242,64 +245,82 @@ if [[ "${#ERRORS[@]}" -gt 0 ]]; then
   mariadb_account_emit_result "$(mariadb_account_result_json ERROR UNSUPPORTED_PRIVILEGE "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" "$(mariadb_account_errors_json)")" ERROR "$SUMMARY"
 fi
 
-EFFECTIVE_DELIVERY_MODE="$PASSWORD_DELIVERY_MODE"
-if [[ -n "$PASSWORD_SECRET_NAME" ]]; then
-  export K8S_NAMESPACE="$NAMESPACE"
-  if ! mariadb_account_password_source_allowed; then
-    SUMMARY="Account password Secret/key is not permitted by deployment policy"
-    mariadb_account_emit_result "$(mariadb_account_result_json ERROR PROTECTED_SECRET "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+DELIVERY_PAYLOAD=null
+if [[ "$IF_EXISTS" == update_grants ]]; then
+  if mariadb_account_grants_match "$EXISTING_GRANTS"; then
+    SUMMARY="Account grants already match the selected profile; account was not changed"
+    mariadb_account_emit_result "$(mariadb_account_result_json UNCHANGED ACCOUNT_GRANTS_UNCHANGED "$SUMMARY" "$CURRENT_PRIMARY" true '[]')" UNCHANGED "$SUMMARY"
   fi
-  if ! PASSWORD_VALUE="$(mariadb_account_read_secret_password)" || [[ -z "$PASSWORD_VALUE" ]]; then
-    SUMMARY="Cannot read password from the caller-provided Secret"
-    mariadb_account_emit_result "$(mariadb_account_result_json ERROR PASSWORD_SECRET_UNAVAILABLE "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+  if ! ACCOUNT_BEFORE="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SHOW CREATE USER ${ACCOUNT_REF}")" || [[ -z "$ACCOUNT_BEFORE" ]]; then
+    SUMMARY="Cannot inspect account authentication and expiry; account was not changed"
+    mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
   fi
-  EFFECTIVE_DELIVERY_MODE="caller_provided_secret"
-else
-  if ! PASSWORD_VALUE="$(generate_password 2>/dev/null)"; then
-    SUMMARY="Failed to generate a password from the requested policy"
-    mariadb_account_emit_result "$(mariadb_account_result_json ERROR PASSWORD_GENERATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
-  fi
-fi
-
-case "$EFFECTIVE_DELIVERY_MODE" in
-  caller_provided_secret)
-    DELIVERY_PAYLOAD="$(jq -nc --arg secret_name "$PASSWORD_SECRET_NAME" --arg secret_key "$PASSWORD_SECRET_KEY" '{mode:"caller_provided_secret",secret_name:$secret_name,secret_key:$secret_key}')"
-    ;;
-  one_time_plaintext)
-    DELIVERY_PAYLOAD="$(jq -nc --arg password "$PASSWORD_VALUE" '{mode:"one_time_plaintext",password:$password}')"
-    ;;
-  encrypted_payload)
-    if ! DELIVERY_PAYLOAD="$(mariadb_account_encrypt_password_payload "$PASSWORD_VALUE" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null)"; then
-      SUMMARY="Failed to encrypt password payload with the recipient public key"
-      mariadb_account_emit_result "$(mariadb_account_result_json ERROR DELIVERY_ENCRYPT_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
-    fi
-    ;;
-esac
-
-PASSWORD_LITERAL="$(mariadb_account_sql_string_literal "$PASSWORD_VALUE")"
-if [[ "$ACCOUNT_EXISTS" == true ]]; then
-  ACCOUNT_SQL="ALTER USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
   REVOKE_SQL="REVOKE ALL PRIVILEGES, GRANT OPTION FROM ${ACCOUNT_REF};"
 else
-  ACCOUNT_SQL="CREATE USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
-  REVOKE_SQL=""
-fi
+  EFFECTIVE_DELIVERY_MODE="$PASSWORD_DELIVERY_MODE"
+  if [[ -n "$PASSWORD_SECRET_NAME" ]]; then
+    export K8S_NAMESPACE="$NAMESPACE"
+    if ! mariadb_account_password_source_allowed; then
+      SUMMARY="Account password Secret/key is not permitted by deployment policy"
+      mariadb_account_emit_result "$(mariadb_account_result_json ERROR PROTECTED_SECRET "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+    fi
+    if ! PASSWORD_VALUE="$(mariadb_account_read_secret_password)" || [[ -z "$PASSWORD_VALUE" ]]; then
+      SUMMARY="Cannot read password from the caller-provided Secret"
+      mariadb_account_emit_result "$(mariadb_account_result_json ERROR PASSWORD_SECRET_UNAVAILABLE "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+    fi
+    EFFECTIVE_DELIVERY_MODE="caller_provided_secret"
+  else
+    if ! PASSWORD_VALUE="$(generate_password 2>/dev/null)"; then
+      SUMMARY="Failed to generate a password from the requested policy"
+      mariadb_account_emit_result "$(mariadb_account_result_json ERROR PASSWORD_GENERATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+    fi
+  fi
 
-if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_SQL" >/dev/null; then
-  # A client/transport error cannot prove the server did not apply CREATE/ALTER.
-  SUMMARY="Failed to create or recreate MariaDB account; credential state may be uncertain"
-  mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_MUTATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" '[]' "$DELIVERY_PAYLOAD")" ERROR "$SUMMARY"
+  case "$EFFECTIVE_DELIVERY_MODE" in
+    caller_provided_secret)
+      DELIVERY_PAYLOAD="$(jq -nc --arg secret_name "$PASSWORD_SECRET_NAME" --arg secret_key "$PASSWORD_SECRET_KEY" '{mode:"caller_provided_secret",secret_name:$secret_name,secret_key:$secret_key}')"
+      ;;
+    one_time_plaintext)
+      DELIVERY_PAYLOAD="$(jq -nc --arg password "$PASSWORD_VALUE" '{mode:"one_time_plaintext",password:$password}')"
+      ;;
+    encrypted_payload)
+      if ! DELIVERY_PAYLOAD="$(mariadb_account_encrypt_password_payload "$PASSWORD_VALUE" "$RECIPIENT_PGP_PUBKEY" 2>/dev/null)"; then
+        SUMMARY="Failed to encrypt password payload with the recipient public key"
+        mariadb_account_emit_result "$(mariadb_account_result_json ERROR DELIVERY_ENCRYPT_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+      fi
+      ;;
+  esac
+
+  PASSWORD_LITERAL="$(mariadb_account_sql_string_literal "$PASSWORD_VALUE")"
+  if [[ "$ACCOUNT_EXISTS" == true ]]; then
+    ACCOUNT_SQL="ALTER USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
+    REVOKE_SQL="REVOKE ALL PRIVILEGES, GRANT OPTION FROM ${ACCOUNT_REF};"
+  else
+    ACCOUNT_SQL="CREATE USER ${ACCOUNT_REF} IDENTIFIED BY ${PASSWORD_LITERAL} ${EXPIRY_SQL};"
+    REVOKE_SQL=""
+  fi
+
+  if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$ACCOUNT_SQL" >/dev/null; then
+    # A client/transport error cannot prove the server did not apply CREATE/ALTER.
+    SUMMARY="Failed to create or recreate MariaDB account; credential state may be uncertain"
+    mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_MUTATION_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" '[]' "$DELIVERY_PAYLOAD")" ERROR "$SUMMARY"
+  fi
+  # shellcheck disable=SC2034  # Consumed by mariadb-account.sh.
+  MUTATION_APPLIED=true
 fi
-# shellcheck disable=SC2034  # Consumed by mariadb-account.sh.
-MUTATION_APPLIED=true
 if [[ -n "$REVOKE_SQL" ]] && ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "$REVOKE_SQL" >/dev/null; then
-  SUMMARY="Account credential changed but revoking the prior grants failed"
+  if [[ "$IF_EXISTS" == update_grants ]]; then SUMMARY="Revoking the prior grants failed; grant state may be uncertain"
+  else SUMMARY="Account credential changed but revoking the prior grants failed"; fi
   mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi
+# A successful REVOKE is a mutation even when credentials are preserved.
+# shellcheck disable=SC2034  # Consumed by mariadb-account.sh.
+[[ "$IF_EXISTS" != update_grants ]] || MUTATION_APPLIED=true
 while IFS= read -r GRANT_SQL; do
   [[ -n "$GRANT_SQL" ]] || continue
-  if ! mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "${GRANT_SQL};" >/dev/null; then
-    SUMMARY="Account credential changed but applying the requested grant failed"
+  if ! mariadb_account_apply_grant "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "${GRANT_SQL};" >/dev/null; then
+    if [[ "$IF_EXISTS" == update_grants ]]; then SUMMARY="Prior grants were revoked but applying the selected profile failed"
+    else SUMMARY="Account credential changed but applying the requested grant failed"; fi
     mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
   fi
 done < <(mariadb_account_grant_statements "$ACCOUNT_REF")
@@ -312,7 +333,17 @@ if ! mariadb_account_grants_match "$SHOW_GRANTS"; then
   mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
 fi
 
-if [[ "$ACCOUNT_EXISTS" == true ]]; then STATUS="RECREATED"; REASON="ACCOUNT_RECREATED"; SUMMARY="MariaDB account recreated and grants replaced and verified"
+if [[ "$IF_EXISTS" == update_grants ]]; then
+  if ! ACCOUNT_AFTER="$(mariadb_sql "$CURRENT_PRIMARY" "$ROOT_PASSWORD" "SHOW CREATE USER ${ACCOUNT_REF}")" || [[ -z "$ACCOUNT_AFTER" ]]; then
+    SUMMARY="Grants were changed but account authentication and expiry verification failed"
+    mariadb_account_emit_result "$(mariadb_account_result_json ERROR SQL_VERIFY_FAILED "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+  fi
+  if [[ "$ACCOUNT_AFTER" != "$ACCOUNT_BEFORE" ]]; then
+    SUMMARY="Account authentication or expiry changed during the grants-only update"
+    mariadb_account_emit_result "$(mariadb_account_result_json ERROR ACCOUNT_STATE_CHANGED "$SUMMARY" "$CURRENT_PRIMARY" true "$SQL_PLAN_JSON")" ERROR "$SUMMARY"
+  fi
+  STATUS="GRANTS_UPDATED"; REASON="ACCOUNT_GRANTS_UPDATED"; SUMMARY="Account grants replaced and verified; authentication and expiry preserved"
+elif [[ "$ACCOUNT_EXISTS" == true ]]; then STATUS="RECREATED"; REASON="ACCOUNT_RECREATED"; SUMMARY="MariaDB account recreated and grants replaced and verified"
 else STATUS="CREATED"; REASON="ACCOUNT_CREATED"; SUMMARY="MariaDB account created and grants verified"
 fi
 mariadb_account_emit_result "$(mariadb_account_result_json "$STATUS" "$REASON" "$SUMMARY" "$CURRENT_PRIMARY" "$ACCOUNT_EXISTS" "$SQL_PLAN_JSON" '[]' "$DELIVERY_PAYLOAD")" "$STATUS" "$SUMMARY"

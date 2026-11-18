@@ -123,3 +123,22 @@ PY
   [ "$status" -eq 0 ]
   [ "$output" = $'namespace\nresource\nmdb\ncontainer\ndatabase\nusername\nhost\naccount_type\nif_exists\npassword_length\npassword_special_chars\npassword_special_max\npassword_delivery_mode\nrecipient_pgp_pubkey\npassword_secret_name\npassword_secret_key\npassword_expire_mode\nvalidity_days\ndry_run\nconfirm' ]
 }
+
+@test "create-account schema accepts named profiles and grants-only updates" {
+  run python3 - <<'PY'
+import os
+import re
+import yaml
+with open(os.environ['TASKS_FILE']) as f:
+    task = yaml.safe_load(f)['tasks']['create-account']
+inputs = {item['name']: item for item in task['input']}
+profile = inputs['account_type']['pattern']
+for name in ['ro', 'app_writer', 'report-reader', 'profile_2']:
+    assert re.fullmatch(profile, name), name
+for name in ['', '../admin', 'UPPER', 'raw;sql', 'a' * 64]:
+    assert not re.fullmatch(profile, name), name
+assert re.fullmatch(inputs['if_exists']['pattern'], 'update_grants')
+assert 'profiles' not in inputs and 'privileges' not in inputs
+PY
+  [ "$status" -eq 0 ]
+}

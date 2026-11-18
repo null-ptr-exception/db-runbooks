@@ -121,7 +121,7 @@ names) with a Bearer token + JSON body; poll `GET /executions/<id>`.
 | `status` | Read-only operator/StatefulSet/pod/SQL status summary | [docs/mariadb/status.md](docs/mariadb/status.md) |
 | `sessions` | Exact-pod session diagnostics and gated query/connection termination | [docs/mariadb/sessions.md](docs/mariadb/sessions.md) |
 | `sanity-check` | Operator → service/pods → SQL → replication → semi-sync health check | [docs/mariadb/sanity-check.md](docs/mariadb/sanity-check.md) |
-| `create-account` | Create/skip/recreate an account with deployment-defined admin, ro, monitor, or none profiles | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
+| `create-account` | Create accounts or update grants using named deployment-defined profiles | [docs/mariadb/create-account.md](docs/mariadb/create-account.md) |
 | `blue-green/status`, `/create`, `/switchover`, `/delete` | Blue/green deployment lifecycle on top of mariadb-operator | [docs/mariadb/blue-green.md](docs/mariadb/blue-green.md) |
 | `backup` | Backup to MinIO | — |
 
@@ -252,9 +252,10 @@ jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
 
 ### Iterating
 
-Each suite's `setup_suite.bash` rebuilds and pushes the aqsh image to the
-local registry (`localhost:5005/db-runbooks:latest`) on every run, so editing
-a script or task YAML just means re-running `bats tests/<db>/`.
+Each suite's `setup_suite.bash` rebuilds the aqsh image and loads it directly
+into both Kind clusters as `localhost:5005/db-runbooks:latest` on every run,
+so editing a script or task YAML just means re-running `bats tests/<db>/`.
+These test images omit provenance attestations so Kind can import them.
 
 ---
 

@@ -12,7 +12,7 @@ setup() {
   export SCRIPT="${BATS_TEST_DIRNAME}/../../../aqsh-tasks/scripts/mariadb/create-account.sh"
   export MARIADB_NAME=mariadb
   export EXPECTED_DATABASE=app_db
-  unset ACCOUNT_PRIVILEGES ALLOW_EXISTING ALLOW_ADMIN_PRIVILEGES ALLOW_GLOBAL
+  unset ACCOUNT_PRIVILEGES ALLOW_EXISTING ALLOW_ADMIN_PRIVILEGES ALLOW_GLOBAL MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT
   export SECRETS_AUTODETECT_DEFAULT=false
   export _LOG_CURRENT_LEVEL=4
   mkdir -p "${TEST_TMPDIR}/bin"
@@ -84,6 +84,13 @@ if [[ "$cmd" == exec ]]; then
     printf 'root-pass'; exit 0
   fi
   query="${command[$((${#command[@]} - 1))]}"
+  guarded_grant=false
+  if [[ "$query" == "SET SESSION sql_mode = "* ]]; then
+    [[ "$query" == *NO_AUTO_CREATE_USER* ]] || exit 1
+    guarded_grant=true
+    printf '%s\n' "${query%%;*};" >> "${TEST_TMPDIR}/sql.log"
+    query="${query#*; }"
+  fi
   printf '%s\n' "$query" >> "${TEST_TMPDIR}/sql.log"
   case "$query" in
     SELECT\ COUNT\(\*\)*)
@@ -133,8 +140,29 @@ PRIVILEGES
       [[ "${SQL_FAIL_MUTATION:-0}" != 1 ]] || exit 1
       touch "${TEST_TMPDIR}/mutation-applied"
       ;;
-    REVOKE*) [[ "${SQL_FAIL_REVOKE:-0}" != 1 ]] || exit 1 ;;
-    GRANT*) [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1 ;;
+    REVOKE*)
+      [[ "${SQL_FAIL_REVOKE:-0}" != 1 ]] || exit 1
+      touch "${TEST_TMPDIR}/mutation-applied"
+      ;;
+    GRANT*)
+      if [[ "${ACCOUNT_DISAPPEARS_BEFORE_GRANT:-0}" == 1 ]]; then
+        [[ "$guarded_grant" != true ]] || exit 1
+        touch "${TEST_TMPDIR}/implicit-account-created"
+      fi
+      [[ "${SQL_FAIL_GRANT:-0}" != 1 ]] || exit 1
+      ;;
+    SHOW\ CREATE\ USER*)
+      if [[ -e "${TEST_TMPDIR}/mutation-applied" ]]; then
+        [[ "${SQL_FAIL_DEFINITION_AFTER:-0}" != 1 ]] || exit 1
+        if [[ "${ACCOUNT_DEFINITION_CHANGED:-0}" == 1 ]]; then
+          printf "CREATE USER 'svc'@'%%' IDENTIFIED BY PASSWORD 'changed-private-hash'\n"
+          exit 0
+        fi
+      else
+        [[ "${SQL_FAIL_DEFINITION_BEFORE:-0}" != 1 ]] || exit 1
+      fi
+      printf "CREATE USER 'svc'@'%%' IDENTIFIED BY PASSWORD 'existing-private-hash' PASSWORD EXPIRE NEVER\n"
+      ;;
     SHOW\ GRANTS*)
       if [[ -e "${TEST_TMPDIR}/mutation-applied" ]]; then
         [[ "${SQL_FAIL_VERIFY:-0}" != 1 ]] || exit 1
@@ -181,6 +209,13 @@ ACTUAL_ARGS=(
 
 # Print one jq path from the task result captured in $output.
 json_field() { printf '%s' "$output" | jq -r "$1"; }
+
+# Preserve the captured task JSON while requiring grep's explicit no-match exit.
+assert_log_excludes() {
+  local grep_status=0
+  grep -qE "$1" "$2" || grep_status=$?
+  [[ "$grep_status" -eq 1 ]]
+}
 
 @test "dry-run defaults to a database read-only profile without credentials or cluster calls" {
   run "$SCRIPT" --namespace mariadb-1 --database app_db --username svc --json
@@ -696,4 +731,224 @@ STUB
   [ "$(json_field '.status')" = CREATED ]
   [ "$(json_field '.grants[0].scope')" = '`app\_db`.*' ]
   grep -Fxq raw-show-grants "${TEST_TMPDIR}/client-flags.log"
+}
+
+@test "different accounts can choose independent deployment-defined profiles" {
+  export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{"app_writer":{"database_privileges":["SELECT","INSERT","UPDATE"]},"report_reader":{"database_privileges":["SELECT"]}}'
+  run "$SCRIPT" --namespace mariadb-1 --database app_db --username account_a --account-type app_writer --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.account_type')" = app_writer ]
+  [ "$(json_field '.username')" = account_a ]
+  [ "$(json_field '.privileges | join(",")')" = SELECT,INSERT,UPDATE ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  run "$SCRIPT" --namespace mariadb-1 --database reports --username account_b --account-type report_reader --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.username')" = account_b ]
+  [ "$(json_field '.privileges | join(",")')" = SELECT ]
+  [ "$(json_field '.grants[0].scope')" = '`reports`.*' ]
+  [ ! -e "${TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "custom profiles apply and verify database and global grants" {
+  export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{"app_ops":{"database_privileges":["select","INSERT"],"global_privileges":["PROCESS"]}}'
+  export EXPECTED_GRANTS=$'GRANT PROCESS ON *.* TO \'svc\'@\'%\'\nGRANT INSERT, SELECT ON `app\\_db`.* TO \'svc\'@\'%\''
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --account-type app_ops
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = CREATED ]
+  [ "$(json_field '.scope.kind')" = mixed ]
+  grep -Fq 'GRANT SELECT, INSERT ON `app\_db`.*' "${TEST_TMPDIR}/sql.log"
+  grep -Fq 'GRANT PROCESS ON *.*' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "a configured registry is authoritative and never falls back to a legacy profile" {
+  export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{"report_reader":{"database_privileges":["SELECT"]}}'
+  for profile in ro admin monitor undefined; do
+    run "$SCRIPT" --namespace mariadb-1 --database app_db --username svc --account-type "$profile" --json
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  done
+  export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{}'
+  run "$SCRIPT" --namespace mariadb-1 --username svc --account-type none --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.privileges | join(",")')" = USAGE ]
+  [ ! -e "${TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "invalid profile registries fail closed before cluster access" {
+  registries=(
+    '' 'null' '[]' '{} {}'
+    '{"Bad-Name":{"database_privileges":["SELECT"]}}'
+    '{"writer":{"database_privileges":"SELECT"}}'
+    '{"writer":{"global_privileges":[null]}}'
+    '{"writer":{"raw_sql":["SELECT"]}}'
+    '{"writer":{"database_privileges":["SELECT,INSERT"]}}'
+    '{"writer":{"database_privileges":["SELECT; DROP USER svc"]}}'
+    '{"writer":{"database_privileges":["SELECT\nINSERT"]}}'
+    '{"writer\n":{"database_privileges":["SELECT"]}}'
+    '{"none":{"database_privileges":["SELECT"]}}'
+  )
+  for registry in "${registries[@]}"; do
+    export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT="$registry"
+    run "$SCRIPT" --namespace mariadb-1 --username svc --account-type none --json
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+    [ "$(json_field '.mutation_applied')" = false ]
+    [ "$(json_field '.delivery_payload')" = null ]
+  done
+  [ ! -e "${TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "custom profile privileges still obey the SQL whitelist and scope rules" {
+  for privileges in '"ALL PRIVILEGES"' '"SUPER"' '"UNRECOGNIZED"'; do
+    export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT="{\"writer\":{\"database_privileges\":[$privileges]}}"
+    run "$SCRIPT" --namespace mariadb-1 --database app_db --username svc --account-type writer --json
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.reason_code')" = INVALID_INPUT ]
+  done
+  [ ! -e "${TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "grants-only dry-run plans no credential mutation and ignores password inputs" {
+  run "$SCRIPT" --namespace mariadb-1 --database app_db --username svc --if-exists update_grants \
+    --password-secret-name missing --password-length invalid --password-expire-mode interval --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = READY ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  [ "$(json_field '.password_expire_mode')" = null ]
+  [ "$(json_field '.validity_days')" = null ]
+  [ "$(json_field '[.sql_plan[] | select(test("^(CREATE|ALTER) USER|IDENTIFIED BY|PASSWORD EXPIRE"))] | length')" -eq 0 ]
+  [ "$(json_field '[.sql_plan[] | select(startswith("REVOKE"))] | length')" -eq 1 ]
+  [ ! -e "${TEST_TMPDIR}/kubectl.log" ]
+}
+
+@test "grants-only update replaces grants without reading generating or encrypting passwords" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT ALL PRIVILEGES ON *.* TO 'svc'@'%'"
+  export MARIADB_ACCOUNT_PROFILES_JSON_DEFAULT='{"app_reader":{"database_privileges":["SELECT"]}}'
+  export REAL_PYTHON3
+  REAL_PYTHON3="$(command -v python3)"
+  cat > "${TEST_TMPDIR}/bin/python3" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == - ]]; then
+  touch "${TEST_TMPDIR}/generator-called"
+  exit 99
+fi
+exec "$REAL_PYTHON3" "$@"
+STUB
+  chmod +x "${TEST_TMPDIR}/bin/python3"
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --account-type app_reader --if-exists update_grants \
+    --password-secret-name missing --password-delivery-mode encrypted_payload \
+    --password-expire-mode interval --validity-days invalid
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = GRANTS_UPDATED ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_GRANTS_UPDATED ]
+  [ "$(json_field '.mutation_applied')" = true ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  [ "$(json_field '.password_expire_mode')" = null ]
+  [ "$(json_field '.validity_days')" = null ]
+  assert_log_excludes '^(CREATE|ALTER|DROP) USER|IDENTIFIED BY|PASSWORD EXPIRE' "${TEST_TMPDIR}/sql.log"
+  grep -q '^REVOKE ALL PRIVILEGES, GRANT OPTION' "${TEST_TMPDIR}/sql.log"
+  grep -Fq 'GRANT SELECT ON `app\_db`.*' "${TEST_TMPDIR}/sql.log"
+  [ "$(grep -c '^SHOW CREATE USER' "${TEST_TMPDIR}/sql.log")" -eq 2 ]
+  assert_log_excludes '^get secret ' "${TEST_TMPDIR}/kubectl.log"
+  [ ! -e "${TEST_TMPDIR}/generator-called" ]
+  [ ! -e "${TEST_TMPDIR}/encrypted-input" ]
+  [[ "$output" != *existing-private-hash* ]]
+}
+
+@test "grants-only update is a verified no-op when the profile already matches" {
+  export ACCOUNT_COUNT=1
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants --password-secret-name missing
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = UNCHANGED ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_GRANTS_UNCHANGED ]
+  [ "$(json_field '.mutation_applied')" = false ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  [ "$(json_field '.sql_plan | length')" -eq 0 ]
+  assert_log_excludes '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+  assert_log_excludes '^get secret ' "${TEST_TMPDIR}/kubectl.log"
+}
+
+@test "grants-only update cannot create a missing account" {
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = ACCOUNT_NOT_FOUND ]
+  [ "$(json_field '.mutation_applied')" = false ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  [ "$(json_field '.sql_plan | length')" -eq 0 ]
+  assert_log_excludes '^(CREATE|ALTER|REVOKE|GRANT|SHOW PRIVILEGES)' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "grants-only updates block role and PROXY grants before any mutation" {
+  export ACCOUNT_COUNT=1
+  existing_grants=("GRANT app_role TO 'svc'@'%'" "GRANT PROXY ON 'other'@'%' TO 'svc'@'%'")
+  for grant in "${existing_grants[@]}"; do
+    export PREEXISTING_GRANTS="$grant"
+    run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants
+    [ "$status" -eq 1 ]
+    [ "$(json_field '.reason_code')" = UNSUPPORTED_EXISTING_GRANTS ]
+    [ "$(json_field '.mutation_applied')" = false ]
+    [ "$(json_field '.delivery_payload')" = null ]
+  done
+  assert_log_excludes '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "grants-only updates reject unsupported privileges and unreadable account state before revoking" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT INSERT ON *.* TO 'svc'@'%'" OMIT_PRIVILEGE=SELECT
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = UNSUPPORTED_PRIVILEGE ]
+  unset OMIT_PRIVILEGE
+  export SQL_FAIL_DEFINITION_BEFORE=1
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = SQL_VERIFY_FAILED ]
+  [ "$(json_field '.mutation_applied')" = false ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  assert_log_excludes '^(CREATE|ALTER|REVOKE|GRANT)' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "grants-only partial failures stay nonzero and never return authentication material" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT INSERT ON *.* TO 'svc'@'%'"
+  for failure in SQL_FAIL_REVOKE SQL_FAIL_GRANT SQL_FAIL_VERIFY VERIFY_MISMATCH SQL_FAIL_DEFINITION_AFTER ACCOUNT_DEFINITION_CHANGED; do
+    export "$failure=1"
+    rm -f "${TEST_TMPDIR}/mutation-applied"
+    run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants --result-file "${TEST_TMPDIR}/result.json"
+    [ "$status" -eq 2 ]
+    [ "$(json_field '.status')" = ERROR ]
+    if [[ "$failure" == SQL_FAIL_REVOKE ]]; then
+      [ "$(json_field '.mutation_applied')" = false ]
+    else
+      [ "$(json_field '.mutation_applied')" = true ]
+    fi
+    if [[ "$failure" == ACCOUNT_DEFINITION_CHANGED ]]; then
+      [ "$(json_field '.reason_code')" = ACCOUNT_STATE_CHANGED ]
+    fi
+    [ "$(json_field '.delivery_payload')" = null ]
+    [ "$(jq -r '.delivery_payload' "${TEST_TMPDIR}/result.json")" = null ]
+    [[ "$output" != *existing-private-hash* && "$output" != *changed-private-hash* && "$output" != *root-pass* ]]
+    unset "$failure"
+  done
+}
+
+@test "grants-only update to none removes direct grants and preserves the account" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT SELECT ON *.* TO 'svc'@'%'"
+  export EXPECTED_GRANTS="GRANT USAGE ON *.* TO 'svc'@'%'"
+  run "$SCRIPT" --namespace mariadb-1 --mdb mariadb --username svc --account-type none --if-exists update_grants --dry-run false --confirm true --json
+  [ "$status" -eq 0 ]
+  [ "$(json_field '.status')" = GRANTS_UPDATED ]
+  [ "$(json_field '.delivery_payload')" = null ]
+  grep -q '^REVOKE' "${TEST_TMPDIR}/sql.log"
+  assert_log_excludes '^(CREATE|ALTER|DROP) USER|^GRANT' "${TEST_TMPDIR}/sql.log"
+}
+
+@test "GRANT cannot silently recreate an account removed during an update" {
+  export ACCOUNT_COUNT=1 PREEXISTING_GRANTS="GRANT INSERT ON *.* TO 'svc'@'%'"
+  export ACCOUNT_DISAPPEARS_BEFORE_GRANT=1
+  run "$SCRIPT" "${ACTUAL_ARGS[@]}" --if-exists update_grants
+  [ "$status" -eq 2 ]
+  [ "$(json_field '.reason_code')" = SQL_FAILED ]
+  [ "$(json_field '.mutation_applied')" = true ]
+  grep -q '^SET SESSION sql_mode = .*NO_AUTO_CREATE_USER' "${TEST_TMPDIR}/sql.log"
+  [ ! -e "${TEST_TMPDIR}/implicit-account-created" ]
+  [ "$(json_field '.delivery_payload')" = null ]
 }

@@ -323,7 +323,7 @@ tasks:
   mariadb_sanity_check: *mariadb_sanity_check_task
   create-account:
     script: mariadb/create-account.sh
-    description: "Create, skip, or recreate a MariaDB account using deployment-defined profiles"
+    description: "Create accounts or update grants using deployment-defined privilege profiles"
     timeout: 5m
     allowed_groups: ["system:serviceaccounts"]
     input:
@@ -365,13 +365,13 @@ tasks:
         required: false
         type: string
         default: ro
-        pattern: '^(admin|ro|monitor|none)$'
+        pattern: '^[a-z][a-z0-9_-]{0,62}$'
       - name: if_exists
         env: IF_EXISTS
         required: false
         type: string
         default: skip
-        pattern: '^(error|skip|recreate)$'
+        pattern: '^(error|skip|recreate|update_grants)$'
       - name: password_length
         env: PASSWORD_LENGTH
         required: false

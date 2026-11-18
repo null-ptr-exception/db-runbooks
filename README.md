@@ -252,9 +252,10 @@ jq -n --arg ns "$DB_NAMESPACE" '{"namespace": $ns, "status": "done"}' \
 
 ### Iterating
 
-Each suite's `setup_suite.bash` rebuilds and pushes the aqsh image to the
-local registry (`localhost:5005/db-runbooks:latest`) on every run, so editing
-a script or task YAML just means re-running `bats tests/<db>/`.
+Each suite's `setup_suite.bash` rebuilds the aqsh image and loads it directly
+into both Kind clusters as `localhost:5005/db-runbooks:latest` on every run,
+so editing a script or task YAML just means re-running `bats tests/<db>/`.
+These test images omit provenance attestations so Kind can import them.
 
 ---
 

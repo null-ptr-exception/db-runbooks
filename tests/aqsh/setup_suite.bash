@@ -24,9 +24,10 @@ setup_suite() {
   wait_ns_gone kind-cluster-a aqsh-test
   wait_ns_gone kind-cluster-b aqsh-test
 
-  # Build aqsh image and push to local registry
-  docker build -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
-  docker push localhost:5005/db-runbooks:latest
+  # Preload the test image; Kind imports cannot unpack provenance attestations.
+  docker build --provenance=false -t localhost:5005/db-runbooks:latest "${ROOT_DIR}"
+  kind load docker-image localhost:5005/db-runbooks:latest --name cluster-a
+  kind load docker-image localhost:5005/db-runbooks:latest --name cluster-b
 
   local HELMFILE="${ROOT_DIR}/tests/aqsh/helmfile.yaml"
 

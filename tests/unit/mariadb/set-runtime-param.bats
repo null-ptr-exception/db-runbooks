@@ -474,7 +474,7 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(grep -c 'INSERT INTO' "$MOCK_SQL_LOG")" -eq 1 ]
   grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$MOCK_SQL_LOG"
-  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND flag=2" "$MOCK_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'72657472792d7461736b' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND flag=2" "$MOCK_SQL_LOG"
   grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
 }
 
@@ -498,4 +498,16 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 1 ]
   [ "$(field '.partial')" = true ]
   grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+}
+
+@test "rejected nonempty parameters report Failed without mutation" {
+  for param in foo max_connection; do
+    run_srp DRY_RUN=false RUNTIME_PARAM="$param" RUNTIME_VALUE=1 JOB_REPORT_DATABASE=operations JOB_REPORT_TABLE=job_history
+    [ "$(field '.reason_code')" = PARAM_NOT_ALLOWED ]
+    [ "$(field '.changed')" = false ]
+    grep -q "status='Failed',flag=4" "$MOCK_SQL_LOG"
+    name_hex="$(printf 'set-runtime-param/%s' "$param" | od -An -v -tx1 | tr -d ' \n')"
+    grep -q "X'$name_hex'" "$MOCK_SQL_LOG"
+    if grep -q '^SET GLOBAL' "$MOCK_SQL_LOG"; then return 1; fi
+  done
 }

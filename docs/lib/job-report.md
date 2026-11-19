@@ -1,8 +1,9 @@
 # Optional MariaDB job reporting
 
 `lib/job-report.sh` records task execution in an existing table on the target
-MariaDB primary. The first consumer is `set-runtime-param` for supported
-runtime parameters. No schema migration or table creation is performed.
+MariaDB primary. The first consumer is `set-runtime-param` for nonempty
+runtime parameter requests, including rejected parameter names. No schema
+migration or table creation is performed.
 
 The runbook image also supports deploy-time `job_report` metadata in task YAML.
 This lets an existing task use the common reporting wrapper without editing its
@@ -123,8 +124,11 @@ inputs may omit `env`. Invalid input definitions identify the task and field in 
 printing filter values.
 
 The shipped `set-runtime-param` configuration uses `name_from: param` and
-`require_nonempty: [param]`, without an exact parameter filter. All supported
-parameter requests can report; listing is excluded because `param` is empty.
+`require_nonempty: [param]`, without an exact parameter filter. All nonempty
+parameter requests can report, including unknown names or typos rejected with
+`PARAM_NOT_ALLOWED`; those requests record `Failed` without mutating parameters.
+This is request-outcome reporting, not proof that a parameter was accepted.
+Listing is excluded because `param` is empty.
 Existing deployments that want to retain a parameter-specific opt-in can keep
 the exact `when` filter above. Exact filters and nonempty requirements are ANDed.
 Results with top-level/nested `dry_run` or `dryRun` set to true skip reporting,
@@ -215,8 +219,9 @@ finish calls do not write again, and reporting SQL output is kept out of task
 JSON. SQL failures produce a generic warning without credentials or query text;
 they do not change the task's original result or retry its operation.
 
-`set-runtime-param` opts in for real requests for all supported parameters
-(including decreases). The recorded `job_name` is optional input `job_name` /
+`set-runtime-param` opts in for real requests with nonempty parameter names
+(including decreases and rejected unknown names). The recorded `job_name` is
+optional input `job_name` /
 `JOB_REPORT_NAME`, or `set-runtime-param/<param>` when omitted. Listing and
 dry-run do not report. Compared with the previous `max_connections`-only
 configuration, default names now include the task prefix; pass an explicit
@@ -256,6 +261,9 @@ operations itself.
 The same identity handling applies to bundled task YAML and deployment-mounted
 YAML loaded through `AQSH_TASKS_CONFIG` or its includes. Custom scripts must still
 follow the script location, executable permission, and result contracts above.
+
+See the [breaking-change release notes](../release-notes/2026-11-job-report-retry-identity.md)
+for the upgrade order and default `job_name` migration.
 
 Before upgrading a reporting deployment, migrate its existing table. The names
 below are examples; substitute the configured database and table:

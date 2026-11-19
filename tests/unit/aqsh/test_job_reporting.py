@@ -637,7 +637,7 @@ os.execv(script,[script])
         self.assertEqual(sum('INSERT INTO' in r['query'] for r in rows), 3)
         finishes = [r['query'] for r in rows if "status='Failed',flag=4" in r['query']]
         self.assertEqual(len(finishes), 3)
-        identity = "WHERE BINARY task_id=BINARY CONVERT(X'65787465726e616c2d72657472792d6964' USING utf8mb4)"
+        identity = "WHERE task_id=CONVERT(CONVERT(X'65787465726e616c2d72657472792d6964' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'65787465726e616c2d72657472792d6964' USING utf8mb4)"
         self.assertTrue(all(identity in query for query in finishes))
         self.assertTrue(all('ON DUPLICATE KEY UPDATE task_id=task_id' in r['query']
                             for r in rows if 'INSERT INTO' in r['query']))
@@ -714,7 +714,7 @@ class IntegrationTests(DestinationFixture):
         self.assertEqual(sum('INSERT INTO' in row['query'] for row in rows), 1)
         self.assertIn('ON DUPLICATE KEY UPDATE task_id=task_id',
                       next(row['query'] for row in rows if 'INSERT INTO' in row['query']))
-        self.assertIn("WHERE BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4)", rows[-1]['query'])
+        self.assertIn("WHERE task_id=CONVERT(CONVERT(X'72657472792d7461736b' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4)", rows[-1]['query'])
         self.assertIn("status='Finish',flag=1", rows[-1]['query'])
 
     def test_compiled_runtime_preserves_success_when_retry_schema_is_missing(self):
@@ -730,6 +730,18 @@ class IntegrationTests(DestinationFixture):
         insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
         self.assertIn("X'" + 'set-runtime-param/max_statement_time'.encode().hex() + "'", insert)
         self.assertIn("status='Finish',flag=1", rows[-1]['query'])
+
+    def test_rejected_nonempty_parameter_reports_failed_without_mutation(self):
+        for param in ('foo', 'max_connection'):
+            with self.subTest(param=param):
+                rows = self.run_runtime(RUNTIME_PARAM=param, expected_reason='PARAM_NOT_ALLOWED')
+                self.assertEqual(sum('INSERT INTO' in row['query'] for row in rows), 1)
+                insert = next(row['query'] for row in rows if 'INSERT INTO' in row['query'])
+                self.assertIn("X'" + f'set-runtime-param/{param}'.encode().hex() + "'", insert)
+                self.assertIn("status='Failed',flag=4", rows[-1]['query'])
+                self.assertFalse(any(row['query'].startswith('SET GLOBAL') for row in rows))
+                self.assertFalse(json.loads((self.root / 'public-result').read_text())['changed'])
+                (self.root / 'sql').unlink()
 
     def test_runtime_listing_does_not_report_even_without_dry_run(self):
         rows = self.run_runtime(RUNTIME_PARAM='', expected_reason='SRP_LIST')

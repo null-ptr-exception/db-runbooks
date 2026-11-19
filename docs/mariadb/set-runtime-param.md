@@ -92,8 +92,10 @@ non-numeric params (`slow_query_log`, `read_only`, …).
 
 ## Optional execution reporting
 
-Real requests for all supported parameters can record their outcome in an existing
-MariaDB table. Set `JOB_REPORT_DATABASE` and `JOB_REPORT_TABLE` in the deployment's
+Real requests with nonempty parameter names can record their outcome in an existing
+MariaDB table. Unknown names and typos rejected with `PARAM_NOT_ALLOWED` also
+record `Failed`, without changing any runtime parameter. Set `JOB_REPORT_DATABASE`
+and `JOB_REPORT_TABLE` in the deployment's
 `mariadb.env` to enable reporting. Optional task input `job_name` (`JOB_REPORT_NAME`)
 overrides the recorded name; when omitted it defaults to
 `set-runtime-param/<param>` (for example, `set-runtime-param/max_connections`).

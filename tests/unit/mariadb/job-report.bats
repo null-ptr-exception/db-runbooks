@@ -288,8 +288,8 @@ DRIVER
   [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 3 ]
   [ "$(grep -c "status='Failed',flag=4" "$REPORT_SQL_LOG")" -eq 3 ]
   grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$REPORT_SQL_LOG"
-  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag IN (2,4)" "$REPORT_SQL_LOG"
-  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag=2 AND end_time IS NULL" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag IN (2,4)" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag=2 AND end_time IS NULL" "$REPORT_SQL_LOG"
   if grep -q 'SET start_time=' "$REPORT_SQL_LOG"; then return 1; fi
 }
 
@@ -298,7 +298,7 @@ DRIVER
   [ "$status" -eq 0 ]
   [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 1 ]
   [ "$(grep -c "status='Finish',flag=1" "$REPORT_SQL_LOG")" -eq 1 ]
-  grep -q "WHERE BINARY task_id=BINARY CONVERT(X'7461736b2731' USING utf8mb4) AND flag=2" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2731' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2731' USING utf8mb4) AND flag=2" "$REPORT_SQL_LOG"
   if grep -q "task'1" "$REPORT_SQL_LOG"; then return 1; fi
 }
 

@@ -248,8 +248,14 @@ _report_sql() {
 _report_attempt() (
   export AQSH_TASK_ID="$1" JOB_REPORT_DATABASE=job_report_e2e JOB_REPORT_TABLE=executions
   export JOB_REPORT_CONFIG_FILE=/dev/null
+  local finish_fault="${3:-}"
   source "${BATS_TEST_DIRNAME}/../../aqsh-tasks/lib/job-report.sh"
-  mariadb_sql() { _report_sql "$3"; }
+  mariadb_sql() {
+    if [[ -n "$finish_fault" && "$3" == *"UPDATE "*" SET end_time=NOW()"* ]]; then
+      return "$finish_fault"
+    fi
+    _report_sql "$3"
+  }
   job_report_enable retry-summary
   trap 'job_report_exit "$?"' EXIT
   job_report_start "$REPORT_PRIMARY" unused
@@ -271,6 +277,20 @@ _report_attempt() (
   _report_attempt "$id" failure
   assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id='$id'")" 1
   assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Finish
+}
+
+@test "failed retry completion preserves the last recorded failure" {
+  local id="retry-write-failed-${BATS_TEST_NUMBER}" before fault
+  _report_attempt "$id" failure
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Failed
+  before="$(_report_sql "SELECT CONCAT_WS('|',start_time,end_time,status,flag,host,message) FROM job_report_e2e.executions WHERE task_id='$id'")"
+  for fault in 1 124; do
+    _report_attempt "$id" success "$fault"
+    assert_equal "$(_report_sql "SELECT CONCAT_WS('|',start_time,end_time,status,flag,host,message) FROM job_report_e2e.executions WHERE task_id='$id'")" "$before"
+  done
+  _report_attempt "$id" success
+  assert_equal "$(_report_sql "SELECT status FROM job_report_e2e.executions WHERE task_id='$id'")" Finish
+  assert_equal "$(_report_sql "SELECT COUNT(*) FROM job_report_e2e.executions WHERE task_id='$id'")" 1
 }
 
 @test "report IDs isolate tasks with the same name and host" {

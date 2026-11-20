@@ -474,7 +474,7 @@ field() { jq -r "$1" "${RESULT}"; }
   [ "$status" -eq 0 ]
   [ "$(grep -c 'INSERT INTO' "$MOCK_SQL_LOG")" -eq 1 ]
   grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$MOCK_SQL_LOG"
-  grep -q "WHERE task_id=CONVERT(CONVERT(X'72657472792d7461736b' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND flag=2" "$MOCK_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'72657472792d7461736b' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'72657472792d7461736b' USING utf8mb4) AND (flag=4 OR (flag=2 AND end_time IS NULL))" "$MOCK_SQL_LOG"
   grep -q "status='Finish',flag=1" "$MOCK_SQL_LOG"
 }
 

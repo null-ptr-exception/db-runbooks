@@ -288,8 +288,8 @@ DRIVER
   [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 3 ]
   [ "$(grep -c "status='Failed',flag=4" "$REPORT_SQL_LOG")" -eq 3 ]
   grep -q 'ON DUPLICATE KEY UPDATE task_id=task_id' "$REPORT_SQL_LOG"
-  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag IN (2,4)" "$REPORT_SQL_LOG"
-  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND flag=2 AND end_time IS NULL" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND (flag IN (1,4) OR (flag=2 AND end_time IS NULL))" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2d31' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2d31' USING utf8mb4) AND (flag=4 OR (flag=2 AND end_time IS NULL))" "$REPORT_SQL_LOG"
   if grep -q 'SET start_time=' "$REPORT_SQL_LOG"; then return 1; fi
 }
 
@@ -298,7 +298,7 @@ DRIVER
   [ "$status" -eq 0 ]
   [ "$(grep -c 'INSERT INTO' "$REPORT_SQL_LOG")" -eq 1 ]
   [ "$(grep -c "status='Finish',flag=1" "$REPORT_SQL_LOG")" -eq 1 ]
-  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2731' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2731' USING utf8mb4) AND flag=2" "$REPORT_SQL_LOG"
+  grep -q "WHERE task_id=CONVERT(CONVERT(X'7461736b2731' USING utf8mb4) USING ascii) AND BINARY task_id=BINARY CONVERT(X'7461736b2731' USING utf8mb4) AND (flag=4 OR (flag=2 AND end_time IS NULL))" "$REPORT_SQL_LOG"
   if grep -q "task'1" "$REPORT_SQL_LOG"; then return 1; fi
 }
 
@@ -309,11 +309,31 @@ DRIVER
   if grep -q "status='Failed',flag=4" "$REPORT_SQL_LOG"; then return 1; fi
 }
 
-@test "already successful task IDs are skipped without warning or another finish" {
+@test "already successful task IDs warn and skip without another finish" {
   run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' FAIL_STAGE=finished bash "$REPORT_DRIVER"
   [ "$status" -eq 0 ]
-  [[ "$output" == $'task-result\ncleaned' ]]
+  [[ "$output" == *"task ID already has a finished record"*task-result*cleaned* ]]
   [ "$(grep -c "status='Finish',flag=1" "$REPORT_SQL_LOG")" -eq 0 ]
-  grep -q "flag IN (2,4)" "$REPORT_SQL_LOG"
+  grep -q "flag IN (1,4)" "$REPORT_SQL_LOG"
   grep -q "IF(flag=1,'finished'" "$REPORT_SQL_LOG"
+}
+
+@test "retry completion failure never clears the last outcome at start" {
+  for stage in failure timeout; do
+    rm -f "$REPORT_SQL_LOG"
+    if [[ "$stage" == failure ]]; then
+      run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' FAIL_STAGE=update bash "$REPORT_DRIVER"
+    else
+      run env AQSH_TASK_ID=task-1 LENGTHS='80 80 255 16 191 1' HANG_STAGE=update JOB_REPORT_SQL_TIMEOUT=1 bash "$REPORT_DRIVER"
+    fi
+    [ "$status" -eq 0 ]
+    [[ "$output" == *job-report:*task-result*cleaned* ]]
+    # The start statement may only insert a new row or read the saved outcome.
+    start_sql="$(sed -n '2p' "$REPORT_SQL_LOG")"
+    [[ "$start_sql" == *"ON DUPLICATE KEY UPDATE task_id=task_id; SELECT"* ]]
+    [[ "$start_sql" != *"SET end_time="* && "$start_sql" != *"message='' WHERE"* ]]
+    [ "$(grep -c 'UPDATE .* SET end_time=' "$REPORT_SQL_LOG")" -eq 1 ]
+    grep -q "AND (flag=4 OR (flag=2 AND end_time IS NULL))" "$REPORT_SQL_LOG"
+    grep -q "host=CONVERT(X'64622d30' USING utf8mb4) WHERE" "$REPORT_SQL_LOG"
+  done
 }

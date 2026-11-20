@@ -284,13 +284,27 @@ The task's original outcome is preserved. Apply the migration before rolling out
 the new image; no automatic DDL is performed.
 
 Across retries, the time range includes the wait between reporting attempts.
-Each retry reuses the first `start_time`, clears the previous failure summary,
-and records its primary pod and outcome in the same row. `Finish` is terminal:
-redelivery of an already successful task does not reopen it. Failed rows may be
-reopened by subsequent attempts. The available aqsh environment does not expose
-retry exhaustion: a `Failed` row between retries is the latest attempt outcome,
+Each retry reuses the first `start_time` and leaves the previous status, end time,
+message, and host intact until its completion UPDATE commits all four together.
+If completion does not commit, the last recorded failure remains intact. A lost
+acknowledgement or timeout may leave either the prior outcome or the newly
+committed outcome, but does not reset it to an empty `Start`. A first attempt
+without a completed report can still leave `Start`. `Finish` is terminal:
+redelivery of an already successful task skips reporting with a warning and does
+not reopen it. The available aqsh environment does not expose retry exhaustion:
+a `Failed` row between retries is the latest persisted attempt outcome,
 not proof that the whole task has exhausted its retries. Use the execution API
 for queue/retry state. This table is a task summary, not an attempt history.
+
+aqsh 0.5.0 submits tasks without a custom ID, using asynq v0.25.1's default
+random UUIDv4 (`uuid.NewString()`), and passes that ID to `AQSH_TASK_ID`.
+This is not a Redis counter and does not restart its sequence on a Redis reset.
+See [aqsh submission](https://github.com/null-ptr-exception/aqsh/blob/0.5.0/internal/api/api.go),
+[asynq ID allocation](https://github.com/hibiken/asynq/blob/v0.25.1/client.go), and
+[UUID generation](https://github.com/google/uuid/blob/v1.6.0/version4.go).
+Custom producers and standalone callers supplying their own IDs must ensure
+uniqueness across every deployment writing to the same table; a finished-ID
+warning cannot distinguish intended redelivery from an accidental ID reuse.
 
 Deduplication is scoped to one destination table. Retries must resolve the same
 MariaDB database/table; separate databases cannot share this identity. Sequential

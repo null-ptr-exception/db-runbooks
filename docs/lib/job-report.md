@@ -1,8 +1,9 @@
 # Optional MariaDB job reporting
 
 `lib/job-report.sh` records task execution in an existing table on the target
-MariaDB primary. The first consumer is `set-runtime-param` for
-`max_connections`. No schema migration or table creation is performed.
+MariaDB primary. The first consumer is `set-runtime-param` for nonempty
+runtime parameter requests, including rejected parameter names. No schema
+migration or table creation is performed.
 
 The runbook image also supports deploy-time `job_report` metadata in task YAML.
 This lets an existing task use the common reporting wrapper without editing its
@@ -80,10 +81,31 @@ task inputs. Database/table names stay in `mariadb.env`.
 An enabled task automatically gets the optional string input `job_name`, mapped
 to `JOB_REPORT_NAME`. An existing compatible declaration is reused, never
 duplicated. A nonempty per-call name overrides the YAML name; omitted/empty names
-fall back to it. If the existing input has a nonempty `default`, aqsh supplies
-that value and it takes precedence too; prefer `job_report.name` for the static
-fallback and leave the input default empty. This is caller intent (e.g. different incident/change labels
-within the same deployment), rather than a deployment location or credential.
+fall back to the configured static or dynamic name. If the existing input has
+a nonempty `default`, aqsh supplies that value and it takes precedence too;
+prefer `job_report.name` for the static fallback and leave the input default
+empty. This is caller intent (e.g. different incident/change labels within the same deployment), rather than a deployment location or credential.
+
+Optional `name_from` appends a declared input's value to `name`, separated by `/`.
+For example, the following configuration generates
+`set-runtime-param/max_connections` or `set-runtime-param/wait_timeout`:
+
+```yaml
+job_report:
+  enabled: true
+  name: set-runtime-param
+  name_from: param
+  require_nonempty: [param]
+  timeout: 30s
+```
+
+`require_nonempty` lists declared input names whose mapped environment values
+must be present and nonempty after trimming whitespace. All listed conditions
+must hold, even when `job_name` is supplied. With an empty `name_from` value and
+no matching nonempty requirement, the static `name` remains the fallback.
+A nonempty per-call `job_name` overrides the complete derived name, not just its
+prefix. These settings do not introduce new task inputs. They can be used by
+bundled tasks and deployment-mounted YAML/scripts alike.
 
 Optional `when` filters match declared input names against **string** values:
 
@@ -96,14 +118,21 @@ job_report:
   timeout: 30s
 ```
 
-Each input referenced by `when` must declare a nonempty string `env`, since aqsh
-exports only inputs with that mapping. Other inputs may omit `env`. Invalid
-input definitions identify the task and field in the startup error without
+Each input referenced by `when`, `name_from`, or `require_nonempty` must declare
+a nonempty string `env`, since aqsh exports only inputs with that mapping. Other
+inputs may omit `env`. Invalid input definitions identify the task and field in the startup error without
 printing filter values.
 
-This is the `set-runtime-param` configuration shipped in this image. Listing and
-other parameters do not report. Results with top-level/nested `dry_run` or
-`dryRun` set to true skip reporting, including results describing planned changes.
+The shipped `set-runtime-param` configuration uses `name_from: param` and
+`require_nonempty: [param]`, without an exact parameter filter. All nonempty
+parameter requests can report, including unknown names or typos rejected with
+`PARAM_NOT_ALLOWED`; those requests record `Failed` without mutating parameters.
+This is request-outcome reporting, not proof that a parameter was accepted.
+Listing is excluded because `param` is empty.
+Existing deployments that want to retain a parameter-specific opt-in can keep
+the exact `when` filter above. Exact filters and nonempty requirements are ANDed.
+Results with top-level/nested `dry_run` or `dryRun` set to true skip reporting,
+including results describing planned changes.
 An explicit false result flag or an actual `changed: true` result takes precedence
 over the request's dry-run spelling, so real and partial mutations are not hidden.
 The declared dry-run input is a fallback only when the result has no such signal.
@@ -166,7 +195,9 @@ below still apply.
 
 Source this library after `mariadb.sh`. Each task opts in explicitly; leaving out
 `job_report_enable` disables reporting even when the deployment is configured.
-The name argument is optional (defaults to the script filename). Tasks may expose an optional `job_name` input that overrides it; `set-runtime-param` falls back to the parameter name.
+The name argument is optional (defaults to the script filename). Tasks may expose
+an optional `job_name` input that overrides it; `set-runtime-param` defaults to
+`set-runtime-param/<param>`.
 
 ```bash
 source "${LIB_DIR}/job-report.sh"
@@ -188,10 +219,15 @@ finish calls do not write again, and reporting SQL output is kept out of task
 JSON. SQL failures produce a generic warning without credentials or query text;
 they do not change the task's original result or retry its operation.
 
-`set-runtime-param` opts in for real `max_connections` requests (including
-decreases). The recorded `job_name` is optional input `job_name` /
-`JOB_REPORT_NAME`, or the parameter name when omitted. Listing, dry-run, and
-other parameters do not report.
+`set-runtime-param` opts in for real requests with nonempty parameter names
+(including decreases and rejected unknown names). The recorded `job_name` is
+optional input `job_name` /
+`JOB_REPORT_NAME`, or `set-runtime-param/<param>` when omitted. Listing and
+dry-run do not report. Compared with the previous `max_connections`-only
+configuration, default names now include the task prefix; pass an explicit
+`job_name` to preserve a caller-selected historical label. Ensure the existing
+`job_name` column can hold the longer prefixed names; oversized identities are
+skipped with a warning rather than truncated.
 It defers both Start and Finish until the parameter operation and its read-back
 attempts have completed, or the request has been rejected. No report SQL runs
 before the mutation or between its per-pod apply/read-back steps. Once credentials are
@@ -213,10 +249,72 @@ Direct invocations retain this behavior. Under the YAML wrapper,
 `JOB_REPORT_WRAPPED=true` suppresses the script's native reporting to avoid a
 second row; the common wrapper owns the reporting phase and result publication.
 
-## Identity and incomplete records
+## Retry identity and schema migration
 
-No ID column is required. The deployment must serialize operations in each
-namespace and keep records in that target database. Completion matches the saved
+When aqsh supplies `AQSH_TASK_ID`, reporting uses that stable ID across retries.
+For example, `max_retry: 2` can execute three attempts, but three failures leave
+one `Failed` row; failure followed by success updates that row to `Finish`.
+A new submission has a different ID and creates a separate row. This applies to
+both YAML reporting and native `set-runtime-param` reporting, without new task
+inputs. `max_retry` still controls operation retries; reporting does not retry
+operations itself.
+The same identity handling applies to bundled task YAML and deployment-mounted
+YAML loaded through `AQSH_TASKS_CONFIG` or its includes. Custom scripts must still
+follow the script location, executable permission, and result contracts above.
+
+See the [breaking-change release notes](../release-notes/2026-11-job-report-retry-identity.md)
+for the upgrade order and default `job_name` migration.
+
+Before upgrading a reporting deployment, migrate its existing table. The names
+below are examples; substitute the configured database and table:
+
+```sql
+ALTER TABLE operations.job_history
+  ADD COLUMN task_id VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin NULL,
+  ADD UNIQUE KEY job_history_task_id (task_id);
+```
+
+The nullable column leaves historical rows and standalone writes valid. Existing
+rows are not merged or backfilled. The task ID column must be `VARCHAR` with
+`ascii_bin` collation and a full-column, single-column unique index; prefix,
+composite, and nonunique indexes are insufficient. Reporting validates the
+schema and ID length before writing. An incompatible or unmigrated table logs a
+warning and skips reporting for aqsh tasks rather than creating duplicate rows.
+The task's original outcome is preserved. Apply the migration before rolling out
+the new image; no automatic DDL is performed.
+
+Across retries, the time range includes the wait between reporting attempts.
+Each retry reuses the first `start_time` and leaves the previous status, end time,
+message, and host intact until its completion UPDATE commits all four together.
+If completion does not commit, the last recorded failure remains intact. A lost
+acknowledgement or timeout may leave either the prior outcome or the newly
+committed outcome, but does not reset it to an empty `Start`. A first attempt
+without a completed report can still leave `Start`. `Finish` is terminal:
+redelivery of an already successful task skips reporting with a warning and does
+not reopen it. The available aqsh environment does not expose retry exhaustion:
+a `Failed` row between retries is the latest persisted attempt outcome,
+not proof that the whole task has exhausted its retries. Use the execution API
+for queue/retry state. This table is a task summary, not an attempt history.
+
+aqsh 0.5.0 submits tasks without a custom ID, using asynq v0.25.1's default
+random UUIDv4 (`uuid.NewString()`), and passes that ID to `AQSH_TASK_ID`.
+This is not a Redis counter and does not restart its sequence on a Redis reset.
+See [aqsh submission](https://github.com/null-ptr-exception/aqsh/blob/0.5.0/internal/api/api.go),
+[asynq ID allocation](https://github.com/hibiken/asynq/blob/v0.25.1/client.go), and
+[UUID generation](https://github.com/google/uuid/blob/v1.6.0/version4.go).
+Custom producers and standalone callers supplying their own IDs must ensure
+uniqueness across every deployment writing to the same table; a finished-ID
+warning cannot distinguish intended redelivery from an accidental ID reuse.
+
+Deduplication is scoped to one destination table. Retries must resolve the same
+MariaDB database/table; separate databases cannot share this identity. Sequential
+retries are supported; this is not fencing for concurrent executions of the same
+task ID. Changing the reporting name does not create a new row for that ID.
+
+## Standalone identity and incomplete records
+
+Without `AQSH_TASK_ID`, no ID column is required. The deployment must serialize
+operations in each namespace and keep records in that target database. Completion matches the saved
 `job_name + host + start_time` (case-sensitive identities) and only transitions
 an unfinished `flag=2` row. Completed rows are not overwritten by a later run in
 the same second. An unfinished collision in the same DB second skips the new

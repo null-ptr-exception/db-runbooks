@@ -107,9 +107,9 @@ tasks:
     script: mariadb/set-runtime-param.sh
     job_report:
       enabled: true
-      name: max_connections
-      when:
-        param: max_connections
+      name: set-runtime-param
+      name_from: param
+      require_nonempty: [param]
       timeout: 30s
     description: "Emergency online override of a MariaDB runtime parameter via SET GLOBAL (AWS RDS ModifyDBParameterGroup, dynamic). EPHEMERAL — reverts on restart; durable changes go through a config PR. Omit param to list supported params."
     timeout: 5m
